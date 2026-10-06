@@ -106,7 +106,8 @@ jobs:
           version: '6.8.3'
           arch: win64_msvc2022_64
           cache: true
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: dependencies
         with:
           path: vcpkg-cache
           key: windows-vcpkg-noqt-${{ hashFiles('vcpkg.json') }}
@@ -123,6 +124,12 @@ jobs:
       - name: Configure (ASIO enabled; prebuilt Qt SDK)
         shell: pwsh
         run: cmake -S . -B build -A x64 "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON "-DCMAKE_PREFIX_PATH=$env:QT_ROOT_DIR"
+      - name: Cache built dependencies before compiling the app
+        if: steps.dependencies.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg-cache
+          key: windows-vcpkg-noqt-${{ hashFiles('vcpkg.json') }}
       - run: cmake --build build --config Release --parallel 4
       - name: Tests
         shell: pwsh
@@ -140,7 +147,7 @@ jobs:
           Copy-Item "$env:QT_ROOT_DIR/plugins/platforms/qoffscreen.dll" $platformPlugin.Directory.FullName
           $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
           $vsPath = & $vswhere -latest -products '*' -property installationPath
-          $runtime = Get-ChildItem "$vsPath/VC/Redist/MSVC/*/x64/Microsoft.VC143.CRT" -Directory | Sort-Object FullName -Descending | Select-Object -First 1
+          $runtime = Get-Item "$vsPath/VC/Redist/MSVC/*/x64/Microsoft.VC143.CRT" | Sort-Object FullName -Descending | Select-Object -First 1
           if (!$runtime) { throw 'MSVC runtime directory not found' }
           Copy-Item "$($runtime.FullName)/*.dll" dist/bin/
           Copy-Item packaging/README.txt,README.md dist/
