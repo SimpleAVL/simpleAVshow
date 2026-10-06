@@ -159,6 +159,37 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!(image = reader.imageAt(.2)).isNull(), 3000);
         QVERIFY(image.pixelColor(100, 100).red() > 200); QVERIFY(reader.error().isEmpty());
     }
+    void videoScalingKeepsTheEntireFrame_data() {
+        QTest::addColumn<QSize>("sourceSize");
+        QTest::addColumn<QSize>("maximum");
+        QTest::addColumn<QSize>("expectedSize");
+        QTest::newRow("4K to 1080p") << QSize(3840, 2160) << QSize(1920, 1080) << QSize(1920, 1080);
+        QTest::newRow("width limited") << QSize(640, 360) << QSize(320, 360) << QSize(320, 180);
+        QTest::newRow("height limited") << QSize(640, 360) << QSize(640, 180) << QSize(320, 180);
+        QTest::newRow("native size") << QSize(320, 180) << QSize(1920, 1080) << QSize(320, 180);
+    }
+    void videoScalingKeepsTheEntireFrame() {
+        QFETCH(QSize, sourceSize); QFETCH(QSize, maximum); QFETCH(QSize, expectedSize);
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg CLI is unavailable for fixture generation");
+        QTemporaryDir dir; QVERIFY(dir.isValid()); const QString file = dir.filePath("top-red-bottom-blue.mkv");
+        QProcess process;
+        process.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+            QString("color=red:s=%1x%2:r=2:d=1,drawbox=x=0:y=ih/2:w=iw:h=ih/2:color=blue:t=fill").arg(sourceSize.width()).arg(sourceSize.height()),
+            "-c:v", "ffv1", file});
+        QVERIFY(process.waitForFinished(15000)); QCOMPARE(process.exitCode(), 0);
+        VideoReader reader(file, maximum); QImage image;
+        for (double time : {0., .5, 0.}) {
+            QTRY_VERIFY_WITH_TIMEOUT(!(image = reader.imageAt(time)).isNull(), 3000);
+            QCOMPARE(image.size(), expectedSize);
+            for (int x : {image.width() / 4, 3 * image.width() / 4}) {
+                const QColor top = image.pixelColor(x, image.height() / 4);
+                const QColor bottom = image.pixelColor(x, 3 * image.height() / 4);
+                QVERIFY(top.red() > 200 && top.blue() < 30); QCOMPARE(top.alpha(), 255);
+                QVERIFY(bottom.blue() > 200 && bottom.red() < 30); QCOMPARE(bottom.alpha(), 255);
+            }
+        }
+        QVERIFY(reader.error().isEmpty());
+    }
     void embeddedAudioKeepsItsContainerOffset() {
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
         QTemporaryDir dir; const QString file = dir.filePath("offset.mkv"); QProcess process;

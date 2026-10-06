@@ -235,7 +235,8 @@ void VideoReader::run() {
                     static_cast<AVPixelFormat>(input.frame->format), image.width(), image.height(), AV_PIX_FMT_RGBA, SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
                 if (!input.scaler) throw std::runtime_error("Cannot convert video pixels");
                 unsigned char* dest[] = {image.bits()}; int strides[] = {static_cast<int>(image.bytesPerLine())};
-                sws_scale(input.scaler, input.frame->data, input.frame->linesize, 0, image.height(), dest, strides);
+                // The slice height counts source rows, even when the output is downscaled.
+                checked(sws_scale(input.scaler, input.frame->data, input.frame->linesize, 0, input.frame->height, dest, strides), "Convert video pixels");
                 av_frame_unref(input.frame);
                 std::lock_guard lock(mutex_);
                 cache_.push_back({last, image});
