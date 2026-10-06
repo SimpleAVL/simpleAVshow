@@ -56,13 +56,15 @@ if(SAV_BUILD_APP)
   else()
     find_package(RtMidi CONFIG REQUIRED)
     set(SAV_RTMIDI RtMidi::rtmidi)
+    get_target_property(RTMIDI_INCLUDE_HINTS RtMidi::rtmidi INTERFACE_INCLUDE_DIRECTORIES)
+    find_path(RTMIDI_HEADER_DIR RtMidi.h HINTS ${RTMIDI_INCLUDE_HINTS} PATH_SUFFIXES rtmidi REQUIRED)
   endif()
   add_library(sav_desktop
     src/app/Project.cpp src/app/Controller.cpp
     src/app/Timeline.cpp src/app/ProgramView.cpp src/app/MainWindow.cpp
     src/media/Media.cpp src/media/AudioDevice.cpp src/media/MidiOutput.cpp
   )
-  target_include_directories(sav_desktop PUBLIC src PRIVATE ${FFMPEG_INCLUDE_DIR})
+  target_include_directories(sav_desktop PUBLIC src ${RTMIDI_HEADER_DIR} PRIVATE ${FFMPEG_INCLUDE_DIR})
   target_link_libraries(sav_desktop PUBLIC sav_core Qt6::Widgets Qt6::Concurrent ${SAV_RTAUDIO} ${SAV_RTMIDI} PRIVATE ${SAV_FFMPEG})
   if(MSVC)
     target_compile_options(sav_desktop PUBLIC /utf-8)

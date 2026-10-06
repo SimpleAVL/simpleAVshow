@@ -1,5 +1,13 @@
 name: Native build and tests
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: native-build-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -14,6 +22,7 @@ jobs:
       - run: cmake --build build-core --config Release
       - run: ctest --test-dir build-core -C Release --output-on-failure
   macos:
+    if: github.event_name != 'pull_request'
     runs-on: macos-15
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
@@ -64,6 +73,7 @@ jobs:
       - run: cmake --build build --parallel 4
       - run: ctest --test-dir build --output-on-failure
       - name: Build AppImage
+        if: github.event_name != 'pull_request'
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
           QMAKE: /usr/bin/qmake6
@@ -81,13 +91,16 @@ jobs:
           /tmp/linuxdeploy-x86_64.AppImage --appdir AppDir --executable build/simpleavshow --desktop-file packaging/simpleavshow.desktop --icon-file /tmp/simpleavshow.svg --plugin qt --output appimage
           mv SimpleAVShow-linux-x86_64.AppImage artifacts/
       - name: Smoke test the packaged app
+        if: github.event_name != 'pull_request'
         run: QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 artifacts/SimpleAVShow-linux-x86_64.AppImage --demo --preview-time 6 --screenshot artifacts/editor.png
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
         with:
           name: linux-x86_64-release
           path: artifacts/SimpleAVShow-linux-x86_64.AppImage
           if-no-files-found: error
   windows:
+    if: github.event_name != 'pull_request'
     runs-on: windows-2022
     env:
       VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/vcpkg-cache,readwrite"

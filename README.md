@@ -6,6 +6,8 @@ A native timeline editor and playback engine for stage performances. Windows 11 
 
 This is a **development prototype**. CI builds and tests the app on macOS, Windows, and Linux, then launches the packaged app with a demo screenshot as a smoke test. Physical channel routing, MIDI equipment, and full rehearsal runs still need validation on the show hardware.
 
+Full builds and packages run on pushes to `main` or manual workflow runs. Pull requests targeting `main` run playback-engine tests on all three platforms and the Linux media/UI tests, without packaging. Other branch pushes do not trigger CI, and newer runs cancel superseded runs on the same branch or pull request.
+
 ## Downloads
 
 Download the packages from [GitHub Releases](https://github.com/staubichsauger/simpleAVshow/releases):
