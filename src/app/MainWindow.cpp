@@ -1,5 +1,6 @@
 #include "app/MainWindow.h"
 #include "app/MidiMessageEditor.h"
+#include <limits>
 #include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -212,13 +213,12 @@ void MainWindow::buildInspector() {
     trackForm->addRow("Name", trackName_); trackForm->addRow(trackMute_); trackLayout->addLayout(trackForm);
     trackAudio_ = new QGroupBox("Audio and routing"); auto* audio = new QFormLayout(trackAudio_);
     trackAsync_ = new QCheckBox("Keep playing through pauses / holds"); audio->addRow(trackAsync_);
-    trackGain_ = realSpin(0, 4, .05); trackPan_ = realSpin(-1, 1, .05); trackLeft_ = intSpin(0, 64); trackRight_ = intSpin(0, 64);
+    trackGain_ = realSpin(0, 4, .05); trackPan_ = realSpin(-1, 1, .05); trackLeft_ = intSpin(0, std::numeric_limits<int>::max()); trackRight_ = intSpin(0, std::numeric_limits<int>::max());
+    trackLeft_->setObjectName("trackLeftOutput"); trackRight_->setObjectName("trackRightOutput");
     trackLeft_->setSpecialValueText("Off"); trackRight_->setSpecialValueText("Off");
-    auto* route = new QComboBox; route->setObjectName("trackRoutingPreset");
-    route->addItem("Choose a routing preset…", -2); route->addItem("Speakers · stereo outputs 1 + 2", -1);
-    route->addItem("Silent · no output", -3);
+    auto* route = trackRouting_ = new QComboBox; route->setObjectName("trackRoutingPreset");
     route->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); route->setMinimumContentsLength(10);
-    for (int n = 1; n <= 64; ++n) route->addItem(QString("Mono · output %1").arg(n), n);
+    updateRoutingPresets();
     audio->addRow("Quick routing", route);
     connect(route, &QComboBox::activated, this, [this, route] {
         const int output = route->currentData().toInt();
@@ -233,7 +233,7 @@ void MainWindow::buildInspector() {
     trackLayout->addWidget(trackAudio_); auto* applyTrackButton = button("Apply track", trackLayout); connect(applyTrackButton, &QPushButton::clicked, this, &MainWindow::applyTrack); trackLayout->addStretch(); inspector_->addWidget(trackPage);
     // Clip panel.
     auto* clipPage = new QWidget; auto* clipLayout = new QVBoxLayout(clipPage); clipLayout->setContentsMargins(0, 0, 0, 0);
-    auto* clipForm = new QFormLayout; clipStart_ = realSpin(0, 86400, 1); clipDuration_ = realSpin(.001, 86400, 1); clipOffset_ = realSpin(0, 86400, 1);
+    auto* clipForm = new QFormLayout; clipStart_ = realSpin(0, maxSeconds, 1); clipDuration_ = realSpin(.001, maxSeconds, 1); clipOffset_ = realSpin(0, maxSeconds, 1);
     clipLoop_ = new QCheckBox("Loop source"); clipForm->addRow("Start (s)", clipStart_); clipForm->addRow("Length (s)", clipDuration_); clipForm->addRow("Source in (s)", clipOffset_); clipForm->addRow(clipLoop_); clipLayout->addLayout(clipForm);
     clipText_ = new QTextEdit; clipText_->setMaximumHeight(100); clipText_->setPlaceholderText("Text on the program output"); clipLayout->addWidget(clipText_);
     audioTransform_ = new QGroupBox("Audio"); auto* audioForm = new QFormLayout(audioTransform_); clipGain_ = realSpin(0, 4, .05); clipPan_ = realSpin(-1, 1, .05);
@@ -282,7 +282,7 @@ void MainWindow::buildInspector() {
     });
     // Cue panel.
     auto* cuePage = new QWidget; auto* cueLayout = new QVBoxLayout(cuePage); cueLayout->setContentsMargins(0, 0, 0, 0);
-    auto* cueForm = new QFormLayout; markerName_ = new QLineEdit; markerTime_ = realSpin(0, 86400, 1); markerHold_ = new QCheckBox("Hold · Space to continue");
+    auto* cueForm = new QFormLayout; markerName_ = new QLineEdit; markerTime_ = realSpin(0, maxSeconds, 1); markerHold_ = new QCheckBox("Hold · Space to continue");
     cueForm->addRow("Name", markerName_); cueForm->addRow("Time (s)", markerTime_); cueForm->addRow(markerHold_); cueLayout->addLayout(cueForm);
     auto* midiBox = new QGroupBox("Control another device with MIDI"); auto* midiLayout = new QVBoxLayout(midiBox);
     midiDestination_ = new QLabel; midiDestination_->setWordWrap(true); midiDestination_->setStyleSheet("color: #88a0be; font-size: 10px;"); midiLayout->addWidget(midiDestination_);
@@ -333,6 +333,7 @@ void MainWindow::refresh() {
     timeline_->refresh(); updateInspector(); updatePlayback(); statusBar()->showMessage(c_.status);
 }
 void MainWindow::updatePlayback() {
+    updateRoutingPresets();
     const bool outputsAvailable = !c_.showMode && !c_.busy;
     const QString outputsTip = c_.showMode ? "Leave show mode to open Outputs" : c_.busy ? "Wait for media preparation to finish" :
         "Inspect outputs or choose the program display; stop all playback before changing audio or MIDI connections";
@@ -348,6 +349,7 @@ void MainWindow::updatePlayback() {
     health_->setText((c_.device.running() ? QString("%1 ch · 48 kHz").arg(c_.device.channels()) : "Audio · connects on Play") + async +
         (c_.needsMidi() ? (c_.midi.connected() ? " · MIDI connected" : c_.midiDestination().isEmpty() ? " · MIDI needs a device" : " · MIDI reconnects on Play") : "") +
         (c_.transport.clipped() ? " · CLIPPING" : "") + (c_.device.underruns() ? QString(" · %1 underruns").arg(c_.device.underruns()) : "") +
+        (c_.transport.bufferWaits() ? QString(" · %1 audio waits").arg(c_.transport.bufferWaits()) : "") +
         (c_.lateFrames ? QString(" · %1 video waits").arg(c_.lateFrames) : ""));
     midiDestination_->setText(c_.midi.connected() ? "Destination: " + c_.midi.name() : c_.midiDestination().isEmpty() ? "Choose a MIDI device once; Play reconnects it automatically." : "On Play: reconnect to " + c_.midiDestination());
     health_->setToolTip(c_.device.running() ? "Audio: " + c_.audioName + "\nMIDI: " + (c_.midi.connected() ? c_.midi.name() : c_.needsMidi() ? "Choose a destination in Outputs" : "Not needed for this show") : "Play connects your remembered audio interface, or your default speakers on first use.");
@@ -360,6 +362,19 @@ void MainWindow::updatePlayback() {
     else hint_->setText(c_.showMode ? "SHOW MODE  ·  Space: play / pause  ·  Escape: Stop All" : "Space: play / pause  ·  Escape: Stop All  ·  Ruler: seek  ·  Edges: trim");
     inspector_->setEnabled(c_.canEdit(false));
     const auto picture = c_.compose(); preview_->setPicture(picture); if (output_) output_->setPicture(picture);
+}
+void MainWindow::updateRoutingPresets() {
+    // Until an interface is connected, offer common routes. Custom channel
+    // fields remain unrestricted; connected interfaces supply the full list.
+    const unsigned channels = c_.device.running() ? c_.device.channels() : 4;
+    if (channels == routingChannels_) return;
+    routingChannels_ = channels;
+    trackRouting_->clear();
+    trackRouting_->addItem("Choose a routing preset…", -2);
+    trackRouting_->addItem("Speakers · stereo outputs 1 + 2", -1);
+    trackRouting_->addItem("Silent · no output", -3);
+    for (unsigned n = 1; n <= channels; ++n)
+        trackRouting_->addItem(QString("Mono · output %1").arg(n), n);
 }
 void MainWindow::updateInspector() {
     refreshing_ = true;
@@ -417,7 +432,7 @@ void MainWindow::applyCurve() {
         bool timeOk = false, valueOk = false;
         const double time = curveTable_->item(row, 0) ? curveTable_->item(row, 0)->text().toDouble(&timeOk) : -1;
         const double value = curveTable_->item(row, 1) ? curveTable_->item(row, 1)->text().toDouble(&valueOk) : 0;
-        if (!timeOk || !valueOk || !std::isfinite(time) || time < 0 || time > 86400 || !std::isfinite(value)) { c_.report("Each keyframe needs a valid nonnegative time and numeric value"); return; }
+        if (!timeOk || !valueOk || !std::isfinite(time) || time < 0 || time > maxSeconds || !std::isfinite(value)) { c_.report("Each keyframe needs a valid nonnegative time and numeric value"); return; }
         curve.points.push_back({frames(time), value});
     }
     std::sort(curve.points.begin(), curve.points.end(), [](const Keyframe& a, const Keyframe& b) { return a.time < b.time; });
@@ -428,20 +443,19 @@ void MainWindow::importMedia() {
     if (!c_.canEdit()) return;
     const QStringList paths = QFileDialog::getOpenFileNames(this, "Import media", {}, "Media (*.wav *.aiff *.aif *.flac *.mp3 *.ogg *.m4a *.mp4 *.mov *.mkv *.webm *.avi *.png *.jpg *.jpeg *.bmp *.webp);;All files (*)");
     if (paths.isEmpty()) return;
-    std::size_t budget = audioBudget; for (const auto& a : c_.project.assets) if (a.audio) budget -= a.audio->samples.size() * sizeof(float);
     c_.busy = true;
     auto* progress = new QProgressDialog("Decoding and preparing media…", QString(), 0, 0, this); progress->setWindowModality(Qt::WindowModal); progress->setMinimumDuration(0); progress->show();
     auto* watcher = new QFutureWatcher<MediaResult>(this);
     connect(watcher, &QFutureWatcher<MediaResult>::finished, this, [this, watcher, progress] {
         const auto result = watcher->result(); c_.busy = false; progress->deleteLater(); watcher->deleteLater();
-        c_.edit([&](Project& p) { for (const auto& a : result.assets) { if (p.assets.size() >= 256) throw std::runtime_error("Project exceeds 256 media assets"); p.assets.insert(a.id, a); } });
+        c_.edit([&](Project& p) { for (const auto& a : result.assets) { p.assets.insert(a.id, a); } });
         if (!result.errors.isEmpty()) QMessageBox::warning(this, "Some media could not be imported", result.errors.join("\n\n"));
         else c_.report(QString("Imported %1 media files. Drag them onto the timeline.").arg(result.assets.size()));
     });
-    watcher->setFuture(QtConcurrent::run([paths, budget]() mutable {
+    watcher->setFuture(QtConcurrent::run([paths]() {
         MediaResult result;
         for (const auto& path : paths) {
-            try { auto a = loadMedia(path, budget); if (a.audio) budget -= a.audio->samples.size() * sizeof(float); result.assets.push_back(std::move(a)); }
+            try { auto a = loadMedia(path); result.assets.push_back(std::move(a)); }
             catch (const std::exception& e) { result.errors << QFileInfo(path).fileName() + ": " + QString::fromUtf8(e.what()); }
         }
         return result;
@@ -452,7 +466,7 @@ void MainWindow::placeAsset(QString id, int track, Frame time) {
     const auto& asset = c_.project.assets[id]; const bool visual = c_.project.show.tracks[track].visual;
     if ((visual && !asset.image && !asset.video) || (!visual && !asset.audio)) { c_.report("Choose a compatible picture or audio track"); return; }
     Clip clip; clip.id = newId().toStdString(); clip.assetId = id.toStdString(); clip.track = track; clip.start = time;
-    clip.duration = frames(asset.duration); if (clip.start + clip.duration + frames(5) > frames(86400)) { c_.report("Media extends beyond the 24-hour project limit"); return; }
+    clip.duration = frames(asset.duration); if (clip.duration > maxFrame - clip.start - frames(5)) { c_.report("Media extends beyond representable frame timing"); return; }
     if (c_.edit([=](Project& p) { p.show.duration = std::max(p.show.duration, clip.end() + frames(5)); p.show.clips.push_back(clip);
         if (visual && asset.video && asset.audio) {
             auto audioTrack = std::find_if(p.show.tracks.begin(), p.show.tracks.end(), [](const Track& t) { return !t.visual && !t.async; });
@@ -486,7 +500,7 @@ void MainWindow::projectSettings() {
     if (!c_.canEdit()) return;
     QDialog dialog(this); dialog.setWindowTitle("Project settings"); auto* layout = new QVBoxLayout(&dialog); auto* form = new QFormLayout;
     auto* title = new QLineEdit(c_.project.title); auto* width = intSpin(320, 7680); width->setValue(c_.project.width); auto* height = intSpin(240, 4320); height->setValue(c_.project.height);
-    auto* fps = realSpin(1, 120, 1); fps->setValue(c_.project.fps); auto* duration = realSpin(.001, 86400, 10); duration->setValue(seconds(c_.project.show.duration));
+    auto* fps = realSpin(1, 120, 1); fps->setValue(c_.project.fps); auto* duration = realSpin(.001, maxSeconds, 10); duration->setValue(seconds(c_.project.show.duration));
     form->addRow("Title", title); form->addRow("Width", width); form->addRow("Height", height); form->addRow("Frames / second", fps); form->addRow("Duration (s)", duration);
     form->addRow(new QLabel("Audio engine: 48 kHz. Picture is fitted to the selected display.")); layout->addLayout(form);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel); layout->addWidget(buttons);
@@ -511,7 +525,7 @@ void MainWindow::outputSettings() {
     auto* audioHint = new QLabel("Play prepares audio automatically. Selecting a device below switches audio to it. Use audio settings to apply channel or latency changes.");
     audioHint->setWordWrap(true); audioLayout->addWidget(audioHint);
     auto* form = new QFormLayout; audioLayout->addLayout(form); layout->addWidget(audioBox);
-    auto* api = new QComboBox; auto* devices = new QComboBox; auto* channels = intSpin(1, 64); channels->setValue(2);
+    auto* api = new QComboBox; auto* devices = new QComboBox; auto* channels = intSpin(1, std::numeric_limits<int>::max()); channels->setValue(2);
     auto* buffer = new QComboBox; for (int n : {128, 256, 512, 1024, 2048}) buffer->addItem(QString::number(n) + " samples", n); buffer->setCurrentIndex(2);
     const auto apis = c_.device.apis(); for (const auto& [id, name] : apis) api->addItem(name, static_cast<int>(id));
     const int previousApi = api->findData(preferences.value("audio/api", static_cast<int>(RtAudio::UNSPECIFIED)).toInt());
@@ -535,15 +549,15 @@ void MainWindow::outputSettings() {
                 devices->setItemData(devices->count() - 1, d.name, Qt::UserRole + 2); if (preferred && d.id == preferred->id) defaultIndex = devices->count() - 1; }
             if (!preferred && !savedName.isEmpty()) {
                 devices->addItem(savedName + " (missing)"); defaultIndex = devices->count() - 1;
-                devices->setItemData(defaultIndex, 64, Qt::UserRole + 1);
+                devices->setItemData(defaultIndex, std::numeric_limits<int>::max(), Qt::UserRole + 1);
             }
             devices->setCurrentIndex(defaultIndex);
         } catch (const std::exception& error) { c_.report(QString::fromUtf8(error.what())); }
-        channels->setMaximum(std::max(1, std::min(64, devices->currentData(Qt::UserRole + 1).toInt())));
+        channels->setMaximum(std::max(1, devices->currentData(Qt::UserRole + 1).toInt()));
         channels->setValue(requestedChannels);
     };
     connect(api, &QComboBox::currentIndexChanged, &dialog, refreshDevices);
-    connect(devices, &QComboBox::currentIndexChanged, &dialog, [&] { channels->setMaximum(std::max(1, std::min(64, devices->currentData(Qt::UserRole + 1).toInt()))); }); refreshDevices();
+    connect(devices, &QComboBox::currentIndexChanged, &dialog, [&] { channels->setMaximum(std::max(1, devices->currentData(Qt::UserRole + 1).toInt())); }); refreshDevices();
     channels->setValue(preferences.value("audio/channels", 2).toInt());
     const int savedBuffer = buffer->findData(preferences.value("audio/buffer", 512).toInt()); if (savedBuffer >= 0) buffer->setCurrentIndex(savedBuffer);
     devices->setObjectName("audioOutputDevice"); channels->setObjectName("audioOutputChannels");

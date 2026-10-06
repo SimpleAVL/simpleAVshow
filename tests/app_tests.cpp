@@ -22,8 +22,20 @@
 #include <QLineEdit>
 #include <QSettings>
 #include <QCheckBox>
+#include <limits>
 
 using namespace sav;
+namespace {
+float sampleAt(const AudioData& audio, Frame frame) {
+    if (!audio.storage) return audio.samples[frame * 2];
+    float stereo[2]; audio.storage->read(frame, stereo, 1); return stereo[0];
+}
+class UnreadableStorage : public AudioStorage {
+public:
+    Frame length() const noexcept override { return frames(2); }
+    void read(Frame, float*, std::size_t) const override { throw std::runtime_error("Cache is unavailable"); }
+};
+}
 class AppTests : public QObject {
     Q_OBJECT
     QTemporaryDir settingsDir_;
@@ -137,10 +149,28 @@ private slots:
         QCOMPARE(guide.left, 2); QCOMPARE(guide.right, -1); QCOMPARE(guide.pan, -1.);
         window.controller().undo(); QCOMPARE(window.controller().project.show.tracks[4].left, -1);
         QCOMPARE(window.controller().project.show.tracks[4].right, -1);
+        window.findChild<QSpinBox*>("trackLeftOutput")->setValue(128);
+        window.findChild<QSpinBox*>("trackRightOutput")->setValue(129);
+        QTest::mouseClick(apply, Qt::LeftButton);
+        QCOMPARE(window.controller().project.show.tracks[4].left, 127);
+        QCOMPARE(window.controller().project.show.tracks[4].right, 128);
         window.controller().dirty = false;
+    }
+    void unreadableCacheBlocksAutomaticAudioPreparation() {
+        Controller c; auto project = newProject();
+        MediaAsset asset; asset.id = "broken-cache"; asset.name = "Broken cache"; asset.duration = 2;
+        auto audio = std::make_shared<AudioData>(); audio->storage = std::make_shared<UnreadableStorage>(); asset.audio = audio;
+        project.assets.insert(asset.id, asset);
+        Clip clip; clip.id = "clip"; clip.assetId = asset.id.toStdString(); clip.track = 2; clip.duration = frames(2);
+        project.show.clips.push_back(clip); bindAudio(project); c.replace(project);
+        QVERIFY(c.transport.audioReadFailed());
+        c.toggle(); QCOMPARE(c.transport.state(), State::Stopped); QVERIFY(!c.device.running());
+        QVERIFY(c.status.contains("unreadable audio cache")); QCOMPARE(c.playbackProblem, c.status);
+        c.setShowMode(true); c.toggle(); QCOMPARE(c.transport.state(), State::Stopped); QVERIFY(!c.device.running());
     }
     void missingRememberedDevicesAreVisibleInOutputs() {
         QSettings().setValue("audio/device", "SimpleAVShow absent audio test destination");
+        QSettings().setValue("audio/channels", 128);
         QSettings().setValue("midi/port", "SimpleAVShow absent MIDI test destination");
         MainWindow window; window.show(); bool audioMissing = false, midiMissing = false;
         QTimer::singleShot(0, &window, [&] {
@@ -148,7 +178,8 @@ private slots:
             auto* audio = dialog->findChild<QComboBox*>("audioOutputDevice");
             auto* midi = dialog->findChild<QComboBox*>("midiOutputDevice");
             auto* apply = dialog->findChild<QPushButton*>("connectAudioOutput");
-            audioMissing = audio && audio->currentText().contains("absent audio test destination (missing)") && apply && !apply->isEnabled();
+            auto* channels = dialog->findChild<QSpinBox*>("audioOutputChannels");
+            audioMissing = audio && audio->currentText().contains("absent audio test destination (missing)") && apply && !apply->isEnabled() && channels && channels->value() == 128;
             midiMissing = midi && midi->currentText().contains("absent MIDI test destination (missing)");
             dialog->reject();
         });
@@ -168,7 +199,7 @@ private slots:
                 const auto expected = c.project.assets[a.id].audio;
                 QCOMPARE(a.audio->mono, expected->mono);
                 QCOMPARE(a.audio->length(), expected->length());
-                for (Frame i : {Frame{10}, Frame{200}, Frame{1000}}) QVERIFY(std::abs(a.audio->samples[i * 2] - expected->samples[i * 2]) < .0001);
+                for (Frame i : {Frame{10}, Frame{200}, Frame{1000}}) QVERIFY(std::abs(sampleAt(*a.audio, i) - sampleAt(*expected, i)) < .0001);
             }
         }
         // Relative paths remain usable after moving the entire show folder.
@@ -183,9 +214,30 @@ private slots:
         auto clips = root["clips"].toArray(); auto first = clips[0].toObject(); first["start"] = -20; clips[0] = first; root["clips"] = clips;
         QFile broken(dir.filePath("broken.savshow")); QVERIFY(broken.open(QIODevice::WriteOnly)); broken.write(QJsonDocument(root).toJson()); broken.close();
         QVERIFY_THROWS_EXCEPTION(std::runtime_error, readProject(broken.fileName()));
-        auto invalid = demoProject(); invalid.show.tracks[2].left = 64; QVERIFY_THROWS_EXCEPTION(std::runtime_error, validate(invalid));
+        auto invalid = demoProject(); invalid.show.tracks[2].left = -2; QVERIFY_THROWS_EXCEPTION(std::runtime_error, validate(invalid));
         invalid = demoProject(); invalid.show.clips.push_back(invalid.show.clips[0]); invalid.show.clips.back().id = newId().toStdString();
         QVERIFY_THROWS_EXCEPTION(std::runtime_error, validate(invalid));
+    }
+    void largeProjectsRoundTripWithoutPrototypeCaps() {
+        QTemporaryDir dir; auto p = newProject(); p.show.duration = frames(48 * 3600);
+        for (int i = 0; i < 70; ++i) p.show.tracks.push_back({newId().toStdString(), "Layer", true});
+        p.show.tracks[2].left = 127;
+        for (int i = 0; i < 300; ++i) {
+            Clip c; c.id = newId().toStdString(); c.text = "Cue"; c.track = 0; c.start = frames(i * 2); c.duration = frames(1);
+            for (int k = 0; k < 300; ++k) c.alpha.points.push_back({k, k / 300.});
+            p.show.clips.push_back(c);
+            MediaAsset a; a.id = newId(); a.name = "Still"; a.image = true; a.path = dir.filePath(a.id + ".png");
+            a.still = QImage(1, 1, QImage::Format_RGB32); a.still.fill(Qt::black); QVERIFY(a.still.save(a.path));
+            p.assets.insert(a.id, a);
+        }
+        for (int i = 0; i < 700; ++i) p.show.markers.push_back({newId().toStdString(), "Cue", frames(i), false});
+        const QString path = dir.filePath("large.savshow"); writeProject(p, path); const auto loaded = readProject(path);
+        QCOMPARE(loaded.show.duration, p.show.duration); QCOMPARE(loaded.show.tracks.size(), p.show.tracks.size());
+        QCOMPARE(loaded.show.clips.size(), std::size_t{300}); QCOMPARE(loaded.assets.size(), 300);
+        QCOMPARE(loaded.show.markers.size(), std::size_t{700}); QCOMPARE(loaded.show.clips[0].alpha.points.size(), std::size_t{300});
+        QCOMPARE(loaded.show.tracks[2].left, 127);
+        p.show.clips[0].start = p.show.duration; p.show.clips[0].duration = std::numeric_limits<Frame>::max();
+        QVERIFY_THROWS_EXCEPTION(std::runtime_error, validate(p));
     }
     void midiMessagesValidateLengthsAndSysex() {
         QVERIFY(validMidi({0x90, 60, 100})); QVERIFY(validMidi({0xc2, 10})); QVERIFY(validMidi({0xf0, 0x7d, 1, 0xf7}));
@@ -285,8 +337,8 @@ private slots:
         QTemporaryDir dir; const QString file = dir.filePath("two-colors.mkv");
         QProcess process; process.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=red:s=320x180:r=24:d=1", "-f", "lavfi", "-i", "color=blue:s=320x180:r=24:d=1", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=2", "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-map", "2:a", "-c:v", "ffv1", "-c:a", "pcm_s16le", file});
         QVERIFY(process.waitForFinished(15000)); QCOMPARE(process.exitCode(), 0);
-        const auto asset = loadMedia(file, audioBudget); QVERIFY(asset.video); QVERIFY(asset.audio); QCOMPARE(asset.width, 320); QCOMPARE(asset.audio->length(), frames(2));
-        QVERIFY_THROWS_EXCEPTION(std::runtime_error, loadMedia(file, 100));
+        const auto asset = loadMedia(file); QVERIFY(asset.video); QVERIFY(asset.audio); QCOMPARE(asset.width, 320); QCOMPARE(asset.audio->length(), frames(2));
+        QVERIFY(asset.audio->samples.empty()); QVERIFY(asset.audio->storage);
         VideoReader reader(file); QImage image;
         QTRY_VERIFY_WITH_TIMEOUT(!(image = reader.imageAt(.5)).isNull(), 3000);
         QVERIFY(image.pixelColor(100, 100).red() > 200); QVERIFY(image.pixelColor(100, 100).blue() < 30);
@@ -294,6 +346,33 @@ private slots:
         QVERIFY(image.pixelColor(100, 100).blue() > 200); QVERIFY(image.pixelColor(100, 100).red() < 30);
         QTRY_VERIFY_WITH_TIMEOUT(!(image = reader.imageAt(.2)).isNull(), 3000);
         QVERIFY(image.pixelColor(100, 100).red() > 200); QVERIFY(reader.error().isEmpty());
+    }
+    void diskAudioCacheHasBoundedMemoryAndSharedLifetime() {
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
+        QTemporaryDir dir; const QString file = dir.filePath("long-silence.flac"); QProcess process;
+        process.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono", "-t", "2800", "-c:a", "flac", file});
+        QVERIFY(process.waitForFinished(15000)); QCOMPARE(process.exitCode(), 0);
+        QDir caches(QDir::tempPath()); const auto before = caches.entryList({"simpleavshow-pcm-*"}, QDir::Files);
+        std::shared_ptr<const AudioData> retained;
+        QString cache;
+        {
+            const auto asset = loadMedia(file); retained = asset.audio;
+            QVERIFY(retained); QVERIFY(retained->storage); QVERIFY(retained->samples.empty());
+            QCOMPARE(retained->length(), frames(2800));
+            QVERIFY(retained->peaks.size() * sizeof(float) < 2 * 1024 * 1024);
+            auto created = caches.entryList({"simpleavshow-pcm-*"}, QDir::Files);
+            for (const auto& name : before) created.removeAll(name);
+            QCOMPARE(created.size(), 1); cache = caches.filePath(created.front());
+            QVERIFY(QFileInfo(cache).size() > 1024ll * 1024 * 1024);
+            // The immutable prepared source survives moves/deletion of the original,
+            // and snapshots keep it alive after releasing the importing asset.
+            QVERIFY(QFile::remove(file)); QCOMPARE(sampleAt(*retained, retained->length() - 1), 0.f);
+        }
+        QVERIFY(QFileInfo::exists(cache)); retained.reset(); QVERIFY(!QFileInfo::exists(cache));
+        // Failed imports must release partial caches as well.
+        QFile broken(dir.filePath("broken.wav")); QVERIFY(broken.open(QIODevice::WriteOnly)); broken.write("broken"); broken.close();
+        QVERIFY_THROWS_EXCEPTION(std::runtime_error, loadMedia(broken.fileName()));
+        QCOMPARE(caches.entryList({"simpleavshow-pcm-*"}, QDir::Files), before);
     }
     void videoScalingKeepsTheEntireFrame_data() {
         QTest::addColumn<QSize>("sourceSize");
@@ -331,9 +410,18 @@ private slots:
         QTemporaryDir dir; const QString file = dir.filePath("offset.mkv"); QProcess process;
         process.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=red:s=160x90:r=24:d=2", "-itsoffset", "0.5", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-map", "0:v", "-map", "1:a", "-c:v", "ffv1", "-c:a", "pcm_s16le", file});
         QVERIFY(process.waitForFinished(15000)); QCOMPARE(process.exitCode(), 0);
-        const auto asset = loadMedia(file, audioBudget); QVERIFY(asset.audio); QCOMPARE(asset.audio->length(), frames(1.5));
-        for (Frame i = 0; i < frames(.5); ++i) QCOMPARE(asset.audio->samples[i * 2], 0.f);
-        float peak = 0; for (Frame i = frames(.5); i < frames(.6); ++i) peak = std::max(peak, std::abs(asset.audio->samples[i * 2])); QVERIFY(peak > .1);
+        const auto asset = loadMedia(file); QVERIFY(asset.audio); QCOMPARE(asset.audio->length(), frames(1.5));
+        for (Frame i = 0; i < frames(.5); ++i) QCOMPARE(sampleAt(*asset.audio, i), 0.f);
+        float peak = 0; for (Frame i = frames(.5); i < frames(.6); ++i) peak = std::max(peak, std::abs(sampleAt(*asset.audio, i))); QVERIFY(peak > .1);
+        auto show = std::make_shared<Show>(); show->duration = asset.audio->length();
+        show->tracks.push_back({"audio", "Audio", false, false, false, 1, -1, 0, -1});
+        Clip clip; clip.audio = asset.audio; clip.duration = show->duration; show->clips.push_back(clip);
+        Transport transport; transport.configure(show); QVERIFY(transport.command({Action::Play}));
+        std::vector<float> out(static_cast<std::size_t>(frames(.6)) * 2); transport.render(out.data(), static_cast<unsigned>(frames(.6)), 2);
+        QCOMPARE(transport.bufferWaits(), 0u);
+        for (Frame i = 0; i < frames(.6); ++i) {
+            QCOMPARE(out[i * 2], sampleAt(*asset.audio, i)); QCOMPARE(out[i * 2 + 1], 0.f);
+        }
     }
 };
 QTEST_MAIN(AppTests)

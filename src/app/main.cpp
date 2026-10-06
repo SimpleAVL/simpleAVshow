@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
     if (!parser.positionalArguments().isEmpty()) window.openPath(parser.positionalArguments().front());
     if (parser.isSet("preview-time")) {
         bool ok; double time = parser.value("preview-time").toDouble(&ok);
-        if (!ok || !std::isfinite(time) || time < 0 || time > 86400) return 2;
+        if (!ok || !std::isfinite(time) || time < 0 || time > sav::maxSeconds) return 2;
         window.controller().seek(sav::frames(time));
     }
     window.show();

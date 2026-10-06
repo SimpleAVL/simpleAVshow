@@ -24,6 +24,9 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
         if (transport.eventOverflow() && transport.state() != State::Stopped) {
             stopAll(); report("MIDI event queue overflow. Playback is stopped; inspect the project.");
         }
+        if (transport.audioReadFailed() && transport.state() != State::Stopped) {
+            stopAll(); report("Prepared audio cache could not be read. Playback is stopped; reopen the project to rebuild it."); playbackProblem = status;
+        }
         emit tick();
     }); timer_.start();
     autosave_.setInterval(60000);
@@ -111,6 +114,7 @@ void Controller::toggle() {
     const bool playing = transport.state() == State::Playing;
     if (!playing) {
         playbackProblem.clear();
+        if (transport.audioReadFailed()) { report("Reopen the project to rebuild its unreadable audio cache"); playbackProblem = status; return; }
         for (const auto& asset : project.assets) if (asset.video && !QFileInfo::exists(asset.path)) {
             report("Video source is missing: " + asset.path); playbackProblem = status; return;
         }
@@ -198,7 +202,7 @@ bool Controller::prepareAudio() {
         }
         const unsigned channels = std::min(selected->channels, std::max(required, settings.value("audio/channels", 2).toUInt()));
         const unsigned buffer = settings.value("audio/buffer", 512).toUInt();
-        return openAudio(api, selected->id, selected->name, std::min(64u, channels), buffer);
+        return openAudio(api, selected->id, selected->name, channels, buffer);
     } catch (const std::exception& error) { report("Cannot prepare audio. Open Outputs to choose a device. " + QString::fromUtf8(error.what())); return false; }
 }
 bool Controller::testMidi(const std::vector<unsigned char>& bytes) {

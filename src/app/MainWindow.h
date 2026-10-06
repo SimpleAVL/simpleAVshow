@@ -36,7 +36,8 @@ private:
         *clipGain_ = nullptr, *clipPan_ = nullptr, *clipX_ = nullptr, *clipY_ = nullptr, *clipScale_ = nullptr, *clipOpacity_ = nullptr, *markerTime_ = nullptr;
     QSpinBox *trackLeft_ = nullptr, *trackRight_ = nullptr;
     QCheckBox *trackMute_ = nullptr, *trackAsync_ = nullptr, *clipLoop_ = nullptr, *markerHold_ = nullptr;
-    QComboBox *curveProperty_ = nullptr, *midiTiming_ = nullptr;
+    QComboBox *curveProperty_ = nullptr, *midiTiming_ = nullptr, *trackRouting_ = nullptr;
+    unsigned routingChannels_ = 0;
     MidiMessageEditor* midiEditor_ = nullptr;
     QPushButton* midiTest_ = nullptr;
     QLabel* midiDestination_ = nullptr;
@@ -47,6 +48,7 @@ private:
     void buildInspector();
     void refresh();
     void updatePlayback();
+    void updateRoutingPresets();
     void updateInspector();
     void updateCurve();
     void applyTrack();

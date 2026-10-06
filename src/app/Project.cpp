@@ -10,6 +10,7 @@
 #include <QUuid>
 #include <QPainter>
 #include <set>
+#include <limits>
 #include <stdexcept>
 
 namespace sav {
@@ -82,26 +83,24 @@ void bindAudio(Project& p) {
 }
 void validate(const Project& p) {
     auto fail = [](const char* message) { throw std::runtime_error(message); };
-    if (p.title.size() > 256 || p.width < 320 || p.width > 7680 || p.height < 240 || p.height > 4320 ||
+    if (p.width < 320 || p.width > 7680 || p.height < 240 || p.height > 4320 ||
         !std::isfinite(p.fps) || p.fps < 1 || p.fps > 120) fail("Invalid project picture settings");
-    if (p.show.duration <= 0 || p.show.duration > frames(24 * 3600)) fail("Project duration must be between 0 and 24 hours");
-    if (p.show.clips.size() > maxClips || p.show.markers.size() > maxMarkers || p.show.tracks.empty() || p.show.tracks.size() > 64)
-        fail("Project exceeds 64 tracks, 256 clips, or 512 markers");
-    const auto visual = std::count_if(p.show.tracks.begin(), p.show.tracks.end(), [](const Track& t) { return t.visual; });
-    if (visual > 4) fail("This version supports up to four visual tracks");
+    if (p.show.duration <= 0 || p.show.duration > maxFrame) fail("Project duration is outside representable frame timing");
+    if (p.show.tracks.empty() || p.show.tracks.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        p.show.clips.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        p.show.markers.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) fail("Project indices cannot be represented");
     std::set<std::string> ids;
     for (const auto& t : p.show.tracks) {
         if (t.id.empty() || !ids.insert(t.id).second) fail("Duplicate or missing track ID");
-        if (t.left < -1 || t.right < -1 || t.left > 63 || t.right > 63 || !std::isfinite(t.gain) || t.gain < 0 || t.gain > 4 ||
+        if (t.left < -1 || t.right < -1 || t.left == std::numeric_limits<int>::max() || t.right == std::numeric_limits<int>::max() || !std::isfinite(t.gain) || t.gain < 0 || t.gain > 4 ||
             !std::isfinite(t.pan) || std::abs(t.pan) > 1) fail("Invalid audio track routing or gain");
         if (t.visual && t.async) fail("Async playback is only supported on audio tracks");
     }
     ids.clear();
     auto curve = [&](const Envelope& e, double min, double max) {
-        if (e.points.size() > 256) fail("An automation curve exceeds 256 keyframes");
         Frame previous = -1;
         for (const auto& point : e.points) {
-            if (point.time < 0 || point.time > frames(24 * 3600) || point.time <= previous || !std::isfinite(point.value) || point.value < min || point.value > max)
+            if (point.time < 0 || point.time > maxFrame || point.time <= previous || !std::isfinite(point.value) || point.value < min || point.value > max)
                 fail("Invalid automation keyframe");
             previous = point.time;
         }
@@ -109,8 +108,7 @@ void validate(const Project& p) {
     for (const auto& c : p.show.clips) {
         if (c.id.empty() || !ids.insert(c.id).second) fail("Duplicate or missing clip ID");
         if (c.track < 0 || static_cast<std::size_t>(c.track) >= p.show.tracks.size() || c.start < 0 || c.start > p.show.duration || c.duration <= 0 ||
-            c.duration > p.show.duration || c.end() > p.show.duration || c.offset < 0 || c.offset > frames(24 * 3600)) fail("Clip is outside the project or its track");
-        if (c.text.size() > 16384) fail("Text clip exceeds 16,384 characters");
+            c.duration > p.show.duration - c.start || c.offset < 0 || c.offset > maxFrame) fail("Clip is outside the project or its track");
         if (!c.assetId.empty() && !p.assets.contains(QString::fromStdString(c.assetId))) fail("Clip references a missing asset");
         const bool visualTrack = p.show.tracks[c.track].visual;
         const auto asset = p.assets.constFind(QString::fromStdString(c.assetId));
@@ -124,13 +122,15 @@ void validate(const Project& p) {
             fail("Invalid clip transformation");
         curve(c.volume, 0, 4); curve(c.balance, -1, 1); curve(c.positionX, -2, 2); curve(c.positionY, -2, 2); curve(c.size, .01, 8); curve(c.alpha, 0, 1);
     }
-    for (std::size_t i = 0; i < p.show.clips.size(); ++i) {
-        const auto& a = p.show.clips[i]; if (!p.show.tracks[a.track].visual) continue;
-        for (std::size_t j = i + 1; j < p.show.clips.size(); ++j) {
-            const auto& b = p.show.clips[j];
-            if (a.track == b.track && a.start < b.end() && b.start < a.end()) fail("Picture clips overlap on one track; use a separate layer for a crossfade");
-        }
-    }
+    // Check each layer in timeline order, rather than comparing every clip pair.
+    std::vector<const Clip*> pictures;
+    for (const auto& clip : p.show.clips) if (p.show.tracks[clip.track].visual) pictures.push_back(&clip);
+    std::sort(pictures.begin(), pictures.end(), [](const Clip* a, const Clip* b) {
+        return a->track != b->track ? a->track < b->track : a->start < b->start;
+    });
+    for (std::size_t i = 1; i < pictures.size(); ++i)
+        if (pictures[i - 1]->track == pictures[i]->track && pictures[i - 1]->end() > pictures[i]->start)
+            fail("Picture clips overlap on one track; use a separate layer for a crossfade");
     ids.clear();
     for (const auto& m : p.show.markers) {
         if (m.id.empty() || !ids.insert(m.id).second) fail("Duplicate or missing marker ID");
@@ -148,14 +148,14 @@ Envelope readCurve(const QJsonValue& value) {
         const auto a = point.toArray();
         if (a.size() != 2 || !a[0].isDouble() || !a[1].isDouble()) throw std::runtime_error("Invalid automation data");
         const double t = a[0].toDouble();
-        if (!std::isfinite(t) || t < 0 || t > frames(24 * 3600)) throw std::runtime_error("Invalid keyframe time");
+        if (!std::isfinite(t) || t < 0 || t > maxFrame || std::floor(t) != t) throw std::runtime_error("Invalid keyframe time");
         e.points.push_back({static_cast<Frame>(t), a[1].toDouble()});
     }
     return e;
 }
 Frame readFrame(const QJsonObject& o, const char* key) {
     const auto v = o.value(key); const double n = v.toDouble(-1);
-    if (!v.isDouble() || !std::isfinite(n) || n < 0 || n > frames(24 * 3600) || std::floor(n) != n)
+    if (!v.isDouble() || !std::isfinite(n) || n < 0 || n > maxFrame || std::floor(n) != n)
         throw std::runtime_error(std::string("Invalid frame field: ") + key);
     return static_cast<Frame>(n);
 }
@@ -192,22 +192,18 @@ void writeProject(const Project& p, const QString& path) {
 Project readProject(const QString& path) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) throw std::runtime_error(file.errorString().toStdString());
-    if (file.size() > 16 * 1024 * 1024) throw std::runtime_error("Project file exceeds 16 MiB");
     QJsonParseError parseError; const auto doc = QJsonDocument::fromJson(file.readAll(), &parseError);
     if (parseError.error != QJsonParseError::NoError || !doc.isObject()) throw std::runtime_error("Invalid project JSON");
     const auto root = doc.object();
     if (root["format"] != "simpleavshow" || root["version"].toInt() != 1) throw std::runtime_error("Unsupported project version");
     for (const char* name : {"tracks", "clips", "markers", "assets"}) if (!root[name].isArray()) throw std::runtime_error("Missing project array");
-    if (root["assets"].toArray().size() > 256 || root["clips"].toArray().size() > static_cast<qsizetype>(maxClips) || root["markers"].toArray().size() > static_cast<qsizetype>(maxMarkers))
-        throw std::runtime_error("Project exceeds asset, clip, or marker limits");
     Project p; p.title = root["title"].toString(); p.width = root["width"].toInt(); p.height = root["height"].toInt(); p.fps = root["fps"].toDouble();
     p.show.duration = readFrame(root, "duration");
-    std::size_t remaining = audioBudget;
     for (auto value : root["assets"].toArray()) {
         const auto o = value.toObject(); const auto id = o["id"].toString();
         if (id.isEmpty() || p.assets.contains(id)) throw std::runtime_error("Duplicate or missing asset ID");
-        auto a = loadMedia(QFileInfo(path).absoluteDir().absoluteFilePath(o["path"].toString()), remaining);
-        a.id = id; if (!o["name"].toString().isEmpty()) a.name = o["name"].toString(); if (a.audio) remaining -= a.audio->samples.size() * sizeof(float);
+        auto a = loadMedia(QFileInfo(path).absoluteDir().absoluteFilePath(o["path"].toString()));
+        a.id = id; if (!o["name"].toString().isEmpty()) a.name = o["name"].toString();
         p.assets.insert(id, std::move(a));
     }
     for (auto value : root["tracks"].toArray()) {
