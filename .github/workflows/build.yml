@@ -103,6 +103,7 @@ jobs:
         with:
           path: vcpkg-cache
           key: windows-vcpkg-noqt-${{ hashFiles('vcpkg.json') }}
+          restore-keys: windows-vcpkg-noqt-
       - name: Fetch the pinned vcpkg revision
         shell: pwsh
         run: |
@@ -113,7 +114,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$env:VCPKG_INSTALLATION_ROOT/bootstrap-vcpkg.bat" -disableMetrics
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Configure (ASIO enabled; prebuilt Qt SDK)
+      - name: Build native dependencies and configure (ASIO enabled)
         shell: pwsh
         run: cmake -S . -B build -A x64 "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON "-DCMAKE_PREFIX_PATH=$env:QT_ROOT_DIR"
       - name: Cache built dependencies before compiling the app
