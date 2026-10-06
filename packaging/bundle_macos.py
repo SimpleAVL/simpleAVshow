@@ -50,7 +50,8 @@ def main():
             "@executable_path", str(executable_dir))
         if expanded.startswith("@rpath/"):
             suffix = expanded.removeprefix("@rpath/")
-            for root in rpaths(binary) + executable_rpaths + [str(frameworks)]:
+            # Deployed frameworks must win over the original Homebrew rpaths.
+            for root in [str(frameworks)] + rpaths(binary) + executable_rpaths:
                 root = root.replace("@loader_path", str(binary.parent)).replace(
                     "@executable_path", str(executable_dir))
                 candidate = Path(root) / suffix
@@ -81,11 +82,16 @@ def main():
                 target = source
             else:
                 if ".framework" in str(source):
-                    raise RuntimeError(f"macdeployqt left an external framework: {source}")
-                target = frameworks / source.name
+                    parts = source.parts
+                    index = next(i for i, part in enumerate(parts) if part.endswith(".framework"))
+                    target = frameworks.joinpath(*parts[index:])
+                    if not target.exists():
+                        raise RuntimeError(f"macdeployqt left an external framework: {source}")
+                else:
+                    target = frameworks / source.name
                 if target in copied and copied[target] != source:
                     raise RuntimeError(f"Dylib name collision: {source} and {copied[target]}")
-                if target not in copied:
+                if not target.exists():
                     shutil.copy2(source, target)
                     copied[target] = source
                     queue.append(target)
@@ -106,9 +112,9 @@ def main():
             new_dep = "@executable_path/../Frameworks/" + str(relative)
             if dep != new_dep:
                 subprocess.check_call(["install_name_tool", "-change", dep, new_dep, str(binary)])
-        if binary.parent == frameworks and binary.suffix == ".dylib":
+        if binary.is_relative_to(frameworks) and len(run("otool", "-D", str(binary)).splitlines()) > 1:
             subprocess.check_call(["install_name_tool", "-id",
-                                   "@rpath/" + binary.name, str(binary)])
+                                   "@rpath/" + str(binary.relative_to(frameworks)), str(binary)])
         for root in rpaths(binary):
             if root.startswith(("/opt/homebrew/", "/usr/local/", "/Users/")):
                 subprocess.check_call(["install_name_tool", "-delete_rpath", root, str(binary)])
@@ -122,6 +128,8 @@ def main():
         (licenses / "homebrew.json").write_text(metadata + "\n")
     # Sign inside out. No Developer ID identity or notarization is implied.
     for binary in sorted(seen, key=lambda p: len(p.parts), reverse=True):
+        if binary.parent == executable_dir:
+            continue  # signing the main executable also seals the app bundle
         subprocess.check_call(["codesign", "--force", "--sign", "-", str(binary)])
     subprocess.check_call(["codesign", "--force", "--deep", "--sign", "-", str(app)])
     subprocess.check_call(["codesign", "--verify", "--deep", "--strict", str(app)])

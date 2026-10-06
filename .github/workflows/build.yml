@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: brew install qtbase ffmpeg rtaudio rtmidi pkgconf ninja
-      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$(brew --prefix)
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix)"
       - run: cmake --build build --parallel 4
       - run: ctest --test-dir build --output-on-failure
       - name: Bundle runtime dependencies and sign ad-hoc
@@ -34,6 +34,8 @@ jobs:
           mkdir -p dist artifacts
           cp -R build/simpleavshow.app dist/
           "$(brew --prefix qtbase)/bin/macdeployqt" dist/simpleavshow.app -always-overwrite
+          plugins=$("$(brew --prefix qtbase)/bin/qtpaths" --query QT_INSTALL_PLUGINS)
+          cp "$plugins/platforms/libqoffscreen.dylib" dist/simpleavshow.app/Contents/PlugIns/platforms/
           python3 packaging/bundle_macos.py dist/simpleavshow.app
           python3 packaging/collect_licenses.py macos dist/licenses
           cp packaging/README.txt README.md dist/
@@ -130,6 +132,7 @@ jobs:
         run: |
           python packaging/collect_licenses.py windows dist/licenses --vcpkg build/vcpkg_installed/x64-windows --qt $env:QT_ROOT_DIR
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "$env:QT_ROOT_DIR/plugins/platforms/qoffscreen.dll" dist/bin/platforms/
           Copy-Item packaging/README.txt,README.md dist/
           Copy-Item docs dist/ -Recurse
           New-Item -ItemType Directory -Force artifacts | Out-Null

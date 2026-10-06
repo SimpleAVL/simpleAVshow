@@ -32,7 +32,7 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
     }); autosave_.start();
 }
 Controller::~Controller() {
-    timer_.stop(); midiThread_.request_stop(); if (midiThread_.joinable()) midiThread_.join(); device.close();
+    timer_.stop(); stopMidiThread(); device.close();
 }
 void Controller::report(QString text) { status = text; emit message(text); }
 bool Controller::canEdit(bool reportFailure) {
@@ -66,7 +66,7 @@ void Controller::redo() {
     arm(std::min(position(), project.show.duration)); emit changed();
 }
 void Controller::arm(Frame position) {
-    midiThread_.request_stop(); if (midiThread_.joinable()) midiThread_.join();
+    stopMidiThread();
     device.close(); videos_.clear(); lastPicture_ = {}; lastComposed_ = -1; lateFrames = 0;
     armed_ = std::make_shared<Show>(project.show); transport.configure(armed_, position);
     if (configured_) {
@@ -77,8 +77,10 @@ void Controller::arm(Frame position) {
 }
 void Controller::startMidiThread() {
     const auto snapshot = armed_;
-    midiThread_ = std::jthread([this, snapshot](std::stop_token stop) {
-        while (!stop.stop_requested()) {
+    midiStop_.store(false);
+    // std::jthread is unavailable in the libc++ shipped with older macOS SDKs.
+    midiThread_ = std::thread([this, snapshot] {
+        while (!midiStop_.load()) {
             MidiEvent event;
             while (transport.takeMidi(event)) {
                 if (event.epoch != transport.epoch() || event.marker < 0 || static_cast<std::size_t>(event.marker) >= snapshot->markers.size()) continue;
@@ -90,6 +92,10 @@ void Controller::startMidiThread() {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     });
+}
+void Controller::stopMidiThread() {
+    midiStop_.store(true);
+    if (midiThread_.joinable()) midiThread_.join();
 }
 bool Controller::routesValid() const {
     for (const auto& track : project.show.tracks) {
@@ -138,7 +144,7 @@ bool Controller::configureAudio(RtAudio::Api api, unsigned id, QString name, uns
 }
 bool Controller::configureMidi(int port) {
     if (!canEdit()) return false;
-    midiThread_.request_stop(); if (midiThread_.joinable()) midiThread_.join();
+    stopMidiThread();
     QString error; const bool ok = midi.open(port, error); startMidiThread();
     if (ok) QSettings().setValue("midi/port", midi.name());
     report(ok ? (port < 0 ? "MIDI output disconnected" : "MIDI output: " + midi.name()) : error); return ok;

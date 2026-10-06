@@ -8,6 +8,7 @@
 #include <functional>
 #include <map>
 #include <thread>
+#include <atomic>
 
 namespace sav {
 class Controller : public QObject {
@@ -49,11 +50,13 @@ private:
     bool configured_ = false;
     std::map<std::string, std::unique_ptr<VideoReader>> videos_;
     std::shared_ptr<const Show> armed_;
-    std::jthread midiThread_;
+    std::thread midiThread_;
+    std::atomic<bool> midiStop_{true};
     QImage lastPicture_;
     Frame lastComposed_ = -1;
     std::vector<Project> undo_, redo_;
     void arm(Frame position);
     void startMidiThread();
+    void stopMidiThread();
 };
 }
