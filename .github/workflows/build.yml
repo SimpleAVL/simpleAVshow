@@ -23,6 +23,9 @@ jobs:
           - os: macos-15-intel
             arch: x86_64
     runs-on: ${{ matrix.os }}
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
     steps:
       - uses: actions/checkout@v4
       - run: brew install qtbase ffmpeg rtaudio rtmidi pkgconf ninja
@@ -73,7 +76,7 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: '1'
           QMAKE: /usr/bin/qmake6
           EXTRA_PLATFORM_PLUGINS: libqoffscreen.so
-          OUTPUT: SimpleAVShow-linux-x86_64.AppImage
+          LDAI_OUTPUT: SimpleAVShow-linux-x86_64.AppImage
         run: |
           mkdir -p artifacts AppDir/usr/share/simpleavshow
           curl -fL --retry 3 https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -o /tmp/linuxdeploy-x86_64.AppImage
@@ -132,11 +135,19 @@ jobs:
         run: |
           python packaging/collect_licenses.py windows dist/licenses --vcpkg build/vcpkg_installed/x64-windows --qt $env:QT_ROOT_DIR
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Copy-Item "$env:QT_ROOT_DIR/plugins/platforms/qoffscreen.dll" dist/bin/platforms/
+          $platformPlugin = Get-ChildItem dist -Recurse -Filter qwindows.dll | Select-Object -First 1
+          if (!$platformPlugin) { throw 'Qt Windows platform plugin was not deployed' }
+          Copy-Item "$env:QT_ROOT_DIR/plugins/platforms/qoffscreen.dll" $platformPlugin.Directory.FullName
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vsPath = & $vswhere -latest -products '*' -property installationPath
+          $runtime = Get-ChildItem "$vsPath/VC/Redist/MSVC/*/x64/Microsoft.VC143.CRT" -Directory | Sort-Object FullName -Descending | Select-Object -First 1
+          if (!$runtime) { throw 'MSVC runtime directory not found' }
+          Copy-Item "$($runtime.FullName)/*.dll" dist/bin/
           Copy-Item packaging/README.txt,README.md dist/
           Copy-Item docs dist/ -Recurse
           New-Item -ItemType Directory -Force artifacts | Out-Null
           $env:QT_QPA_PLATFORM = 'offscreen'
+          $env:PATH = "$env:SystemRoot/System32;$env:SystemRoot"
           $process = Start-Process dist/bin/simpleavshow.exe -ArgumentList '--demo','--preview-time','6','--screenshot',"$pwd/artifacts/editor.png" -Wait -PassThru
           if ($process.ExitCode -ne 0 -or !(Test-Path artifacts/editor.png)) { throw 'Packaged app smoke test failed' }
           Compress-Archive -Path dist/* -DestinationPath artifacts/SimpleAVShow-windows-x86_64.zip

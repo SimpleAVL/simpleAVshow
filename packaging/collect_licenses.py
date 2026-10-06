@@ -28,7 +28,11 @@ def main():
     shutil.copy2("packaging/README.txt", args.destination / "THIRD-PARTY.txt")
     shutil.copytree("packaging/licenses/qt", args.destination / "qt-license-texts", dirs_exist_ok=True)
     if args.platform == "macos":
-        metadata = subprocess.check_output(["brew", "info", "--json=v2", "--installed"], text=True)
+        roots = ["qtbase", "ffmpeg", "rtaudio", "rtmidi"]
+        dependencies = subprocess.check_output(
+            ["brew", "deps", "--installed", "--union", *roots], text=True).splitlines()
+        metadata = subprocess.check_output(
+            ["brew", "info", "--json=v2", *sorted(set(roots + dependencies))], text=True)
         (args.destination / "homebrew.json").write_text(metadata)
         cellar = Path(subprocess.check_output(["brew", "--cellar"], text=True).strip())
         for formula in json.loads(metadata)["formulae"]:
