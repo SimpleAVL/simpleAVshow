@@ -23,6 +23,7 @@ def main():
     parser.add_argument("destination", type=Path)
     parser.add_argument("--vcpkg", type=Path)
     parser.add_argument("--qt", type=Path)
+    parser.add_argument("--ffmpeg", type=Path)
     args = parser.parse_args()
     args.destination.mkdir(parents=True, exist_ok=True)
     shutil.copy2("packaging/README.txt", args.destination / "THIRD-PARTY.txt")
@@ -64,10 +65,12 @@ def main():
         (args.destination / "packages.txt").write_text(metadata)
         copy_notices(Path("/tmp/rtaudio"), args.destination / "rtaudio-6.0.1")
     else:
-        if not args.vcpkg or not args.qt:
-            parser.error("Windows requires --vcpkg and --qt")
+        if not args.vcpkg or not args.qt or not args.ffmpeg:
+            parser.error("Windows requires --vcpkg, --qt, and --ffmpeg")
         copy_notices(args.vcpkg / "share", args.destination / "vcpkg")
         copy_notices(args.qt, args.destination / "qt")
+        copy_notices(args.ffmpeg, args.destination / "ffmpeg")
+        shutil.copy2("packaging/ffmpeg-windows.json", args.destination / "ffmpeg-windows.json")
         shutil.copy2("vcpkg.json", args.destination / "vcpkg.json")
 
 

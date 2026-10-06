@@ -67,7 +67,9 @@ cmake --install build --config Release --prefix dist
 dist\bin\simpleavshow.exe
 ```
 
-CI uses the prebuilt Qt 6.8.3 SDK with `-DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON`; the default manifest builds Qt from source for local development. Release packaging includes dependency DLLs, Qt plugins, and third-party notices. Developer ID/code signing and notarization are not configured.
+CI uses prebuilt Qt 6.8.3 and a checksum-pinned FFmpeg 9.0 shared SDK from [BtbN](https://github.com/BtbN/FFmpeg-Builds). Only the app, RtAudio (with ASIO), and RtMidi are compiled; FFmpeg is not rebuilt. The pin is in [packaging/ffmpeg-windows.json](packaging/ffmpeg-windows.json). To use that SDK locally, run `python packaging/fetch_ffmpeg_windows.py ffmpeg-sdk`, then configure with `-DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON`, `-DCMAKE_PREFIX_PATH=<Qt SDK>`, and `-DSAV_FFMPEG_ROOT=<extracted FFmpeg SDK>`. Copy its `bin/*.dll` into `build/Release/` before running tests, and add its `bin` directory to PATH for the fixture generator.
+
+The default manifest builds Qt and FFmpeg from source for local development. Release packaging includes dependency DLLs, Qt plugins, and third-party notices. Developer ID/code signing and notarization are not configured.
 
 ## Linux
 

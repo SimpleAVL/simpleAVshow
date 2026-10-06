@@ -28,7 +28,9 @@ FFmpeg: https://ffmpeg.org/download.html (LGPL/GPL, according to build options)
 RtAudio: https://github.com/thestk/rtaudio (MIT, additional backend notices)
 RtMidi: https://github.com/thestk/rtmidi (MIT)
 Linux libraries: distribution source packages corresponding to licenses/.
-The Windows manifest and CI workflow record dependency versions/build recipes.
+The Windows manifest, ffmpeg-windows.json, and CI workflow record versions and
+build recipes. Windows uses BtbN's LGPL shared FFmpeg SDK:
+https://github.com/BtbN/FFmpeg-Builds
 The macOS package records Homebrew versions in licenses/homebrew.json.
 
 The bundled shared libraries can be replaced with compatible builds. No signing
