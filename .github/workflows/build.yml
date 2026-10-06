@@ -172,6 +172,7 @@ jobs:
           Copy-Item docs dist/ -Recurse
           New-Item -ItemType Directory -Force artifacts | Out-Null
           $env:QT_QPA_PLATFORM = 'offscreen'
+          Remove-Item Env:QT_PLUGIN_PATH -ErrorAction SilentlyContinue
           $env:PATH = "$env:SystemRoot/System32;$env:SystemRoot"
           $process = Start-Process dist/bin/simpleavshow.exe -ArgumentList '--demo','--preview-time','6','--screenshot',"$pwd/artifacts/editor.png" -Wait -PassThru
           if ($process.ExitCode -ne 0 -or !(Test-Path artifacts/editor.png)) { throw 'Packaged app smoke test failed' }
