@@ -22,6 +22,9 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
         if (transport.eventOverflow() && transport.state() != State::Stopped) {
             stopAll(); report("MIDI event queue overflow. Playback is stopped; inspect the project.");
         }
+        if (transport.audioReadFailed() && transport.state() != State::Stopped) {
+            stopAll(); report("Prepared audio cache could not be read. Playback is stopped; reopen the project to rebuild it.");
+        }
         emit tick();
     }); timer_.start();
     autosave_.setInterval(60000);
@@ -110,6 +113,7 @@ void Controller::toggle() {
     if (!routesValid()) { report("A track is routed beyond the opened device channels. Fix its routing or mute it."); return; }
     const bool playing = transport.state() == State::Playing;
     if (!playing) {
+        if (transport.audioReadFailed()) { report("Reopen the project to rebuild its unreadable audio cache"); return; }
         for (const auto& asset : project.assets) if (asset.video && !QFileInfo::exists(asset.path)) {
             report("Video source is missing: " + asset.path); return;
         }

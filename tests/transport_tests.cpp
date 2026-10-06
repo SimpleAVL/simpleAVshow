@@ -3,6 +3,21 @@
 #include <iostream>
 #include <stdexcept>
 #include <functional>
+#include <chrono>
+#include <cstdlib>
+#include <new>
+#include <thread>
+
+thread_local bool checkingCallback = false;
+thread_local unsigned callbackAllocations = 0;
+void* operator new(std::size_t size) {
+    if (checkingCallback) ++callbackAllocations;
+    if (auto* p = std::malloc(size ? size : 1)) return p;
+    throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void* operator new[](std::size_t size) { return ::operator new(size); }
+void operator delete[](void* p) noexcept { ::operator delete(p); }
 
 using namespace sav;
 namespace {
@@ -16,6 +31,32 @@ std::shared_ptr<Show> show(bool async = true) {
     p->tracks.push_back({"a", "Main", false, async});
     Clip c; c.id = "clip"; c.duration = 20; c.audio = audio({.1f, .2f, .3f, .4f, .5f, .6f, .7f, .8f});
     p->clips.push_back(c); return p;
+}
+class PatternStorage : public AudioStorage {
+public:
+    explicit PatternStorage(Frame length) : length_(length) {}
+    Frame length() const noexcept override { return length_; }
+    static float value(Frame frame) { return static_cast<float>(frame % 97) / 200.f; }
+    void read(Frame first, float* out, std::size_t count) const override {
+        if (checkingCallback) callbackReads.store(true);
+        reads.fetch_add(1);
+        if (fail.load()) throw std::runtime_error("Test cache failure");
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay.load()));
+        for (std::size_t i = 0; i < count; ++i) out[i * 2] = out[i * 2 + 1] = value(first + static_cast<Frame>(i));
+    }
+    mutable std::atomic<bool> callbackReads{false};
+    mutable std::atomic<unsigned> reads{0};
+    std::atomic<bool> fail{false};
+    std::atomic<int> delay{0};
+private:
+    Frame length_;
+};
+std::shared_ptr<AudioData> diskAudio(const std::shared_ptr<PatternStorage>& storage) {
+    auto data = std::make_shared<AudioData>(); data->storage = storage; return data;
+}
+void checkedRender(Transport& t, float* out, unsigned count, unsigned channels) {
+    checkingCallback = true; t.render(out, count, channels); checkingCallback = false;
+    expect(callbackAllocations == 0, "callback must never allocate");
 }
 void play(Transport& t) { expect(t.command({Action::Play}), "play command accepted"); }
 void render(Transport& t, unsigned count, std::vector<float>& output, unsigned channels = 2) { output.resize(count * channels); t.render(output.data(), count, channels); }
@@ -121,6 +162,73 @@ int main() {
             Transport t; t.configure(p); play(t); std::vector<float> out; render(t, 5, out);
             expect(t.state() == State::Held && t.position() == 3, "overload does not disturb hold timing");
             near(out[8], 1, "output is bounded"); expect(t.clipped(), "overload visible to UI");
+        }},
+        {"large unsorted timelines schedule boundaries without fixed capacities", [] {
+            auto p = show(false); p->clips.clear(); p->duration = frames(48 * 3600);
+            for (int i = 700; i >= 0; --i) {
+                Clip c; c.track = 0; c.start = i * 2; c.duration = 1; c.audio = audio({.1f}); p->clips.push_back(c);
+                p->markers.push_back({"m", "Cue", i * 2, false, MidiTiming::Arrival, {0xfa}});
+            }
+            Transport t; t.configure(p); play(t); std::vector<float> out(2804);
+            checkedRender(t, out.data(), 1402, 2);
+            for (int i = 0; i < 701; ++i) { near(out[i * 4], .1, "scheduled clip onset"); near(out[i * 4 + 2], 0, "exclusive clip end"); }
+            MidiEvent event; int count = 0;
+            while (t.takeMidi(event)) { expect(event.time == count * 2, "unsorted markers delivered in time order"); ++count; }
+            expect(count == 701 && !t.eventOverflow(), "large cue group delivered");
+            t.command({Action::Seek, 200}); checkedRender(t, out.data(), 1, 2); near(out[0], .1, "seek rebuilds active set");
+            p = show(false); p->markers.assign(2000, {"m", "Cue", 0, false, MidiTiming::Arrival, {0xfa}});
+            t.configure(p); play(t); checkedRender(t, out.data(), 1, 2); count = 0;
+            while (t.takeMidi(event)) ++count;
+            expect(count == 2000 && !t.eventOverflow(), "MIDI capacity scales to simultaneous project cues");
+        }},
+        {"disk read-ahead rotates safely with no callback reads or allocations", [] {
+            auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto p = show(false); p->duration = storage->length(); p->clips[0].duration = p->duration; p->clips[0].audio = diskAudio(storage);
+            Transport t; t.configure(p); play(t); std::vector<float> out(1024 * 2);
+            for (int block = 0; block < 128; ++block) {
+                checkedRender(t, out.data(), 1024, 2);
+                for (int i = 0; i < 1024; ++i) near(out[i * 2], PatternStorage::value(block * 1024 + i), "disk audio matches exact source frame");
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            expect(t.bufferWaits() == 0, "read-ahead keeps up with callback blocks");
+            expect(!storage->callbackReads.load(), "disk access never runs on callback thread");
+            expect(storage->reads.load() < 24, "disk reads occur per block rather than sample");
+        }},
+        {"cache miss waits without advancing any track and recovers at exact seek frame", [] {
+            auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto p = show(false); p->duration = storage->length(); p->clips[0].duration = p->duration; p->clips[0].audio = diskAudio(storage);
+            auto companion = p->clips[0]; companion.audio = audio({.1f, .2f, .3f, .4f}); companion.loop = true; p->clips.push_back(companion);
+            Transport t; t.configure(p); play(t); float out[2]; checkedRender(t, out, 1, 2);
+            storage->delay.store(30);
+            const Frame destination = frames(30 * 3600) + 123;
+            t.command({Action::Seek, destination}); checkedRender(t, out, 1, 2);
+            expect(t.position() == destination && t.bufferWaits() == 1, "seek miss freezes sample clock"); near(out[0], 0, "all tracks wait together");
+            for (int i = 0; i < 1000 && t.position() == destination; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1)); checkedRender(t, out, 1, 2);
+            }
+            expect(t.position() == destination + 1, "buffering recovers");
+            near(out[0], PatternStorage::value(destination) + .4, "recovery skips no samples on either track");
+            expect(!storage->callbackReads.load(), "seek never reads disk on callback");
+        }},
+        {"disk async loop keeps offset through hold, pause, seek, and Stop All", [] {
+            auto storage = std::make_shared<PatternStorage>(17003);
+            auto p = show(); p->clips[0].audio = diskAudio(storage); p->clips[0].offset = 8131; p->clips[0].loop = true;
+            p->markers.push_back({"hold", "Hold", 0, true}); Transport t; t.configure(p); play(t);
+            std::vector<float> out(40000 * 2); checkedRender(t, out.data(), 40000, 2);
+            for (Frame i = 0; i < 40000; ++i) near(out[i * 2], PatternStorage::value(8131 + i % (17003 - 8131)), "loop wraps to source in");
+            expect(t.state() == State::Held && t.position() == 0 && t.asyncVoices() == 1, "async hold continues on disk");
+            t.command({Action::Pause}); checkedRender(t, out.data(), 1, 2);
+            t.command({Action::Seek, 10}); checkedRender(t, out.data(), 1, 2);
+            near(out[0], PatternStorage::value(8131 + 40001 % (17003 - 8131)), "interior seek retains async cursor");
+            t.command({Action::StopAll}); checkedRender(t, out.data(), 1, 2); near(out[0], 0, "disk voice stops");
+            expect(!storage->callbackReads.load() && !t.bufferWaits(), "short loop is fully prebuffered");
+        }},
+        {"unreadable disk cache is reported outside the callback", [] {
+            auto storage = std::make_shared<PatternStorage>(frames(10)); storage->fail.store(true);
+            auto p = show(false); p->clips[0].audio = diskAudio(storage);
+            Transport t; t.configure(p); expect(t.audioReadFailed(), "pre-roll reports storage failure");
+            play(t); float out[2]; checkedRender(t, out, 1, 2); near(out[0], 0, "failure does not emit garbage");
+            expect(t.position() == 0 && !storage->callbackReads.load(), "failure never advances or accesses disk on callback");
         }},
         {"envelope interpolation follows exact frame position", [] {
             Envelope e{{{10, .2}, {20, .8}}}; near(e.at(0, 1), .2, "before first key"); near(e.at(15, 1), .5, "linear middle"); near(e.at(30, 1), .8, "after last key");

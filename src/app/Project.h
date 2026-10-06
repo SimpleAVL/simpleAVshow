@@ -5,7 +5,6 @@
 #include <QString>
 
 namespace sav {
-inline constexpr std::size_t audioBudget = 1024ull * 1024 * 1024;
 struct Project {
     QString title = "Untitled show";
     int width = 1920, height = 1080;
