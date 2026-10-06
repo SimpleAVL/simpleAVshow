@@ -21,7 +21,7 @@ Packages include runtime libraries and third-party notices; no SDK or Homebrew i
 ## Features
 
 - Audio, video, images, and text on a scrollable timeline. Drag to place/move, drag edges to trim, and snap to frames, clips, markers, and the playhead.
-- Four picture layers, composed into one program picture; project resolution/frame rate default to 1920 × 1080 / 24 fps.
+- Picture layers composed into one program picture; project resolution/frame rate default to 1920 × 1080 / 24 fps.
 - Holds freeze show time and normal media; Space continues. Manual pause holds the picture and leaves async audio playing.
 - Async audio can loop or finish naturally. Its source keeps advancing through holds while its automation freezes with show time.
 - Seeking inside an active async clip preserves its source cursor; seeking outside its `[start, end)` interval stops it. Inactive clips start at the sought source position on playback.
@@ -98,12 +98,13 @@ Use Stop All and leave Show mode before editing, saving, or changing audio/MIDI 
 
 Autosave writes `<project>.savshow.autosave` every minute after changes to a saved show. Open that sidecar and Save As a `.savshow` to recover. Imported media remains external; move the project and media together.
 
-## Prototype limits
+## Capacity and current constraints
 
-- Audio predecodes to 48 kHz stereo float PCM, with a 1 GiB project audio budget. Import mono/stereo stems separately; multichannel source files are rejected. Long shows need streamed/prebuffered audio in a later iteration.
-- Limits: 64 tracks/output channels, 256 clips/assets, 512 markers, 256 keyframes per curve, and 24 hours of show time.
+- Imported audio prepares to a temporary 48 kHz stereo float PCM cache on disk, then streams through worker-fed read-ahead buffers. There is no project audio byte budget. Preparation needs about 1.29 GiB of temporary disk space per hour of source audio; caches are shared by undo snapshots and removed when their last owner releases them. Opening a project rebuilds its caches. Mono/stereo stems are supported; multichannel source files still need separate stems.
+- Tracks, picture layers, clips, assets, markers, and automation curves grow with the project; there are no fixed prototype count caps or 24-hour duration cap. Output channel choices follow the interface. Frame timing is bounded only by exact integer representation in the JSON format. Real capacity depends on available memory, disk throughput, and simultaneous playback/composition work.
+- Playback keeps four 8192-frame stereo buffers (256 KiB) per armed disk-backed audio clip, plus small waveform summaries (about 1.4 MiB per source hour). The callback performs no disk reads, decoding, allocation, or locking. On a cache miss, all audio and show time wait together without skipping source frames; the audio wait counter records this. An unreadable cache stops playback and requires reopening the project.
 - Picture clips cannot overlap on one track; use separate layers and opacity automation for crossfades. Loops wrap to the clip's Source in point.
-- Video decoding/composition currently use software FFmpeg/QPainter. Four-layer 1080p24 performance is unverified on the show PC; hardware decoding/GPU composition remain future work. Delayed video frames retain the previous composition and increment a visible wait counter.
+- Video decoding/composition currently use software FFmpeg/QPainter. Multi-layer 1080p24 performance is unverified on the show PC; hardware decoding/GPU composition remain future work. Delayed video frames retain the previous composition and increment a visible wait counter.
 - Audio legs share one callback and align sample-for-sample. Video follows that clock, but display refresh and audio/monitor buffering need measurement and compensation.
 - MIDI runs on a separate worker without sample-timestamped hardware scheduling. Bridge latency needs measurement. Stop All does not command external MIDI receivers.
 - Source cursors persist across seeks, not across edits/device changes. Editing/saving are disabled while playing/held or while async voices remain active.
@@ -118,7 +119,7 @@ cmake --build build-core
 ctest --test-dir build-core --output-on-failure
 ```
 
-They cover hold boundaries, async looping/finish, pause/resume, seeks, MIDI timing, routing isolation, pan, clipping, Stop All, and project end. The Qt suite adds decoding/resampling, embedded A/V offsets, video seeks, save/reload/moved media, malformed projects, undo/redo, and Show-mode UI checks. FFmpeg CLI generates fixtures; media tests explicitly skip when it is unavailable. Clang/GCC builds support `-DSAV_SANITIZE=ON` for address/undefined-behavior checking.
+They cover hold boundaries, async looping/finish, pause/resume, seeks, MIDI timing, routing isolation, pan, clipping, Stop All, and project end, plus large timeline scheduling, disk-buffer handoffs, cache failures, and callback allocation/I/O checks. The Qt suite adds decoding/resampling, an audio source expanding beyond 1 GiB with bounded resident PCM, cache lifetime/cleanup, embedded A/V offsets, video seeks, large project round-trips, save/reload/moved media, malformed projects, undo/redo, and Show-mode UI checks. FFmpeg CLI generates fixtures; media tests explicitly skip when it is unavailable. Clang/GCC builds support `-DSAV_SANITIZE=ON` for address/undefined-behavior checking.
 
 Visual QA:
 

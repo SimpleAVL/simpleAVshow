@@ -16,7 +16,7 @@ struct MediaAsset {
     QImage still;
     std::shared_ptr<const AudioData> audio;
 };
-MediaAsset loadMedia(const QString& path, std::size_t byteBudget);
+MediaAsset loadMedia(const QString& path);
 
 // One worker per video clip. No decoding or disk access on the audio thread.
 class VideoReader {

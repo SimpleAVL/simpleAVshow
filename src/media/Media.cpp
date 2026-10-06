@@ -2,6 +2,8 @@
 #include <QFileInfo>
 #include <QUuid>
 #include <QImageReader>
+#include <QTemporaryFile>
+#include <QDir>
 #include <limits>
 #include <stdexcept>
 extern "C" {
@@ -17,6 +19,23 @@ namespace sav {
 namespace {
 std::string avError(int code) { char buffer[AV_ERROR_MAX_STRING_SIZE]; av_strerror(code, buffer, sizeof(buffer)); return buffer; }
 void checked(int result, const char* action) { if (result < 0) throw std::runtime_error(std::string(action) + ": " + avError(result)); }
+class PcmStorage final : public AudioStorage {
+public:
+    PcmStorage(QString path, Frame length) : path_(std::move(path)), length_(length) {}
+    ~PcmStorage() override { QFile::remove(path_); }
+    Frame length() const noexcept override { return length_; }
+    void read(Frame first, float* stereo, std::size_t count) const override {
+        if (first < 0 || first > length_ || count > static_cast<std::size_t>(length_ - first)) throw std::runtime_error("Invalid audio cache range");
+        QFile file(path_);
+        const qint64 bytes = static_cast<qint64>(count) * 2 * sizeof(float);
+        if (!file.open(QIODevice::ReadOnly) || !file.seek(first * 2 * sizeof(float)) ||
+            file.read(reinterpret_cast<char*>(stereo), bytes) != bytes)
+            throw std::runtime_error("Cannot read prepared audio cache: " + file.errorString().toStdString());
+    }
+private:
+    QString path_;
+    Frame length_;
+};
 double mediaOrigin(const AVFormatContext* format) {
     if (format->start_time != AV_NOPTS_VALUE) return format->start_time / static_cast<double>(AV_TIME_BASE);
     double origin = std::numeric_limits<double>::infinity();
@@ -56,7 +75,7 @@ struct Input {
 };
 }
 
-MediaAsset loadMedia(const QString& path, std::size_t byteBudget) {
+MediaAsset loadMedia(const QString& path) {
     if (!QFileInfo(path).isFile()) throw std::runtime_error("Media file is missing: " + path.toStdString());
     MediaAsset asset;
     asset.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -87,9 +106,11 @@ MediaAsset loadMedia(const QString& path, std::size_t byteBudget) {
         input.decoder(audio);
         if (input.codec->ch_layout.nb_channels > 2)
             throw std::runtime_error("Import mono or stereo stems separately; multichannel source files are not supported yet");
-        if (asset.duration > 0 && asset.duration * sampleRate * 2 * sizeof(float) > byteBudget)
-            throw std::runtime_error("Decoded audio would exceed the project's 1 GiB preloaded audio budget");
         auto data = std::make_shared<AudioData>(); data->mono = input.codec->ch_layout.nb_channels == 1;
+        QTemporaryFile cache(QDir::tempPath() + "/simpleavshow-pcm-XXXXXX");
+        if (!cache.open()) throw std::runtime_error("Cannot create audio cache: " + cache.errorString().toStdString());
+        Frame total = 0;
+        std::vector<float> scratch;
         AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
         checked(swr_alloc_set_opts2(&input.resampler, &stereo, AV_SAMPLE_FMT_FLT, sampleRate,
             &input.codec->ch_layout, input.codec->sample_fmt, input.codec->sample_rate, 0, nullptr), "Configure resampling");
@@ -103,11 +124,15 @@ MediaAsset loadMedia(const QString& path, std::size_t byteBudget) {
                 const auto pts = frame->best_effort_timestamp;
                 if (pts != AV_NOPTS_VALUE) {
                     const double startTime = pts * av_q2d(input.format->streams[audio]->time_base) - origin;
-                    if (!std::isfinite(startTime) || std::abs(startTime) > 86400) throw std::runtime_error("Invalid audio stream start time");
+                    if (!std::isfinite(startTime) || std::abs(startTime) > maxSeconds) throw std::runtime_error("Invalid audio stream start time");
                     const Frame start = frames(startTime);
                     if (start > 0) {
-                        if (static_cast<std::size_t>(start) * 2 * sizeof(float) > byteBudget) throw std::runtime_error("Audio start offset exceeds the decoded audio budget");
-                        data->samples.resize(static_cast<std::size_t>(start) * 2, 0.f);
+                        // A sparse zero-filled prefix preserves embedded A/V offsets
+                        // without allocating leading silence in RAM.
+                        total = start;
+                        if (!cache.resize(total * 2 * sizeof(float)) || !cache.seek(total * 2 * sizeof(float)))
+                            throw std::runtime_error("Cannot prepare audio start offset: " + cache.errorString().toStdString());
+                        data->peaks.resize(static_cast<std::size_t>((total + AudioData::peakStride - 1) / AudioData::peakStride), 0.f);
                     } else trimAtStart = -start;
                 }
             }
@@ -115,17 +140,26 @@ MediaAsset loadMedia(const QString& path, std::size_t byteBudget) {
             const int capacity = static_cast<int>(av_rescale_rnd(swr_get_delay(input.resampler, input.codec->sample_rate) + samples,
                 sampleRate, input.codec->sample_rate, AV_ROUND_UP));
             if (capacity <= 0) return 0;
-            const std::size_t previous = data->samples.size();
-            if ((previous + static_cast<std::size_t>(capacity) * 2) * sizeof(float) > byteBudget)
-                throw std::runtime_error("Decoded audio exceeds the project's 1 GiB preloaded audio budget");
-            data->samples.resize(previous + static_cast<std::size_t>(capacity) * 2);
-            auto* dest = reinterpret_cast<unsigned char*>(data->samples.data() + previous);
+            scratch.resize(static_cast<std::size_t>(capacity) * 2);
+            auto* dest = reinterpret_cast<unsigned char*>(scratch.data());
             const int written = swr_convert(input.resampler, &dest, capacity, frame ? const_cast<const unsigned char**>(frame->extended_data) : nullptr, samples);
             checked(written, "Resample audio");
-            data->samples.resize(previous + static_cast<std::size_t>(written) * 2);
             // FFmpeg's default mono -> stereo downmix applies -3 dB. Undo it;
             // the transport applies constant-power mono pan exactly once.
-            if (data->mono) for (std::size_t i = previous; i < data->samples.size(); ++i) data->samples[i] *= 1.41421356237f;
+            if (data->mono) for (int i = 0; i < written * 2; ++i) scratch[i] *= 1.41421356237f;
+            const Frame skip = std::min(trimAtStart, static_cast<Frame>(written));
+            trimAtStart -= skip;
+            const Frame kept = written - skip;
+            if (kept > maxFrame - total) throw std::runtime_error("Audio duration exceeds representable frame timing");
+            const qint64 bytes = kept * 2 * sizeof(float);
+            if (bytes && cache.write(reinterpret_cast<const char*>(scratch.data() + skip * 2), bytes) != bytes)
+                throw std::runtime_error("Cannot write audio cache (check available disk space): " + cache.errorString().toStdString());
+            data->peaks.resize(static_cast<std::size_t>((total + kept + AudioData::peakStride - 1) / AudioData::peakStride), 0.f);
+            for (Frame i = 0; i < kept; ++i) {
+                auto& peak = data->peaks[static_cast<std::size_t>((total + i) / AudioData::peakStride)];
+                peak = std::max(peak, std::max(std::abs(scratch[(skip + i) * 2]), std::abs(scratch[(skip + i) * 2 + 1])));
+            }
+            total += kept;
             return written;
         };
         auto receive = [&] {
@@ -145,12 +179,14 @@ MediaAsset loadMedia(const QString& path, std::size_t byteBudget) {
         if (readResult != AVERROR_EOF) checked(readResult, "Read audio packets");
         checked(avcodec_send_packet(input.codec, nullptr), "Flush audio decoder"); receive();
         while (convert(nullptr) > 0) {}
-        if (trimAtStart > 0) data->samples.erase(data->samples.begin(), data->samples.begin() + std::min<std::size_t>(data->samples.size(), trimAtStart * 2));
+        if (!cache.flush()) throw std::runtime_error("Cannot finish audio cache: " + cache.errorString().toStdString());
+        data->storage = std::make_shared<PcmStorage>(cache.fileName(), total);
+        cache.setAutoRemove(false); cache.close(); // Shared storage removes it after the last snapshot releases it.
         asset.audio = data;
         if (!asset.video) asset.duration = seconds(data->length());
     }
     if (!asset.video && !asset.audio) throw std::runtime_error("File contains no supported audio, video, or still image");
-    if (!std::isfinite(asset.duration) || asset.duration <= 0 || asset.duration > 86400) throw std::runtime_error("Media needs a finite duration of at most 24 hours");
+    if (!std::isfinite(asset.duration) || asset.duration <= 0 || asset.duration > maxSeconds) throw std::runtime_error("Media needs a finite, representable duration");
     return asset;
 }
 

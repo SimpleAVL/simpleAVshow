@@ -32,6 +32,7 @@ private:
     Controller& c_;
     static constexpr int header = 190, ruler = 58, row = 76;
     double zoom_ = 22;
+    double scrollScale_ = 1;
     int dragMode_ = 0, dragClip_ = -1, dragTrack_ = 0;
     Frame dragStart_ = 0, dragDuration_ = 0, dragOffset_ = 0, dragTime_ = 0;
     QPoint press_;

@@ -1,35 +1,81 @@
 #include "core/Transport.h"
+#include <chrono>
+#include <numeric>
 #include <stdexcept>
 
 namespace sav {
+Transport::~Transport() { stopAudioWorker(); }
+void Transport::stopAudioWorker() {
+    audioStop_.store(true);
+    if (audioWorker_.joinable()) audioWorker_.join();
+}
+void Transport::locate(Frame position) noexcept {
+    active_.clear();
+    for (const auto i : starts_) if (show_->clips[i].contains(position)) active_.push_back(i);
+    nextStart_ = static_cast<std::size_t>(std::upper_bound(starts_.begin(), starts_.end(), position,
+        [this](Frame t, std::size_t i) { return t < show_->clips[i].start; }) - starts_.begin());
+    nextMarker_ = static_cast<std::size_t>(std::lower_bound(markers_.begin(), markers_.end(), position,
+        [this](std::size_t i, Frame t) { return show_->markers[i].time < t; }) - markers_.begin());
+}
 void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
-    if (!show || show->clips.size() > maxClips || show->markers.size() > maxMarkers)
-        throw std::invalid_argument("Show exceeds transport limits");
+    if (!show || show->duration <= 0 || show->duration > maxFrame) throw std::invalid_argument("Invalid show duration");
+    stopAudioWorker();
+    audioReadFailed_.store(false);
     show_ = std::move(show);
-    commands_.clear(); midi_.clear();
-    voices_.fill({}); fired_.fill(false);
+    commands_.clear(); midi_.reset(std::max(std::size_t{1024}, show_->markers.size()));
+    voices_.assign(show_->clips.size(), {});
+    starts_.clear(); active_.clear(); active_.reserve(show_->clips.size());
+    buffers_.clear(); buffers_.resize(show_->clips.size());
     position_ = std::clamp(position, Frame{0}, show_->duration);
+    for (std::size_t i = 0; i < show_->clips.size(); ++i) {
+        const auto& c = show_->clips[i];
+        if (!c.audio || c.track < 0 || static_cast<std::size_t>(c.track) >= show_->tracks.size() || show_->tracks[c.track].visual) continue;
+        starts_.push_back(i);
+        if (c.audio->storage) {
+            Frame initial = c.offset + (c.contains(position_) ? position_ - c.start : 0);
+            if (initial >= c.audio->length()) initial = c.loop ? c.offset + (initial - c.offset) % std::max(Frame{1}, c.audio->length() - c.offset) : c.offset;
+            buffers_[i] = std::make_unique<AudioBuffer>(c.audio, c.offset, c.loop, initial);
+            buffers_[i]->service(); // Pre-roll before opening the device.
+            if (buffers_[i]->failed()) audioReadFailed_.store(true);
+        }
+    }
+    std::stable_sort(starts_.begin(), starts_.end(), [this](auto a, auto b) { return show_->clips[a].start < show_->clips[b].start; });
+    markers_.resize(show_->markers.size()); std::iota(markers_.begin(), markers_.end(), 0);
+    std::stable_sort(markers_.begin(), markers_.end(), [this](auto a, auto b) { return show_->markers[a].time < show_->markers[b].time; });
+    locate(position_);
     state_ = State::Stopped; heldMarker_ = -1;
     epoch_.fetch_add(1);
-    clipped_.store(false); overflow_.store(false);
-    for (std::size_t i = 0; i < show_->markers.size(); ++i) fired_[i] = show_->markers[i].time < position_;
+    clipped_.store(false); overflow_.store(false); bufferWaits_.store(0);
+    if (std::any_of(buffers_.begin(), buffers_.end(), [](const auto& buffer) { return bool(buffer); })) {
+        audioStop_.store(false);
+        audioWorker_ = std::thread([this] {
+            while (!audioStop_.load()) {
+                for (auto& buffer : buffers_) if (buffer) {
+                    buffer->service();
+                    if (buffer->failed()) audioReadFailed_.store(true);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        });
+    }
     publish(0);
 }
 
 void Transport::dispatch(int marker) noexcept {
-    if (!show_->markers[marker].message.empty() && !midi_.push({marker, position_, epoch_.load()}))
-        overflow_.store(true);
+    if (!show_->markers[marker].message.empty() && !midi_.push({marker, position_, epoch_.load()})) overflow_.store(true);
 }
-
 void Transport::apply(Command command) noexcept {
     switch (command.action) {
     case Action::Play:
         if (state_ == State::Playing || (position_ >= show_->duration && state_ != State::Held)) break;
-        // A hold is already consumed on arrival. Resume messages are dispatched once here.
         if (state_ == State::Held) {
-            for (std::size_t i = 0; i < show_->markers.size(); ++i)
-                if (fired_[i] && show_->markers[i].hold && show_->markers[i].time == position_ && show_->markers[i].timing == MidiTiming::Resume)
-                    dispatch(static_cast<int>(i));
+            // Only the consumed group at this hold can send resume messages.
+            auto begin = nextMarker_;
+            while (begin > 0 && show_->markers[markers_[begin - 1]].time == position_) --begin;
+            for (auto m = begin; m < nextMarker_; ++m) {
+                const auto i = markers_[m]; const auto& marker = show_->markers[i];
+                if (marker.hold && marker.timing == MidiTiming::Resume) dispatch(static_cast<int>(i));
+            }
         }
         state_ = State::Playing; heldMarker_ = -1;
         break;
@@ -38,20 +84,14 @@ void Transport::apply(Command command) noexcept {
         break;
     case Action::Seek: {
         const Frame next = std::clamp(command.position, Frame{0}, show_->duration);
-        for (std::size_t i = 0; i < show_->clips.size(); ++i) {
-            const auto& clip = show_->clips[i];
-            if (!clip.contains(next)) voices_[i] = {};
-        }
-        position_ = next;
-        heldMarker_ = -1;
-        // Seeking does not send MIDI. Landing exactly on a marker arms it for Play.
-        for (std::size_t i = 0; i < show_->markers.size(); ++i) fired_[i] = show_->markers[i].time < next;
+        for (std::size_t i = 0; i < show_->clips.size(); ++i) if (!show_->clips[i].contains(next)) voices_[i] = {};
+        position_ = next; heldMarker_ = -1; locate(next);
         if (state_ != State::Playing) state_ = State::Paused;
         epoch_.fetch_add(1);
         break;
     }
     case Action::StopAll:
-        voices_.fill({}); state_ = State::Stopped; heldMarker_ = -1;
+        std::fill(voices_.begin(), voices_.end(), Voice{}); state_ = State::Stopped; heldMarker_ = -1;
         epoch_.fetch_add(1); clipped_.store(false);
         break;
     }
@@ -66,35 +106,37 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
     for (unsigned f = 0; f < count; ++f) {
         const bool advancingAtBoundary = state_ == State::Playing;
         if (state_ == State::Playing) {
-            // The marker boundary is evaluated before rendering this sample. Never overshoot a hold.
-            for (std::size_t m = 0; m < show_->markers.size(); ++m) {
-                const auto& marker = show_->markers[m];
-                if (!fired_[m] && marker.time == position_) {
-                    fired_[m] = true;
-                    if (marker.timing == MidiTiming::Arrival) dispatch(static_cast<int>(m));
-                    if (marker.hold) { state_ = State::Held; heldMarker_ = static_cast<int>(m); }
-                    else if (marker.timing == MidiTiming::Resume) dispatch(static_cast<int>(m));
-                }
+            while (nextStart_ < starts_.size() && show_->clips[starts_[nextStart_]].start <= position_) {
+                const auto i = starts_[nextStart_++];
+                if (show_->clips[i].contains(position_)) active_.push_back(i);
+            }
+            while (nextMarker_ < markers_.size() && show_->markers[markers_[nextMarker_]].time == position_) {
+                const auto i = markers_[nextMarker_++]; const auto& marker = show_->markers[i];
+                if (marker.timing == MidiTiming::Arrival) dispatch(static_cast<int>(i));
+                if (marker.hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); }
+                else if (marker.timing == MidiTiming::Resume) dispatch(static_cast<int>(i));
             }
             if (state_ == State::Playing && position_ >= show_->duration) {
-                state_ = State::Ended; voices_.fill({});
+                state_ = State::Ended; std::fill(voices_.begin(), voices_.end(), Voice{}); active_.clear();
             }
         }
-        for (std::size_t i = 0; i < show_->clips.size(); ++i) {
-            const auto& clip = show_->clips[i];
-            if (!clip.audio || clip.track < 0 || static_cast<std::size_t>(clip.track) >= show_->tracks.size()) continue;
-            const auto& track = show_->tracks[clip.track];
-            if (track.visual) continue;
-            auto& voice = voices_[i];
-            Frame source = 0;
+        bool ready = true;
+        // Resolve all sources before mixing: a cache miss freezes the whole
+        // sample clock, so tracks remain aligned and no source frames are lost.
+        for (std::size_t cursor = 0; cursor < active_.size();) {
+            const auto i = active_[cursor]; const auto& clip = show_->clips[i]; const auto& track = show_->tracks[clip.track]; auto& voice = voices_[i];
+            voice.audible = false;
+            if (!clip.contains(position_) && state_ == State::Playing) {
+                voice = {}; active_[cursor] = active_.back(); active_.pop_back(); continue;
+            }
+            ++cursor;
+            Frame source;
             if (track.async) {
-                if (!clip.contains(position_) && state_ == State::Playing) voice = {};
                 if (voice.state == VoiceState::Dormant && clip.contains(position_) && advancingAtBoundary && state_ != State::Ended) {
-                    voice.state = VoiceState::Running;
-                    voice.source = clip.offset + position_ - clip.start;
+                    voice.state = VoiceState::Running; voice.source = clip.offset + position_ - clip.start;
                 }
                 if (voice.state != VoiceState::Running) continue;
-                source = voice.source++;
+                source = voice.source;
             } else {
                 if (state_ != State::Playing || !clip.contains(position_)) continue;
                 source = clip.offset + position_ - clip.start;
@@ -105,16 +147,33 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 if (clip.loop) source = clip.offset + (source - clip.offset) % std::max(Frame{1}, length - clip.offset);
                 else { if (track.async) voice.state = VoiceState::Finished; continue; }
             }
-            if (source < 0 || source >= length || track.muted) continue;
+            if (source < 0 || source >= length) continue;
+            if (track.async) voice.source = source; // Keep loops' cursors bounded, including long holds.
+            if (track.muted) continue;
+            if (buffers_[i]) {
+                if (!buffers_[i]->sample(source, voice.left, voice.right)) { ready = false; continue; }
+            } else {
+                voice.left = clip.audio->samples[source * 2]; voice.right = clip.audio->samples[source * 2 + 1];
+            }
+            voice.audible = true;
+        }
+        if (!ready) {
+            bufferWaits_.fetch_add(1, std::memory_order_relaxed);
+            break; // Remaining device samples stay silent; retry at the same show/source time.
+        }
+        for (const auto i : active_) {
+            const auto& clip = show_->clips[i]; const auto& track = show_->tracks[clip.track]; auto& voice = voices_[i];
+            if (track.async && voice.state == VoiceState::Running) ++voice.source;
+            if (!voice.audible) continue;
             const Frame local = position_ - clip.start;
             const double gain = track.gain * clip.volume.at(local, clip.gain);
             const double pan = std::clamp(track.pan + clip.balance.at(local, clip.pan), -1., 1.);
             const double leftGain = clip.audio->mono ? std::cos((pan + 1.) * 0.7853981633974483) : (pan > 0 ? 1. - pan : 1.);
             const double rightGain = clip.audio->mono ? std::sin((pan + 1.) * 0.7853981633974483) : (pan < 0 ? 1. + pan : 1.);
             if (output && track.left >= 0 && static_cast<unsigned>(track.left) < channels)
-                output[static_cast<std::size_t>(f) * channels + track.left] += static_cast<float>(clip.audio->samples[source * 2] * gain * leftGain);
+                output[static_cast<std::size_t>(f) * channels + track.left] += static_cast<float>(voice.left * gain * leftGain);
             if (output && track.right >= 0 && static_cast<unsigned>(track.right) < channels)
-                output[static_cast<std::size_t>(f) * channels + track.right] += static_cast<float>(clip.audio->samples[source * 2 + 1] * gain * rightGain);
+                output[static_cast<std::size_t>(f) * channels + track.right] += static_cast<float>(voice.right * gain * rightGain);
         }
         if (output) for (unsigned c = 0; c < channels; ++c) {
             float& sample = output[static_cast<std::size_t>(f) * channels + c];
@@ -126,14 +185,11 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
     }
     publish(peak);
 }
-
 void Transport::publish(float peak) noexcept {
     int active = 0;
-    for (std::size_t i = 0; show_ && i < show_->clips.size(); ++i) active += voices_[i].state == VoiceState::Running;
+    for (const auto i : active_) active += show_->tracks[show_->clips[i].track].async && voices_[i].state == VoiceState::Running;
     publishedPosition_.store(position_, std::memory_order_release);
     publishedState_.store(state_, std::memory_order_release);
-    publishedMarker_.store(heldMarker_);
-    publishedVoices_.store(active);
-    publishedPeak_.store(peak);
+    publishedMarker_.store(heldMarker_); publishedVoices_.store(active); publishedPeak_.store(peak);
 }
 }

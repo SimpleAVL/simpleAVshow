@@ -6,6 +6,7 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QPainterPath>
+#include <limits>
 
 namespace sav {
 namespace {
@@ -26,9 +27,14 @@ Timeline::Timeline(Controller& c, QWidget* parent) : QAbstractScrollArea(parent)
 }
 void Timeline::setZoom(double value) { zoom_ = value; refresh(); }
 void Timeline::refresh() {
-    horizontalScrollBar()->setRange(0, std::max(0, static_cast<int>(seconds(c_.project.show.duration) * zoom_) - viewport()->width() + header + 80));
-    horizontalScrollBar()->setPageStep(std::max(1, viewport()->width() - header));
-    verticalScrollBar()->setRange(0, std::max(0, static_cast<int>(c_.project.show.tracks.size()) * row + ruler - viewport()->height()));
+    const double width = std::max(0., seconds(c_.project.show.duration) * zoom_ - viewport()->width() + header + 80);
+    const double oldOffset = horizontalScrollBar()->value() * scrollScale_;
+    scrollScale_ = std::max(1., width / (std::numeric_limits<int>::max() - 1.));
+    horizontalScrollBar()->setRange(0, static_cast<int>(width / scrollScale_));
+    horizontalScrollBar()->setValue(static_cast<int>(std::min(width, oldOffset) / scrollScale_));
+    horizontalScrollBar()->setPageStep(std::max(1, static_cast<int>((viewport()->width() - header) / scrollScale_)));
+    const auto height = static_cast<std::int64_t>(c_.project.show.tracks.size()) * row + ruler - viewport()->height();
+    verticalScrollBar()->setRange(0, static_cast<int>(std::clamp(height, std::int64_t{0}, static_cast<std::int64_t>(std::numeric_limits<int>::max()))));
     verticalScrollBar()->setPageStep(std::max(1, viewport()->height() - ruler));
     selectedTrack = std::clamp(selectedTrack, 0, static_cast<int>(c_.project.show.tracks.size()) - 1);
     if (!selectedClip.isEmpty() && std::none_of(c_.project.show.clips.begin(), c_.project.show.clips.end(), [this](const Clip& clip) { return clip.id == selectedClip.toStdString(); })) selectedClip.clear();
@@ -36,8 +42,8 @@ void Timeline::refresh() {
     viewport()->update();
 }
 void Timeline::resizeEvent(QResizeEvent* event) { QAbstractScrollArea::resizeEvent(event); refresh(); }
-double Timeline::xAt(Frame t) const { return header + seconds(t) * zoom_ - horizontalScrollBar()->value(); }
-Frame Timeline::timeAt(double x) const { return std::clamp(frames((x - header + horizontalScrollBar()->value()) / zoom_), Frame{0}, c_.project.show.duration); }
+double Timeline::xAt(Frame t) const { return header + seconds(t) * zoom_ - horizontalScrollBar()->value() * scrollScale_; }
+Frame Timeline::timeAt(double x) const { return std::clamp(frames((x - header + horizontalScrollBar()->value() * scrollScale_) / zoom_), Frame{0}, c_.project.show.duration); }
 int Timeline::trackAt(double y) const { return static_cast<int>(std::floor((y - ruler + verticalScrollBar()->value()) / row)); }
 QRectF Timeline::clipRect(const Clip& clip) const {
     return QRectF(xAt(clip.start), ruler + clip.track * row - verticalScrollBar()->value() + 9, seconds(clip.duration) * zoom_, row - 18);
@@ -93,12 +99,13 @@ void Timeline::paintEvent(QPaintEvent*) {
         p.drawText(rect.adjusted(10, 3, -10, -3), Qt::AlignTop | Qt::AlignLeft, (clip.loop ? "↻  " : "") + name);
         if (clip.audio) {
             p.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 150), 1));
-            for (int x = std::max(header, static_cast<int>(rect.left()) + 6); x < std::min(viewport()->width(), static_cast<int>(rect.right()) - 6); x += 3) {
+            const int left = static_cast<int>(std::max(static_cast<double>(header), rect.left() + 6));
+            const int right = static_cast<int>(std::min(static_cast<double>(viewport()->width()), rect.right() - 6));
+            for (int x = left; x < right; x += 3) {
                 Frame sample = clip.offset + frames((x - rect.left()) / zoom_);
                 if (clip.loop && clip.audio->length() > clip.offset) sample = clip.offset + (sample - clip.offset) % (clip.audio->length() - clip.offset);
                 float amplitude = 0;
-                for (int j = 0; j < 32 && sample + j < clip.audio->length(); ++j) if (sample + j >= 0)
-                    amplitude = std::max(amplitude, std::abs(clip.audio->samples[(sample + j) * 2]));
+                amplitude = clip.audio->peakAt(sample);
                 const double height = std::min(14., 2. + amplitude * 24.);
                 p.drawLine(QPointF(x, rect.bottom() - 19 - height), QPointF(x, rect.bottom() - 19 + height));
             }
@@ -139,7 +146,7 @@ void Timeline::paintEvent(QPaintEvent*) {
     QFont font = p.font(); font.setPointSize(9); p.setFont(font);
     for (double t = first; xAt(frames(t)) < viewport()->width(); t += interval) {
         const double x = xAt(frames(t)); p.setPen(QColor("#8395ad"));
-        p.drawText(QRectF(x + 5, 2, 80, 22), Qt::AlignLeft | Qt::AlignVCenter, QString("%1:%2").arg(static_cast<int>(t) / 60, 2, 10, QChar('0')).arg(static_cast<int>(t) % 60, 2, 10, QChar('0')));
+        p.drawText(QRectF(x + 5, 2, 80, 22), Qt::AlignLeft | Qt::AlignVCenter, QString("%1:%2").arg(static_cast<qint64>(t) / 60, 2, 10, QChar('0')).arg(static_cast<qint64>(t) % 60, 2, 10, QChar('0')));
         p.setPen(QColor("#40516b")); p.drawLine(QPointF(x, 22), QPointF(x, 29));
     }
     for (const auto& marker : show.markers) {
