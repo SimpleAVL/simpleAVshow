@@ -7,7 +7,6 @@ Includes audio/video/image/text tracks, four composed picture layers, hold and M
 | Platform | Package | Launch |
 | --- | --- | --- |
 | macOS 15+ Apple Silicon | `SimpleAVShow-macos-arm64.zip` | Extract; move `simpleavshow.app` to Applications |
-| macOS 15+ Intel | `SimpleAVShow-macos-x86_64.zip` | Extract; move `simpleavshow.app` to Applications |
 | Windows 11 x64 | `SimpleAVShow-windows-x86_64.zip` | Extract the whole ZIP; run `bin/simpleavshow.exe` |
 | Linux x64 | `SimpleAVShow-linux-x86_64.AppImage` | `chmod +x`, then run; Ubuntu 24.04 / glibc 2.39 or newer |
 

@@ -14,15 +14,7 @@ jobs:
       - run: cmake --build build-core --config Release
       - run: ctest --test-dir build-core -C Release --output-on-failure
   macos:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15
-            arch: arm64
-          - os: macos-15-intel
-            arch: x86_64
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-15
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
       MACOSX_DEPLOYMENT_TARGET: '15.0'
@@ -46,15 +38,15 @@ jobs:
       - name: Smoke test the packaged app
         run: QT_QPA_PLATFORM=offscreen dist/simpleavshow.app/Contents/MacOS/simpleavshow --demo --preview-time 6 --screenshot artifacts/editor.png
       - name: Archive
-        run: ditto -c -k --sequesterRsrc dist artifacts/SimpleAVShow-macos-${{ matrix.arch }}.zip
+        run: ditto -c -k --sequesterRsrc dist artifacts/SimpleAVShow-macos-arm64.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-${{ matrix.arch }}-release
-          path: artifacts/SimpleAVShow-macos-${{ matrix.arch }}.zip
+          name: macos-arm64-release
+          path: artifacts/SimpleAVShow-macos-arm64.zip
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-${{ matrix.arch }}-preview
+          name: macos-arm64-preview
           path: artifacts/editor.png
   linux:
     runs-on: ubuntu-24.04

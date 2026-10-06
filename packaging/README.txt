@@ -1,7 +1,8 @@
 SimpleAVShow 0.1.0 — development prerelease
 
 Windows: extract the entire ZIP, then run bin/simpleavshow.exe.
-macOS 15 or newer: extract the ZIP, then drag simpleavshow.app to Applications.
+macOS 15 or newer, Apple Silicon: extract the ZIP, then drag simpleavshow.app
+       to Applications. Intel Macs are not a supported target.
 Linux: chmod +x SimpleAVShow-*.AppImage, then run it. Built on Ubuntu 24.04
        (x86_64, glibc 2.39 or newer). If FUSE is unavailable, run with
        APPIMAGE_EXTRACT_AND_RUN=1.

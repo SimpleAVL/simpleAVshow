@@ -29,13 +29,27 @@ def main():
     shutil.copytree("packaging/licenses/qt", args.destination / "qt-license-texts", dirs_exist_ok=True)
     if args.platform == "macos":
         roots = ["qtbase", "ffmpeg", "rtaudio", "rtmidi"]
-        dependencies = subprocess.check_output(
-            ["brew", "deps", "--installed", "--union", *roots], text=True).splitlines()
-        metadata = subprocess.check_output(
-            ["brew", "info", "--json=v2", *sorted(set(roots + dependencies))], text=True)
-        (args.destination / "homebrew.json").write_text(metadata)
+        metadata = json.loads(subprocess.check_output(
+            ["brew", "info", "--json=v2", "--installed"], text=True))
+        installed_formulae = {formula["full_name"]: formula for formula in metadata["formulae"]}
+        pending, wanted = list(roots), set()
+        while pending:
+            name = pending.pop()
+            if name in wanted:
+                continue
+            wanted.add(name)
+            formula = installed_formulae.get(name)
+            if formula is None:
+                raise RuntimeError(f"Installed runtime dependency not found: {name}")
+            for installed in formula["installed"]:
+                pending.extend(dep["full_name"] for dep in installed.get("runtime_dependencies", []))
+        # Use each installed bottle's recorded dependencies; today's formula may
+        # have changed since that bottle was built (e.g. OpenSSL or xz support).
+        metadata["formulae"] = [installed_formulae[name] for name in sorted(wanted)]
+        metadata["casks"] = []
+        (args.destination / "homebrew.json").write_text(json.dumps(metadata, indent=2) + "\n")
         cellar = Path(subprocess.check_output(["brew", "--cellar"], text=True).strip())
-        for formula in json.loads(metadata)["formulae"]:
+        for formula in metadata["formulae"]:
             for installed in formula["installed"]:
                 copy_notices(cellar / formula["name"] / installed["version"],
                              args.destination / formula["name"])

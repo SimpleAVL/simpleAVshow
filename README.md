@@ -10,7 +10,7 @@ This is a **development prototype**. CI builds and tests the app on macOS, Windo
 
 Download the packages from [GitHub Releases](https://github.com/staubichsauger/simpleAVshow/releases):
 
-- macOS 15 or newer: separate Apple Silicon (`arm64`) and Intel (`x86_64`) ZIPs. Extract and move `simpleavshow.app` into Applications.
+- macOS 15 or newer, Apple Silicon (`arm64`): extract the ZIP and move `simpleavshow.app` into Applications. Intel Macs are outside the supported targets.
 - Windows 11 x64: extract the entire ZIP and run `bin/simpleavshow.exe`.
 - Linux x64: AppImage built on Ubuntu 24.04 (glibc ≥ 2.39). Make it executable with `chmod +x SimpleAVShow-linux-x86_64.AppImage`, then run it. Set `APPIMAGE_EXTRACT_AND_RUN=1` if FUSE is unavailable.
 
