@@ -69,9 +69,9 @@ def main():
             continue
         seen.add(binary)
         binary.chmod(binary.stat().st_mode | 0o200)
-        # Remove signatures before rewriting load commands; re-sign everything later.
-        subprocess.run(["codesign", "--remove-signature", str(binary)],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Keep the signature segment while rewriting load commands. Removing it
+        # first can leave malformed __LINKEDIT padding with macOS 15 codesign.
+        # All modified binaries are re-signed once dependency rewriting finishes.
         for dep in dependencies(binary):
             if system(dep):
                 continue
