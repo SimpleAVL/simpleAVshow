@@ -3,4 +3,8 @@ build*/
 *.user
 *.savshow.autosave
 artifacts/
-
+dist/
+AppDir/
+release-assets/
+vcpkg-cache/
+__pycache__/

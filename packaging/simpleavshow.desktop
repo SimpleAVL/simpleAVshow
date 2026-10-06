@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=SimpleAVShow
+Comment=Timeline playback for live stage performances
+Exec=simpleavshow
+Icon=simpleavshow
+Categories=AudioVideo;AudioVideoEditing;
+Terminal=false

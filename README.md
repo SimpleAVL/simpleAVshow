@@ -4,7 +4,17 @@
 
 A native timeline editor and playback engine for stage performances. Windows 11 is the primary show target; macOS and Linux share the C++20 codebase.
 
-This is a **development prototype**. The macOS app, transport, real-media decoding, project persistence, and editor interactions have been built and tested locally. Windows/ASIO, Linux, physical channel routing, MIDI equipment, and full rehearsal runs need validation on the show hardware. CI is configured but has not been run from this local repository.
+This is a **development prototype**. CI builds and tests the app on macOS, Windows, and Linux, then launches the packaged app with a demo screenshot as a smoke test. Physical channel routing, MIDI equipment, and full rehearsal runs still need validation on the show hardware.
+
+## Downloads
+
+Download the packages from [GitHub Releases](https://github.com/staubichsauger/simpleAVshow/releases):
+
+- macOS: separate Apple Silicon (`arm64`) and Intel (`x86_64`) ZIPs. Extract and move `simpleavshow.app` into Applications.
+- Windows 11 x64: extract the entire ZIP and run `bin/simpleavshow.exe`.
+- Linux x64: AppImage built on Ubuntu 24.04 (glibc ≥ 2.39). Make it executable with `chmod +x SimpleAVShow-linux-x86_64.AppImage`, then run it. Set `APPIMAGE_EXTRACT_AND_RUN=1` if FUSE is unavailable.
+
+Packages include runtime libraries and third-party notices; no SDK or Homebrew installation is required. These first prereleases are unsigned (macOS uses ad-hoc signing without notarization), so downloaded-app security prompts may appear. Read the included `README.txt` and [hardware validation](docs/hardware-validation.md) before using a build for a performance.
 
 ## Features
 
@@ -57,7 +67,7 @@ cmake --install build --config Release --prefix dist
 dist\bin\simpleavshow.exe
 ```
 
-Public release packaging, signing, and third-party notices are not implemented yet.
+CI uses the prebuilt Qt 6.8.3 SDK with `-DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON`; the default manifest builds Qt from source for local development. Release packaging includes dependency DLLs, Qt plugins, and third-party notices. Developer ID/code signing and notarization are not configured.
 
 ## Linux
 
