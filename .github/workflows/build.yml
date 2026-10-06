@@ -1,0 +1,67 @@
+name: Native build and tests
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  core:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build-core -DSAV_BUILD_APP=OFF
+      - run: cmake --build build-core --config Release
+      - run: ctest --test-dir build-core -C Release --output-on-failure
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install qtbase ffmpeg rtaudio rtmidi pkgconf ninja
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$(brew --prefix)
+      - run: cmake --build build
+      - run: ctest --test-dir build --output-on-failure
+      - run: QT_QPA_PLATFORM=offscreen build/simpleavshow.app/Contents/MacOS/simpleavshow --demo --preview-time 6 --screenshot artifacts/editor.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-editor-preview
+          path: artifacts/editor.png
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y qt6-base-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev librtmidi-dev libasound2-dev pkg-config ninja-build ffmpeg
+      - name: Build RtAudio 6 (Ubuntu's packaged RtAudio is older)
+        run: |
+          git clone --branch 6.0.1 --depth 1 https://github.com/thestk/rtaudio.git /tmp/rtaudio
+          cmake -S /tmp/rtaudio -B /tmp/rtaudio-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DRTAUDIO_BUILD_TESTING=OFF -DRTAUDIO_API_PULSE=OFF -DRTAUDIO_API_JACK=OFF
+          cmake --build /tmp/rtaudio-build
+          sudo cmake --install /tmp/rtaudio-build
+          sudo ldconfig
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build
+      - run: ctest --test-dir build --output-on-failure
+  windows:
+    runs-on: windows-latest
+    env:
+      VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/vcpkg-cache,readwrite"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: vcpkg-cache
+          key: windows-vcpkg-${{ hashFiles('vcpkg.json') }}
+      - name: Configure (ASIO enabled)
+        shell: pwsh
+        run: cmake -S . -B build -A x64 "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows
+      - run: cmake --build build --config Release --parallel 4
+      - name: Tests
+        shell: pwsh
+        run: |
+          $env:PATH = "$pwd/build/vcpkg_installed/x64-windows/tools/ffmpeg;$env:PATH"
+          ctest --test-dir build -C Release --output-on-failure
+      - run: cmake --install build --config Release --prefix dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-development-build
+          path: dist

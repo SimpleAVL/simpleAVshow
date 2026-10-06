@@ -1,0 +1,15 @@
+{
+  "name": "simpleavshow",
+  "version-string": "0.1.0",
+  "builtin-baseline": "001713e802f5cf619a64461b918161be6a0634f0",
+  "dependencies": [
+    { "name": "qtbase", "default-features": false, "features": ["widgets", "concurrent", "testlib", "png", "jpeg"] },
+    { "name": "qtbase", "default-features": false, "features": ["windeployqt"], "platform": "windows" },
+    { "name": "ffmpeg", "default-features": false, "features": ["avcodec", "avformat", "swresample", "swscale", "ffmpeg"] },
+    { "name": "rtaudio", "features": ["asio"], "platform": "windows" },
+    { "name": "rtaudio", "features": ["alsa"], "platform": "linux" },
+    { "name": "rtaudio", "platform": "osx" },
+    "rtmidi",
+    { "name": "rtmidi", "features": ["alsa"], "platform": "linux" }
+  ]
+}

@@ -1,0 +1,45 @@
+#include "media/AudioDevice.h"
+
+namespace sav {
+std::vector<std::pair<RtAudio::Api, QString>> AudioDevice::apis() const {
+    std::vector<RtAudio::Api> compiled; RtAudio::getCompiledApi(compiled);
+    std::vector<std::pair<RtAudio::Api, QString>> result;
+    for (auto api : compiled) result.emplace_back(api, QString::fromStdString(RtAudio::getApiDisplayName(api)));
+    return result;
+}
+std::vector<DeviceDescription> AudioDevice::devices(RtAudio::Api api) {
+    RtAudio probe(api); std::vector<DeviceDescription> result;
+    for (unsigned id : probe.getDeviceIds()) {
+        auto info = probe.getDeviceInfo(id);
+        if (info.outputChannels) result.push_back({id, QString::fromStdString(info.name), info.outputChannels, info.isDefaultOutput});
+    }
+    return result;
+}
+bool AudioDevice::open(RtAudio::Api api, unsigned device, unsigned channels, unsigned buffer, QString& error) {
+    close();
+    try {
+        audio_ = std::make_unique<RtAudio>(api);
+        RtAudio::StreamParameters output; output.deviceId = device; output.nChannels = channels; output.firstChannel = 0;
+        RtAudio::StreamOptions options; options.streamName = "SimpleAVShow"; options.flags = RTAUDIO_SCHEDULE_REALTIME;
+        channels_ = channels; buffer_ = buffer; underruns_.store(0);
+        if (audio_->openStream(&output, nullptr, RTAUDIO_FLOAT32, sampleRate, &buffer_, callback, this, &options) != RTAUDIO_NO_ERROR)
+            throw std::runtime_error(audio_->getErrorText());
+        if (audio_->startStream() != RTAUDIO_NO_ERROR) throw std::runtime_error(audio_->getErrorText());
+        return true;
+    } catch (const std::exception& e) { error = QString::fromUtf8(e.what()); close(); return false; }
+}
+void AudioDevice::close() {
+    if (audio_) {
+        if (audio_->isStreamRunning()) audio_->stopStream();
+        if (audio_->isStreamOpen()) audio_->closeStream();
+        audio_.reset();
+    }
+    channels_ = 0;
+}
+int AudioDevice::callback(void* output, void*, unsigned frames, double, RtAudioStreamStatus status, void* context) {
+    auto& device = *static_cast<AudioDevice*>(context);
+    if (status) device.underruns_.fetch_add(1, std::memory_order_relaxed);
+    device.transport_.render(static_cast<float*>(output), frames, device.channels_);
+    return 0;
+}
+}
