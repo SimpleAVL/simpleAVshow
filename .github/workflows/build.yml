@@ -154,7 +154,7 @@ jobs:
           Copy-Item "$env:FFMPEG_ROOT/bin/*.dll" build/Release/
           $env:PATH = "$env:FFMPEG_ROOT/bin;$env:PATH"
           ctest --test-dir build -C Release --output-on-failure
-      - run: cmake --install build --config Release --prefix dist
+      - run: cmake --install build --config Release --prefix "$pwd/dist"
       - name: Package and smoke test
         shell: pwsh
         run: |
