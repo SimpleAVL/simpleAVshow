@@ -25,9 +25,9 @@ Packages include runtime libraries and third-party notices; no SDK or Homebrew i
 - Holds freeze show time and normal media; Space continues. Manual pause holds the picture and leaves async audio playing.
 - Async audio can loop or finish naturally. Its source keeps advancing through holds while its automation freezes with show time.
 - Seeking inside an active async clip preserves its source cursor; seeking outside its `[start, end)` interval stops it. Inactive clips start at the sought source position on playback.
-- One audio interface, configurable channel count, and per-track routing, gain, pan, and mute. Main, ambience, guide, and click tracks are created by default; guide/click outputs start disconnected.
+- Automatic audio preparation on Play, remembered devices, configurable channel count, and per-track routing presets, gain, pan, and mute. Main, ambience, guide, and click tracks are created by default; guide/click outputs start disconnected.
 - Clip automation for volume, pan, picture X/Y, scale, and opacity; linear keyframes and fade helpers.
-- Native MIDI output ports, including MIDI bridges. Channel/system messages and SysEx; each cue can fire on arrival or resume.
+- Native MIDI output ports, including MIDI bridges, with automatic reconnection on Play. A guided cue editor offers note names, named controls, programs, pitch bend, message previews, and test sending. Raw channel/system messages and SysEx remain available; each cue can fire on arrival or resume.
 - Physical fullscreen program output, editing/seek lock in Show mode, atomic save, relative media paths, autosave sidecars, and 32-step undo/redo.
 
 NDI, multiple audio devices, MIDI input, Wings import, plugins, and advanced effects are outside v1.
@@ -44,7 +44,7 @@ ctest --test-dir build --output-on-failure
 open build/simpleavshow.app --args --demo
 ```
 
-The demonstration contains generated ambience, click, text, a backdrop, three holds, and a fade after the first hold. Saving exports generated WAV/PNG assets into a sibling `.media` directory. Nothing plays until you connect an audio device and press Play.
+The demonstration contains generated ambience, click, text, a backdrop, three holds, and a fade after the first hold. Saving exports generated WAV/PNG assets into a sibling `.media` directory. Press Play to prepare your remembered audio output, or your default speakers on first use. Missing remembered devices block playback with an explanation; they do not fall back to other speakers.
 
 ## Windows 11
 
@@ -60,7 +60,7 @@ ctest --test-dir build -C Release --output-on-failure
 build\Release\simpleavshow.exe --demo
 ```
 
-The vcpkg manifest pins dependencies and enables ASIO. The initial Qt/FFmpeg build can take a while. Choose the interface's ASIO driver in Outputs, choose the interface, and open the needed number of output channels.
+The vcpkg manifest pins dependencies and enables ASIO. The initial Qt/FFmpeg build can take a while. In Outputs, enable Show driver and latency settings to choose the interface's ASIO driver, choose the interface, and set the needed number of output channels.
 
 Stage the development app with dependency DLLs and Qt plugins:
 
@@ -87,14 +87,14 @@ build/simpleavshow --demo
 ## Operating a show
 
 1. Set title, resolution, frame rate, and duration in Project settings.
-2. Open Outputs and connect the audio interface. Last selections are remembered by name; devices are not automatically connected on startup.
-3. Route tracks in the inspector. For four channels: Main 1/2, Guide 3/Off, Click 4/Off. Mono pan is constant-power; use Pan −1 on a left-only mono route for unity gain.
+2. Press Play to prepare audio automatically. On first use it chooses the default output; afterward it restores the remembered device by name. For a show interface, choose it in Outputs. Selecting a device connects it immediately; Use audio settings applies channel/buffer changes. Refresh devices after plugging in equipment. A missing remembered device blocks playback until it returns or you choose a replacement.
+3. Use Quick routing in the track inspector, then Apply track: stereo speakers, a mono output, or silent. Guide and Click start silent. For four channels: Main stereo 1/2, Guide mono 3, Click mono 4. Mono presets set pan for unity gain on the connected leg. Custom left/right routing remains available.
 4. Import and drag media onto compatible tracks. Video with embedded audio creates an audio companion on the first synchronous audio track. These are independent clips: trim/move both when changing their timing.
-5. Add hold/MIDI cues at the playhead and edit them in the inspector. Connect MIDI output before playing a project with MIDI messages.
+5. Add hold/MIDI cues at the playhead and edit them in the inspector. Choose the MIDI destination once in Outputs; selecting it connects immediately, and Play restores it next time. Choose an action such as Play a note, Change a control, or Select a program; only relevant fields appear. Programs display 1–128 (sent as MIDI 0–127); pitch bend displays −8192 to +8191 with 0 centered. Raw MIDI / SysEx accepts hex bytes and reports incomplete messages inline. Send test triggers the displayed message immediately without applying the cue or advancing show time. Note tests may need a matching Stop a note message; Stop All does not stop external equipment.
 6. Select a clip to edit transformations and automation. Keyframe times are relative to clip start and follow show time. Apply changes with the relevant Apply button.
 7. Choose a physical program display, save, and enable Show mode. Space plays/pauses/resumes; Escape or Stop All silences internal audio. The project end also stops voices.
 
-Use Stop All and leave Show mode before editing, saving, or changing audio/MIDI connections. Outputs can be opened during playback or a marker hold in edit mode; locked connection controls are visibly disabled with an explanation and a Stop All button to unlock them. The program display can be opened without stopping playback. Outputs buttons and the menu item are disabled in Show mode or during media preparation, with explanatory tooltips. Text fields keep normal Space behavior. Seeking never sends MIDI; landing exactly on a marker arms it for Play. Non-hold cues fire on crossing, including those configured for resume, because there is no hold to resume.
+Use Stop All and leave Show mode before editing, saving, testing MIDI, or manually changing audio/MIDI connections. Play may prepare remembered devices in Show mode while playback is stopped. Outputs can be opened during playback or a marker hold in edit mode; locked connection controls are visibly disabled with an explanation and a Stop All button to unlock them. The program display can be opened without stopping playback. Outputs buttons and the menu item are disabled in Show mode or during media preparation, with explanatory tooltips. Text fields keep normal Space behavior. Seeking never sends MIDI; landing exactly on a marker arms it for Play. Non-hold cues fire on crossing, including those configured for resume, because there is no hold to resume.
 
 Autosave writes `<project>.savshow.autosave` every minute after changes to a saved show. Open that sidecar and Save As a `.savshow` to recover. Imported media remains external; move the project and media together.
 
@@ -119,7 +119,7 @@ cmake --build build-core
 ctest --test-dir build-core --output-on-failure
 ```
 
-They cover hold boundaries, async looping/finish, pause/resume, seeks, MIDI timing, routing isolation, pan, clipping, Stop All, and project end, plus large timeline scheduling, disk-buffer handoffs, cache failures, and callback allocation/I/O checks. The Qt suite adds decoding/resampling, an audio source expanding beyond 1 GiB with bounded resident PCM, cache lifetime/cleanup, embedded A/V offsets, video seeks, large project round-trips, save/reload/moved media, malformed projects, undo/redo, and Show-mode UI checks. FFmpeg CLI generates fixtures; media tests explicitly skip when it is unavailable. Clang/GCC builds support `-DSAV_SANITIZE=ON` for address/undefined-behavior checking.
+They cover hold boundaries, async looping/finish, pause/resume, seeks, MIDI timing, routing isolation, pan, clipping, Stop All, and project end, plus large timeline scheduling, disk-buffer handoffs, cache failures, and callback allocation/I/O checks. The Qt suite adds decoding/resampling, an audio source expanding beyond 1 GiB with bounded resident PCM, cache lifetime/cleanup, embedded A/V offsets, video seeks, large project round-trips, save/reload/moved media, malformed projects, undo/redo, Show-mode UI checks, device selection without fallback, MIDI editor byte round trips, raw-message validation, and cue editing. FFmpeg CLI generates fixtures; media tests explicitly skip when it is unavailable. Clang/GCC builds support `-DSAV_SANITIZE=ON` for address/undefined-behavior checking.
 
 Visual QA:
 

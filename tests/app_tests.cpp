@@ -1,4 +1,5 @@
 #include "app/MainWindow.h"
+#include "app/MidiMessageEditor.h"
 #include "app/Project.h"
 #include "media/Media.h"
 #include "media/MidiOutput.h"
@@ -16,6 +17,11 @@
 #include <QLabel>
 #include <QAction>
 #include <QTimer>
+#include <QComboBox>
+#include <QSpinBox>
+#include <QLineEdit>
+#include <QSettings>
+#include <QCheckBox>
 #include <limits>
 
 using namespace sav;
@@ -24,10 +30,162 @@ float sampleAt(const AudioData& audio, Frame frame) {
     if (!audio.storage) return audio.samples[frame * 2];
     float stereo[2]; audio.storage->read(frame, stereo, 1); return stereo[0];
 }
+class UnreadableStorage : public AudioStorage {
+public:
+    Frame length() const noexcept override { return frames(2); }
+    void read(Frame, float*, std::size_t) const override { throw std::runtime_error("Cache is unavailable"); }
+};
 }
 class AppTests : public QObject {
     Q_OBJECT
+    QTemporaryDir settingsDir_;
 private slots:
+    void initTestCase() {
+        QVERIFY(settingsDir_.isValid());
+        QCoreApplication::setOrganizationName("SimpleAVShowTests");
+        QCoreApplication::setApplicationName("PlaybackUX");
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir_.path());
+        QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, settingsDir_.path());
+    }
+    void init() { QSettings().clear(); }
+    void audioSelectionRestoresByNameWithoutFallback() {
+        const std::vector<DeviceDescription> devices = {{17, "Show interface", 8, false}, {42, "Speakers", 2, true}};
+        auto selected = playbackDevice(devices, {}); QVERIFY(selected); QCOMPARE(selected->id, 42u);
+        selected = playbackDevice(devices, "Show interface"); QVERIFY(selected); QCOMPARE(selected->id, 17u);
+        QVERIFY(!playbackDevice(devices, "Unplugged interface")); QVERIFY(!playbackDevice({}, {}));
+        selected = playbackDevice({{99, "Only output", 2, false}}, {}); QVERIFY(selected); QCOMPARE(selected->id, 99u);
+    }
+    void midiEditorPreservesExistingMessages() {
+        MidiMessageEditor editor; std::vector<unsigned char> result; QString error;
+        const std::vector<std::vector<unsigned char>> messages = {
+            {}, {0x90, 60, 100}, {0x9f, 127, 0}, {0x80, 0, 64}, {0xbf, 64, 127},
+            {0xc0, 0}, {0xcf, 127}, {0xa2, 60, 90}, {0xd4, 127},
+            {0xe0, 0, 0}, {0xe1, 0, 64}, {0xef, 127, 127}, {0xf0, 0x7d, 1, 0xf7}, {0xfa}, {0xf2, 0, 2}
+        };
+        for (const auto& bytes : messages) {
+            editor.setMessage(bytes); QVERIFY2(editor.message(result, error), qPrintable(error)); QVERIFY(result == bytes);
+        }
+        editor.setMessage({0xcf, 127});
+        QCOMPARE(editor.findChild<QSpinBox*>("midiValue")->value(), 128);
+        QVERIFY(editor.findChild<QLabel*>("midiMessagePreview")->text().contains("Program 128"));
+        editor.setMessage({0xe1, 0, 64}); QCOMPARE(editor.findChild<QSpinBox*>("midiValue")->value(), 0);
+    }
+    void midiEditorUsesMusicalFieldsAndValidatesRawInput() {
+        MidiMessageEditor editor; editor.show();
+        auto* type = editor.findChild<QComboBox*>("midiMessageType");
+        auto* note = editor.findChild<QComboBox*>("midiNote");
+        auto* control = editor.findChild<QComboBox*>("midiController");
+        auto* value = editor.findChild<QSpinBox*>("midiValue");
+        auto* amount = editor.findChild<QSpinBox*>("midiAmount");
+        auto* raw = editor.findChild<QLineEdit*>("midiRawBytes");
+        std::vector<unsigned char> bytes; QString error;
+        QVERIFY(type && note && control && value && amount && raw);
+        type->setCurrentIndex(1); QVERIFY(note->isVisible()); QVERIFY(control->isHidden()); QVERIFY(raw->isHidden());
+        QVERIFY(editor.message(bytes, error)); QVERIFY(bytes == std::vector<unsigned char>({0x90, 60, 100}));
+        type->setCurrentIndex(3); QVERIFY(note->isHidden()); QVERIFY(control->isVisible());
+        QVERIFY(editor.message(bytes, error)); QVERIFY(bytes == std::vector<unsigned char>({0xb0, 7, 127}));
+        type->setCurrentIndex(4); value->setValue(128); QVERIFY(amount->isHidden());
+        QVERIFY(editor.message(bytes, error)); QVERIFY(bytes == std::vector<unsigned char>({0xc0, 127}));
+        type->setCurrentIndex(7); value->setValue(-8192); QVERIFY(editor.message(bytes, error));
+        QVERIFY(bytes == std::vector<unsigned char>({0xe0, 0, 0}));
+        value->setValue(8191); QVERIFY(editor.message(bytes, error)); QVERIFY(bytes == std::vector<unsigned char>({0xe0, 127, 127}));
+        type->setCurrentIndex(8); QVERIFY(raw->isVisible()); QVERIFY(value->isHidden());
+        raw->setText("F0 7D 01"); QVERIFY(!editor.message(bytes, error)); QVERIFY(error.contains("F7"));
+        raw->setText("GG 01"); QVERIFY(!editor.message(bytes, error));
+        raw->setText("f0 7d 01 f7"); QVERIFY(editor.message(bytes, error)); QVERIFY(bytes == std::vector<unsigned char>({0xf0, 0x7d, 1, 0xf7}));
+        raw->clear(); QVERIFY(!editor.message(bytes, error));
+        type->setCurrentIndex(0); QVERIFY(editor.message(bytes, error)); QVERIFY(bytes.empty());
+    }
+    void missingMidiExplainsSetupAndDoesNotStartPlayback() {
+        Controller c; auto project = newProject();
+        project.show.markers = {{"midi", "Lighting cue", frames(1), false, MidiTiming::Arrival, {0xc0, 0}}};
+        c.replace(project); QVERIFY(c.needsMidi()); c.toggle();
+        QCOMPARE(c.transport.state(), State::Stopped); QVERIFY(!c.device.running());
+        QVERIFY(c.status.contains("Choose a MIDI destination")); QCOMPARE(c.playbackProblem, c.status);
+        QSettings().setValue("midi/port", "SimpleAVShow absent MIDI test destination");
+        c.setShowMode(true); c.toggle(); QCOMPARE(c.transport.state(), State::Stopped);
+        QVERIFY(c.status.contains("missing")); QVERIFY(c.status.contains("SimpleAVShow absent MIDI test destination"));
+        c.setShowMode(false); QVERIFY(c.configureMidi(-1)); QVERIFY(QSettings().value("midi/port").toString().isEmpty()); QVERIFY(c.playbackProblem.isEmpty());
+    }
+    void midiTestingRespectsPlaybackAndShowLocks() {
+        Controller c; c.setShowMode(true); QVERIFY(!c.testMidi({0x90, 60, 100}));
+        c.setShowMode(false); QVERIFY(!c.testMidi({0x90, 60})); QVERIFY(c.status.contains("Complete"));
+        QVERIFY(c.transport.command({Action::Play})); c.transport.render(nullptr, 1, 0);
+        QVERIFY(!c.testMidi({0x90, 60, 100})); QVERIFY(c.status.contains("Stop All"));
+        c.stopAll(); QVERIFY(!c.testMidi({0x90, 60, 100})); QVERIFY(c.status.contains("Choose a MIDI destination"));
+    }
+    void cueEditorAppliesProgramAndRejectsIncompleteSysex() {
+        MainWindow window; auto project = newProject();
+        project.show.markers = {{"cue", "Select scene", frames(1), false, MidiTiming::Arrival, {0xc0, 0}}};
+        window.controller().replace(project); window.show();
+        window.findChild<Timeline*>()->selectMarker("cue");
+        auto* type = window.findChild<QComboBox*>("midiMessageType");
+        auto* value = window.findChild<QSpinBox*>("midiValue");
+        auto* timing = window.findChild<QComboBox*>("midiCueTiming"); QVERIFY(type && value && timing); QVERIFY(!timing->isEnabled());
+        QPushButton* apply = nullptr;
+        for (auto* b : window.findChildren<QPushButton*>()) if (b->text() == "Apply cue") apply = b;
+        QVERIFY(apply); value->setValue(128); QTest::mouseClick(apply, Qt::LeftButton);
+        QVERIFY(window.controller().project.show.markers[0].message == std::vector<unsigned char>({0xc0, 127}));
+        type->setCurrentIndex(8); window.findChild<QLineEdit*>("midiRawBytes")->setText("F0 7D 01");
+        QTest::mouseClick(apply, Qt::LeftButton);
+        QVERIFY(window.controller().project.show.markers[0].message == std::vector<unsigned char>({0xc0, 127}));
+        QVERIFY(window.controller().status.contains("F7"));
+        window.controller().undo(); QVERIFY(window.controller().project.show.markers[0].message == std::vector<unsigned char>({0xc0, 0}));
+        window.controller().dirty = false;
+    }
+    void routingPresetsApplyMonoAtFullLevelAndUndo() {
+        MainWindow window; window.show();
+        auto* timeline = window.findChild<Timeline*>(); timeline->selectedTrack = 4;
+        window.controller().setShowMode(false); // Refresh the inspector for the selected Guide track.
+        auto* preset = window.findChild<QComboBox*>("trackRoutingPreset"); QVERIFY(preset);
+        QPushButton* apply = nullptr;
+        for (auto* b : window.findChildren<QPushButton*>()) if (b->text() == "Apply track") apply = b;
+        QVERIFY(apply);
+        preset->setCurrentIndex(preset->findData(3));
+        QVERIFY(QMetaObject::invokeMethod(preset, "activated", Q_ARG(int, preset->currentIndex())));
+        QTest::mouseClick(apply, Qt::LeftButton);
+        const auto& guide = window.controller().project.show.tracks[4];
+        QCOMPARE(guide.left, 2); QCOMPARE(guide.right, -1); QCOMPARE(guide.pan, -1.);
+        window.controller().undo(); QCOMPARE(window.controller().project.show.tracks[4].left, -1);
+        QCOMPARE(window.controller().project.show.tracks[4].right, -1);
+        window.findChild<QSpinBox*>("trackLeftOutput")->setValue(128);
+        window.findChild<QSpinBox*>("trackRightOutput")->setValue(129);
+        QTest::mouseClick(apply, Qt::LeftButton);
+        QCOMPARE(window.controller().project.show.tracks[4].left, 127);
+        QCOMPARE(window.controller().project.show.tracks[4].right, 128);
+        window.controller().dirty = false;
+    }
+    void unreadableCacheBlocksAutomaticAudioPreparation() {
+        Controller c; auto project = newProject();
+        MediaAsset asset; asset.id = "broken-cache"; asset.name = "Broken cache"; asset.duration = 2;
+        auto audio = std::make_shared<AudioData>(); audio->storage = std::make_shared<UnreadableStorage>(); asset.audio = audio;
+        project.assets.insert(asset.id, asset);
+        Clip clip; clip.id = "clip"; clip.assetId = asset.id.toStdString(); clip.track = 2; clip.duration = frames(2);
+        project.show.clips.push_back(clip); bindAudio(project); c.replace(project);
+        QVERIFY(c.transport.audioReadFailed());
+        c.toggle(); QCOMPARE(c.transport.state(), State::Stopped); QVERIFY(!c.device.running());
+        QVERIFY(c.status.contains("unreadable audio cache")); QCOMPARE(c.playbackProblem, c.status);
+        c.setShowMode(true); c.toggle(); QCOMPARE(c.transport.state(), State::Stopped); QVERIFY(!c.device.running());
+    }
+    void missingRememberedDevicesAreVisibleInOutputs() {
+        QSettings().setValue("audio/device", "SimpleAVShow absent audio test destination");
+        QSettings().setValue("audio/channels", 128);
+        QSettings().setValue("midi/port", "SimpleAVShow absent MIDI test destination");
+        MainWindow window; window.show(); bool audioMissing = false, midiMissing = false;
+        QTimer::singleShot(0, &window, [&] {
+            auto* dialog = window.findChild<QDialog*>("outputSettingsDialog"); if (!dialog) return;
+            auto* audio = dialog->findChild<QComboBox*>("audioOutputDevice");
+            auto* midi = dialog->findChild<QComboBox*>("midiOutputDevice");
+            auto* apply = dialog->findChild<QPushButton*>("connectAudioOutput");
+            auto* channels = dialog->findChild<QSpinBox*>("audioOutputChannels");
+            audioMissing = audio && audio->currentText().contains("absent audio test destination (missing)") && apply && !apply->isEnabled() && channels && channels->value() == 128;
+            midiMissing = midi && midi->currentText().contains("absent MIDI test destination (missing)");
+            dialog->reject();
+        });
+        window.findChild<QPushButton*>("outputSettingsButton")->click();
+        QVERIFY(audioMissing); QVERIFY(midiMissing);
+    }
     void demoSaveReloadAndDecodedAudio() {
         QTemporaryDir dir; QVERIFY(dir.isValid());
         Controller c; c.replace(demoProject()); c.save(dir.filePath("opening.savshow"));
@@ -101,9 +259,11 @@ private slots:
         auto find = [&](QString text) -> QPushButton* { for (auto* b : buttons) if (b->text() == text) return b; return nullptr; };
         QVERIFY(find("+ Text")); QTest::mouseClick(find("+ Text"), Qt::LeftButton); QCOMPARE(window.controller().project.show.clips.size(), std::size_t{1});
         QVERIFY(find("+ Hold / MIDI cue")); QTest::mouseClick(find("+ Hold / MIDI cue"), Qt::LeftButton); QCOMPARE(window.controller().project.show.markers.size(), std::size_t{1});
+        // A show requiring an unchosen MIDI destination must stay stopped, including in Show mode.
+        QVERIFY(window.controller().edit([](Project& p) { p.show.markers[0].message = {0xc0, 0}; }));
         QVERIFY(find("Show mode")); QTest::mouseClick(find("Show mode"), Qt::LeftButton); QVERIFY(window.controller().showMode);
         QTest::mouseClick(find("+ Text"), Qt::LeftButton); QCOMPARE(window.controller().project.show.clips.size(), std::size_t{1});
-        // Space does not silently run a show without a connected audio device.
+        // Play reports the missing MIDI destination before opening audio.
         QTest::keyClick(&window, Qt::Key_Space); QCOMPARE(window.controller().transport.state(), State::Stopped);
         window.controller().dirty = false;
     }

@@ -4,9 +4,12 @@
 #include <QString>
 #include <atomic>
 #include <memory>
+#include <optional>
 
 namespace sav {
 struct DeviceDescription { unsigned id; QString name; unsigned channels; bool isDefault; };
+// A remembered interface must never silently fall back to another destination.
+std::optional<DeviceDescription> playbackDevice(const std::vector<DeviceDescription>& devices, const QString& rememberedName);
 class AudioDevice {
 public:
     explicit AudioDevice(Transport& transport) : transport_(transport) {}

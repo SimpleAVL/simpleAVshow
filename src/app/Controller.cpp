@@ -10,6 +10,7 @@
 
 namespace sav {
 Controller::Controller(QObject* parent) : QObject(parent), project(newProject()), device(transport) {
+    midiName_ = QSettings().value("midi/port").toString();
     arm(0);
     timer_.setInterval(16);
     connect(&timer_, &QTimer::timeout, this, [this] {
@@ -17,13 +18,14 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
             configured_ = false; device.close();
             // Once the device is closed, it is safe to render a zero-sized control block.
             transport.command({Action::StopAll}); transport.render(nullptr, 0, 0);
-            report("Audio device stopped. Playback is halted; reconnect it in Outputs.");
+            report("Audio output stopped. Press Play to reconnect, or choose another device in Outputs.");
+            playbackProblem = status;
         }
         if (transport.eventOverflow() && transport.state() != State::Stopped) {
             stopAll(); report("MIDI event queue overflow. Playback is stopped; inspect the project.");
         }
         if (transport.audioReadFailed() && transport.state() != State::Stopped) {
-            stopAll(); report("Prepared audio cache could not be read. Playback is stopped; reopen the project to rebuild it.");
+            stopAll(); report("Prepared audio cache could not be read. Playback is stopped; reopen the project to rebuild it."); playbackProblem = status;
         }
         emit tick();
     }); timer_.start();
@@ -54,7 +56,7 @@ bool Controller::edit(const std::function<void(Project&)>& mutation) {
     } catch (const std::exception& e) { report(QString::fromUtf8(e.what())); return false; }
 }
 void Controller::replace(Project next, QString projectPath) {
-    validate(next); project = std::move(next); path = std::move(projectPath); dirty = false;
+    validate(next); project = std::move(next); path = std::move(projectPath); dirty = false; playbackProblem.clear();
     undo_.clear(); redo_.clear();
     arm(0); report("Project ready. Space plays or pauses; Stop All silences async audio."); emit changed();
 }
@@ -109,17 +111,16 @@ bool Controller::routesValid() const {
 }
 void Controller::toggle() {
     if (busy) return;
-    if (!device.running()) { report("Configure an audio device in Outputs before playback"); return; }
-    if (!routesValid()) { report("A track is routed beyond the opened device channels. Fix its routing or mute it."); return; }
     const bool playing = transport.state() == State::Playing;
     if (!playing) {
-        if (transport.audioReadFailed()) { report("Reopen the project to rebuild its unreadable audio cache"); return; }
+        playbackProblem.clear();
+        if (transport.audioReadFailed()) { report("Reopen the project to rebuild its unreadable audio cache"); playbackProblem = status; return; }
         for (const auto& asset : project.assets) if (asset.video && !QFileInfo::exists(asset.path)) {
-            report("Video source is missing: " + asset.path); return;
+            report("Video source is missing: " + asset.path); playbackProblem = status; return;
         }
-        for (const auto& marker : project.show.markers) if (!marker.message.empty() && !midi.connected()) {
-            report("This show has MIDI cues. Connect a MIDI output in Outputs before playback."); return;
-        }
+        if (needsMidi() && !prepareMidi()) { playbackProblem = status; return; }
+        if (!prepareAudio()) { playbackProblem = status; return; }
+        if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return; }
     }
     if (!transport.command({playing ? Action::Pause : Action::Play})) report("Transport command queue is full");
 }
@@ -135,10 +136,14 @@ void Controller::stopAll() {
 }
 bool Controller::configureAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer) {
     if (!canEdit()) return false;
+    return openAudio(api, id, std::move(name), channels, buffer);
+}
+bool Controller::openAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer) {
     api_ = api; deviceId_ = id; channels_ = channels; buffer_ = buffer; audioName = name;
     QString error;
     configured_ = device.open(api, id, channels, buffer, error);
     if (configured_) {
+        playbackProblem.clear();
         QSettings settings; settings.setValue("audio/api", static_cast<int>(api)); settings.setValue("audio/device", name);
         settings.setValue("audio/channels", channels); settings.setValue("audio/buffer", buffer);
         report(QString("%1 · %2 channels · 48 kHz · %3 samples").arg(name).arg(channels).arg(device.bufferFrames()));
@@ -148,10 +153,68 @@ bool Controller::configureAudio(RtAudio::Api api, unsigned id, QString name, uns
 }
 bool Controller::configureMidi(int port) {
     if (!canEdit()) return false;
+    return openMidi(port);
+}
+bool Controller::openMidi(int port) {
     stopMidiThread();
     QString error; const bool ok = midi.open(port, error); startMidiThread();
-    if (ok) QSettings().setValue("midi/port", midi.name());
+    if (ok) { midiName_ = midi.name(); QSettings().setValue("midi/port", midiName_); playbackProblem.clear(); }
     report(ok ? (port < 0 ? "MIDI output disconnected" : "MIDI output: " + midi.name()) : error); return ok;
+}
+bool Controller::needsMidi() const {
+    return std::any_of(project.show.markers.begin(), project.show.markers.end(), [](const Marker& marker) { return !marker.message.empty(); });
+}
+bool Controller::prepareMidi() {
+    if (midi.connected()) return true;
+    // Automatic preparation is allowed in Show mode, but never while voices are live.
+    if (busy || transport.state() == State::Playing || transport.state() == State::Held || transport.asyncVoices()) {
+        report("Use Stop All before reconnecting MIDI in Outputs."); return false;
+    }
+    const QString remembered = QSettings().value("midi/port").toString();
+    midiName_ = remembered;
+    if (remembered.isEmpty()) {
+        report("Choose a MIDI destination in Outputs once. It will reconnect automatically when you press Play."); return false;
+    }
+    const auto ports = midi.ports(); const int port = ports.indexOf(remembered);
+    if (port < 0) { report("MIDI destination “" + remembered + "” is missing. Plug it in, or choose another destination in Outputs."); return false; }
+    return openMidi(port);
+}
+bool Controller::prepareAudio() {
+    if (device.running()) return true;
+    if (busy || transport.state() == State::Playing || transport.state() == State::Held || transport.asyncVoices()) {
+        report("Use Stop All before reconnecting audio in Outputs."); return false;
+    }
+    QSettings settings;
+    const QString remembered = settings.value("audio/device").toString();
+    const auto api = remembered.isEmpty() ? RtAudio::UNSPECIFIED : static_cast<RtAudio::Api>(settings.value("audio/api", 0).toInt());
+    try {
+        const auto selected = playbackDevice(device.devices(api), remembered);
+        if (!selected) {
+            report(remembered.isEmpty() ? "No audio output found. Plug in speakers or an interface, then press Play again." :
+                "Audio output “" + remembered + "” is missing. Plug it in, or choose another device in Outputs."); return false;
+        }
+        unsigned required = 1;
+        for (const auto& track : project.show.tracks) if (!track.visual && !track.muted)
+            required = std::max(required, static_cast<unsigned>(std::max(track.left, track.right) + 1));
+        if (required > selected->channels) {
+            report(QString("%1 has %2 outputs, but a track is routed to output %3. Choose a larger interface in Outputs or change track routing.")
+                .arg(selected->name).arg(selected->channels).arg(required)); return false;
+        }
+        const unsigned channels = std::min(selected->channels, std::max(required, settings.value("audio/channels", 2).toUInt()));
+        const unsigned buffer = settings.value("audio/buffer", 512).toUInt();
+        return openAudio(api, selected->id, selected->name, channels, buffer);
+    } catch (const std::exception& error) { report("Cannot prepare audio. Open Outputs to choose a device. " + QString::fromUtf8(error.what())); return false; }
+}
+bool Controller::testMidi(const std::vector<unsigned char>& bytes) {
+    if (!canEdit() || bytes.empty()) return false;
+    if (!validMidi(bytes)) { report("Complete the MIDI message before testing it."); return false; }
+    if (!prepareMidi()) return false;
+    QString error;
+    stopMidiThread();
+    const bool sent = midi.send(bytes, error);
+    startMidiThread();
+    if (!sent) { report(error); return false; }
+    report("Test message sent to " + midi.name() + ". External devices may keep playing until they receive a stop message."); return true;
 }
 void Controller::setShowMode(bool enabled) { showMode = enabled; emit changed(); }
 QImage Controller::compose() {
