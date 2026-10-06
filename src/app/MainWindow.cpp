@@ -1,4 +1,5 @@
 #include "app/MainWindow.h"
+#include "app/MidiMessageEditor.h"
 #include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -64,9 +65,6 @@ QPushButton* button(QString text, QLayout* layout = nullptr) {
 QLabel* section(QString text) { auto* l = new QLabel(text); l->setObjectName("section"); return l; }
 struct ProjectResult { Project project; QString error; };
 struct MediaResult { std::vector<MediaAsset> assets; QStringList errors; };
-QString midiHex(const std::vector<unsigned char>& bytes) {
-    QStringList list; for (auto b : bytes) list << QString("%1").arg(b, 2, 16, QChar('0')).toUpper(); return list.join(' ');
-}
 }
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
@@ -91,6 +89,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
       QGroupBox { border: 1px solid #2d3d51; border-radius: 5px; margin-top: 14px; padding-top: 9px; }
       QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #94aaca; }
       QScrollArea { border: none; background: #192331; }
+      QWidget#inspectorContent, QWidget#outputSettingsContent { background: #192331; }
       QTabWidget::pane { border: none; }
       QTabBar::tab { background: #182332; padding: 10px 14px; color: #91a5bf; }
       QTabBar::tab:selected { color: #e2ecfa; background: #24344b; border-bottom: 2px solid #729aec; }
@@ -171,7 +170,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     libraryPane->setMinimumWidth(210); upper->addWidget(libraryPane);
     auto* previewPane = new QWidget; auto* previewLayout = new QVBoxLayout(previewPane); previewLayout->setContentsMargins(18, 8, 18, 14);
     auto* previewTop = new QHBoxLayout; previewTop->addWidget(section("PROGRAM")); previewTop->addStretch();
-    openOutputButton_ = button("Open output", previewTop); openOutputButton_->setObjectName("openOutputSettingsButton");
+    openOutputButton_ = button("Audience display…", previewTop); openOutputButton_->setObjectName("openOutputSettingsButton");
     connect(openOutputButton_, &QPushButton::clicked, this, &MainWindow::outputSettings); previewLayout->addLayout(previewTop);
     preview_ = new ProgramView; previewLayout->addWidget(preview_, 1);
     hint_ = new QLabel("Build a show or open the demonstration from File"); hint_->setWordWrap(true); hint_->setStyleSheet("color: #8fa8c9;"); previewLayout->addWidget(hint_);
@@ -205,18 +204,32 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 void MainWindow::buildInspector() {
-    auto* wrapper = new QWidget; auto* layout = new QVBoxLayout(wrapper); layout->setContentsMargins(14, 10, 14, 12); layout->addWidget(section("INSPECTOR"));
+    auto* wrapper = new QWidget; wrapper->setObjectName("inspectorContent"); auto* layout = new QVBoxLayout(wrapper); layout->setContentsMargins(14, 10, 14, 12); layout->addWidget(section("INSPECTOR"));
     inspector_ = new QStackedWidget; layout->addWidget(inspector_, 1);
     // Track panel.
     auto* trackPage = new QWidget; auto* trackLayout = new QVBoxLayout(trackPage); trackLayout->setContentsMargins(0, 0, 0, 0);
     auto* trackForm = new QFormLayout; trackName_ = new QLineEdit; trackMute_ = new QCheckBox("Mute / hide track");
     trackForm->addRow("Name", trackName_); trackForm->addRow(trackMute_); trackLayout->addLayout(trackForm);
     trackAudio_ = new QGroupBox("Audio and routing"); auto* audio = new QFormLayout(trackAudio_);
-    trackAsync_ = new QCheckBox("Async · continues through holds"); audio->addRow(trackAsync_);
+    trackAsync_ = new QCheckBox("Keep playing through pauses / holds"); audio->addRow(trackAsync_);
     trackGain_ = realSpin(0, 4, .05); trackPan_ = realSpin(-1, 1, .05); trackLeft_ = intSpin(0, 64); trackRight_ = intSpin(0, 64);
     trackLeft_->setSpecialValueText("Off"); trackRight_->setSpecialValueText("Off");
-    audio->addRow("Gain", trackGain_); audio->addRow("Pan", trackPan_); audio->addRow("Left → output", trackLeft_); audio->addRow("Right → output", trackRight_);
-    auto* routeHint = new QLabel("Outputs are numbered from 1.\nFor mono guide/click, connect one leg.\nUse Outputs to open enough channels."); routeHint->setWordWrap(true); routeHint->setStyleSheet("color: #88a0be; font-size: 10px;"); audio->addRow(routeHint);
+    auto* route = new QComboBox; route->setObjectName("trackRoutingPreset");
+    route->addItem("Choose a routing preset…", -2); route->addItem("Speakers · stereo outputs 1 + 2", -1);
+    route->addItem("Silent · no output", -3);
+    route->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); route->setMinimumContentsLength(10);
+    for (int n = 1; n <= 64; ++n) route->addItem(QString("Mono · output %1").arg(n), n);
+    audio->addRow("Quick routing", route);
+    connect(route, &QComboBox::activated, this, [this, route] {
+        const int output = route->currentData().toInt();
+        if (output == -1) { trackLeft_->setValue(1); trackRight_->setValue(2); trackPan_->setValue(0); }
+        else if (output == -3) { trackLeft_->setValue(0); trackRight_->setValue(0); }
+        else if (output > 0) { trackLeft_->setValue(output); trackRight_->setValue(0); trackPan_->setValue(-1); }
+        route->setCurrentIndex(0);
+    });
+    trackPan_->setToolTip("−1 = left, 0 = center, +1 = right. Mono presets use −1 for full level on the connected leg.");
+    audio->addRow("Volume (1 = full)", trackGain_); audio->addRow("Pan", trackPan_); audio->addRow("Left → output", trackLeft_); audio->addRow("Right → output", trackRight_);
+    auto* routeHint = new QLabel("Choose a preset, then Apply track. Guide and Click start silent so they do not reach the audience. Use separate interface outputs for them."); routeHint->setWordWrap(true); routeHint->setStyleSheet("color: #88a0be; font-size: 10px;"); audio->addRow(routeHint);
     trackLayout->addWidget(trackAudio_); auto* applyTrackButton = button("Apply track", trackLayout); connect(applyTrackButton, &QPushButton::clicked, this, &MainWindow::applyTrack); trackLayout->addStretch(); inspector_->addWidget(trackPage);
     // Clip panel.
     auto* clipPage = new QWidget; auto* clipLayout = new QVBoxLayout(clipPage); clipLayout->setContentsMargins(0, 0, 0, 0);
@@ -271,17 +284,28 @@ void MainWindow::buildInspector() {
     auto* cuePage = new QWidget; auto* cueLayout = new QVBoxLayout(cuePage); cueLayout->setContentsMargins(0, 0, 0, 0);
     auto* cueForm = new QFormLayout; markerName_ = new QLineEdit; markerTime_ = realSpin(0, 86400, 1); markerHold_ = new QCheckBox("Hold · Space to continue");
     cueForm->addRow("Name", markerName_); cueForm->addRow("Time (s)", markerTime_); cueForm->addRow(markerHold_); cueLayout->addLayout(cueForm);
-    auto* midiBox = new QGroupBox("MIDI output"); auto* midiForm = new QFormLayout(midiBox);
-    midiTiming_ = new QComboBox; midiTiming_->addItems({"On arrival", "On resume"}); midiType_ = new QComboBox;
-    midiType_->addItems({"None", "Note On", "Note Off", "Control Change", "Program Change", "Poly pressure", "Channel pressure", "Pitch bend", "Raw MIDI / SysEx"});
-    midiChannel_ = intSpin(1, 16); midiData1_ = intSpin(0, 127); midiData2_ = intSpin(0, 127); midiRaw_ = new QLineEdit;
-    midiRaw_->setPlaceholderText("F0 7D 01 F7"); midiForm->addRow("When", midiTiming_); midiForm->addRow("Message", midiType_); midiForm->addRow("Channel", midiChannel_);
-    midiForm->addRow("Data 1 / low 7 bits", midiData1_); midiForm->addRow("Data 2 / high 7 bits", midiData2_); midiForm->addRow("Hex bytes", midiRaw_);
-    auto* midiHint = new QLabel("Raw messages accept MIDI 1.0 bytes,\nincluding SysEx and system messages.\nPrograms are numbered 0–127."); midiHint->setWordWrap(true); midiHint->setStyleSheet("color: #88a0be; font-size: 10px;"); midiForm->addRow(midiHint);
+    auto* midiBox = new QGroupBox("Control another device with MIDI"); auto* midiLayout = new QVBoxLayout(midiBox);
+    midiDestination_ = new QLabel; midiDestination_->setWordWrap(true); midiDestination_->setStyleSheet("color: #88a0be; font-size: 10px;"); midiLayout->addWidget(midiDestination_);
+    midiTiming_ = new QComboBox; midiTiming_->addItems({"At this cue", "After continuing the hold"});
+    midiTiming_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); midiTiming_->setMinimumContentsLength(10);
+    midiTiming_->setObjectName("midiCueTiming");
+    auto* timingForm = new QFormLayout; timingForm->addRow("Send", midiTiming_); midiLayout->addLayout(timingForm);
+    midiEditor_ = new MidiMessageEditor; midiLayout->addWidget(midiEditor_);
+    auto* midiButtons = new QHBoxLayout;
+    midiTest_ = button("Send test", midiButtons); midiTest_->setObjectName("testMidiMessage");
+    midiTest_->setToolTip("Sends the message shown above immediately, without saving the cue or moving the playhead. It can trigger the connected device.");
+    connect(midiTest_, &QPushButton::clicked, this, [this] {
+        std::vector<unsigned char> bytes; QString error;
+        if (!midiEditor_->message(bytes, error)) { c_.report(error); return; }
+        if (bytes.empty()) { c_.report("Choose a MIDI action before sending a test message."); return; }
+        c_.testMidi(bytes);
+    });
+    auto* midiSetup = button("Device…", midiButtons); connect(midiSetup, &QPushButton::clicked, this, &MainWindow::outputSettings);
+    midiLayout->addLayout(midiButtons);
     cueLayout->addWidget(midiBox); auto* applyCueButton = button("Apply cue", cueLayout); connect(applyCueButton, &QPushButton::clicked, this, &MainWindow::applyMarker);
-    connect(midiType_, &QComboBox::currentIndexChanged, this, [this](int type) {
-        midiChannel_->setEnabled(type > 0 && type < 8); midiData1_->setEnabled(type > 0 && type < 8);
-        midiData2_->setEnabled(type > 0 && type < 8 && type != 4 && type != 6); midiRaw_->setEnabled(type == 8);
+    connect(markerHold_, &QCheckBox::toggled, this, [this](bool hold) {
+        if (!hold) midiTiming_->setCurrentIndex(0);
+        midiTiming_->setEnabled(hold); midiTiming_->setToolTip(hold ? "" : "Without a hold, the message is sent when the playhead reaches this cue.");
     });
     cueLayout->addStretch(); inspector_->addWidget(cuePage);
     inspectorScroll_ = new QScrollArea; inspectorScroll_->setWidgetResizable(true); inspectorScroll_->setWidget(wrapper); inspectorScroll_->setMinimumWidth(280);
@@ -300,7 +324,7 @@ void MainWindow::refresh() {
     for (const auto& marker : c_.project.show.markers) sorted.push_back(&marker);
     std::stable_sort(sorted.begin(), sorted.end(), [](const Marker* a, const Marker* b) { return a->time < b->time; });
     for (const auto* m : sorted) {
-        auto* item = new QListWidgetItem((m->hold ? "Ⅱ  " : "◆  ") + QString::fromStdString(m->name) + "\n" + timecode(m->time, c_.project.fps) + (m->message.empty() ? "" : "  ·  MIDI"), cues_);
+        auto* item = new QListWidgetItem((m->hold ? "Ⅱ  " : "◆  ") + QString::fromStdString(m->name) + "\n" + timecode(m->time, c_.project.fps) + (m->message.empty() ? "" : "\n" + midiSummary(m->message)), cues_);
         item->setData(Qt::UserRole, QString::fromStdString(m->id));
     }
     projectLabel_->setText(c_.project.title + (c_.dirty ? "  •" : "") + QString("  ·  %1 × %2 / %3 fps").arg(c_.project.width).arg(c_.project.height).arg(c_.project.fps));
@@ -321,13 +345,19 @@ void MainWindow::updatePlayback() {
     state_->setText(label); state_->setStyleSheet(state == State::Held ? "color: #e5c47d; font-weight: 600;" : "color: #a0b6d5;");
     play_->setText(playing ? "Ⅱ  Pause" : state == State::Held ? "▶  Continue" : "▶  Play");
     QString async = c_.transport.asyncVoices() ? QString(" · %1 async playing").arg(c_.transport.asyncVoices()) : "";
-    health_->setText((c_.device.running() ? QString("%1 ch · 48 kHz").arg(c_.device.channels()) : "Audio not configured") + async +
+    health_->setText((c_.device.running() ? QString("%1 ch · 48 kHz").arg(c_.device.channels()) : "Audio · connects on Play") + async +
+        (c_.needsMidi() ? (c_.midi.connected() ? " · MIDI connected" : c_.midiDestination().isEmpty() ? " · MIDI needs a device" : " · MIDI reconnects on Play") : "") +
         (c_.transport.clipped() ? " · CLIPPING" : "") + (c_.device.underruns() ? QString(" · %1 underruns").arg(c_.device.underruns()) : "") +
         (c_.lateFrames ? QString(" · %1 video waits").arg(c_.lateFrames) : ""));
+    midiDestination_->setText(c_.midi.connected() ? "Destination: " + c_.midi.name() : c_.midiDestination().isEmpty() ? "Choose a MIDI device once; Play reconnects it automatically." : "On Play: reconnect to " + c_.midiDestination());
+    health_->setToolTip(c_.device.running() ? "Audio: " + c_.audioName + "\nMIDI: " + (c_.midi.connected() ? c_.midi.name() : c_.needsMidi() ? "Choose a destination in Outputs" : "Not needed for this show") : "Play connects your remembered audio interface, or your default speakers on first use.");
+    outputsButton_->setText(c_.needsMidi() && !c_.midi.connected() && c_.midiDestination().isEmpty() ? "Outputs · MIDI needed" : "Outputs");
     if (state == State::Held) {
         const int index = c_.transport.heldMarker();
         hint_->setText("HOLD — " + (index >= 0 && static_cast<std::size_t>(index) < c_.project.show.markers.size() ? QString::fromStdString(c_.project.show.markers[index].name) : "") + "  ·  Press Space to continue" + async);
-    } else hint_->setText(c_.showMode ? "SHOW MODE  ·  Space: play / pause  ·  Escape: Stop All" : "Space: play / pause  ·  Escape: Stop All  ·  Ruler: seek  ·  Edges: trim");
+    } else if (!c_.playbackProblem.isEmpty()) hint_->setText(c_.playbackProblem + (c_.showMode ? " Leave Show mode to change Outputs." : ""));
+    else if (c_.project.show.clips.empty() && c_.project.show.markers.empty()) hint_->setText("Start with + Import media or + Text. Press Play to use your speakers automatically.");
+    else hint_->setText(c_.showMode ? "SHOW MODE  ·  Space: play / pause  ·  Escape: Stop All" : "Space: play / pause  ·  Escape: Stop All  ·  Ruler: seek  ·  Edges: trim");
     inspector_->setEnabled(c_.canEdit(false));
     const auto picture = c_.compose(); preview_->setPicture(picture); if (output_) output_->setPicture(picture);
 }
@@ -341,14 +371,10 @@ void MainWindow::updateInspector() {
         updateCurve();
     } else if (auto* marker = selectedMarker()) {
         inspector_->setCurrentIndex(2); markerName_->setText(QString::fromStdString(marker->name)); markerTime_->setValue(seconds(marker->time)); markerHold_->setChecked(marker->hold);
-        midiTiming_->setCurrentIndex(marker->timing == MidiTiming::Arrival ? 0 : 1); midiRaw_->setText(midiHex(marker->message));
-        int type = marker->message.empty() ? 0 : 8;
-        if (!marker->message.empty() && marker->message[0] < 0xf0) {
-            const int status = marker->message[0] & 0xf0;
-            type = status == 0x90 ? 1 : status == 0x80 ? 2 : status == 0xb0 ? 3 : status == 0xc0 ? 4 : status == 0xa0 ? 5 : status == 0xd0 ? 6 : 7;
-            midiChannel_->setValue((marker->message[0] & 0xf) + 1); midiData1_->setValue(marker->message.size() > 1 ? marker->message[1] : 0); midiData2_->setValue(marker->message.size() > 2 ? marker->message[2] : 0);
-        }
-        midiType_->setCurrentIndex(type);
+        midiTiming_->setCurrentIndex(!marker->hold || marker->timing == MidiTiming::Arrival ? 0 : 1);
+        midiTiming_->setEnabled(marker->hold);
+        midiTiming_->setToolTip(marker->hold ? "" : "Without a hold, the message is sent when the playhead reaches this cue.");
+        midiEditor_->setMessage(marker->message);
     } else {
         inspector_->setCurrentIndex(0); const auto& track = c_.project.show.tracks[timeline_->selectedTrack];
         trackName_->setText(QString::fromStdString(track.name)); trackMute_->setChecked(track.muted); trackAudio_->setVisible(!track.visual);
@@ -381,20 +407,8 @@ void MainWindow::applyClip() {
 void MainWindow::applyMarker() {
     auto* marker = selectedMarker(); if (!marker) return; Marker edited = *marker;
     edited.name = markerName_->text().toStdString(); edited.time = frames(markerTime_->value()); edited.hold = markerHold_->isChecked(); edited.timing = midiTiming_->currentIndex() == 0 ? MidiTiming::Arrival : MidiTiming::Resume;
-    edited.message.clear(); const int type = midiType_->currentIndex();
-    if (type == 8) {
-        const auto bytes = midiRaw_->text().simplified().split(' ', Qt::SkipEmptyParts);
-        for (const auto& byte : bytes) {
-            bool ok; const unsigned value = byte.toUInt(&ok, 16);
-            if (!ok || byte.size() > 2 || value > 255) { c_.report("Enter MIDI bytes as two-digit hexadecimal numbers separated by spaces"); return; }
-            edited.message.push_back(static_cast<unsigned char>(value));
-        }
-    } else if (type > 0) {
-        const std::array<int, 8> statuses = {0, 0x90, 0x80, 0xb0, 0xc0, 0xa0, 0xd0, 0xe0};
-        edited.message = {static_cast<unsigned char>(statuses[type] | (midiChannel_->value() - 1)), static_cast<unsigned char>(midiData1_->value())};
-        if (type != 4 && type != 6) edited.message.push_back(static_cast<unsigned char>(midiData2_->value()));
-    }
-    if (!validMidi(edited.message)) { c_.report("That is not a complete valid MIDI 1.0 message"); return; }
+    QString error;
+    if (!midiEditor_->message(edited.message, error)) { c_.report(error); return; }
     c_.edit([=](Project& p) { for (auto& m : p.show.markers) if (m.id == edited.id) m = edited; });
 }
 void MainWindow::applyCurve() {
@@ -484,18 +498,26 @@ void MainWindow::projectSettings() {
 }
 void MainWindow::outputSettings() {
     if (c_.showMode || c_.busy) { c_.report(c_.showMode ? "Leave show mode to open Outputs" : "Wait for media preparation to finish"); return; }
-    QDialog dialog(this); dialog.setObjectName("outputSettingsDialog"); dialog.setWindowTitle("Outputs"); dialog.setMinimumWidth(540);
-    auto* layout = new QVBoxLayout(&dialog);
+    QDialog dialog(this); dialog.setObjectName("outputSettingsDialog"); dialog.setWindowTitle("Outputs"); dialog.setMinimumWidth(580);
+    auto* outer = new QVBoxLayout(&dialog);
+    auto* scroll = new QScrollArea; scroll->setWidgetResizable(true);
+    auto* content = new QWidget; content->setObjectName("outputSettingsContent"); auto* layout = new QVBoxLayout(content); scroll->setWidget(content); outer->addWidget(scroll);
+    dialog.resize(620, std::min(780, screen()->availableGeometry().height() - 60));
     auto* connectionStatus = new QLabel; connectionStatus->setObjectName("outputConnectionStatus"); connectionStatus->setWordWrap(true);
     layout->addWidget(connectionStatus);
     auto* stopForSettings = button("Stop All to change connections", layout); stopForSettings->setObjectName("stopForOutputSettings");
     QSettings preferences;
-    auto* form = new QFormLayout; auto* api = new QComboBox; auto* devices = new QComboBox; auto* channels = intSpin(1, 64); channels->setValue(2);
+    auto* audioBox = new QGroupBox("Audio · speakers or show interface"); auto* audioLayout = new QVBoxLayout(audioBox);
+    auto* audioHint = new QLabel("Play prepares audio automatically. Selecting a device below switches audio to it. Use audio settings to apply channel or latency changes.");
+    audioHint->setWordWrap(true); audioLayout->addWidget(audioHint);
+    auto* form = new QFormLayout; audioLayout->addLayout(form); layout->addWidget(audioBox);
+    auto* api = new QComboBox; auto* devices = new QComboBox; auto* channels = intSpin(1, 64); channels->setValue(2);
     auto* buffer = new QComboBox; for (int n : {128, 256, 512, 1024, 2048}) buffer->addItem(QString::number(n) + " samples", n); buffer->setCurrentIndex(2);
     const auto apis = c_.device.apis(); for (const auto& [id, name] : apis) api->addItem(name, static_cast<int>(id));
     const int previousApi = api->findData(preferences.value("audio/api", static_cast<int>(RtAudio::UNSPECIFIED)).toInt());
     if (previousApi >= 0) api->setCurrentIndex(previousApi);
     auto refreshDevices = [&] {
+        const int requestedChannels = channels->value();
         devices->clear(); const auto selected = static_cast<RtAudio::Api>(api->currentData().toInt());
         // Inspecting a live/held show must not probe and load audio drivers.
         if (!c_.canEdit(false)) {
@@ -505,55 +527,96 @@ void MainWindow::outputSettings() {
             return;
         }
         try {
-            const auto list = c_.device.devices(selected); int defaultIndex = 0;
+            const auto list = c_.device.devices(selected); int defaultIndex = -1;
+            const auto savedApi = static_cast<RtAudio::Api>(preferences.value("audio/api", 0).toInt());
+            const QString savedName = selected == savedApi || savedApi == RtAudio::UNSPECIFIED ? preferences.value("audio/device").toString() : QString();
+            const auto preferred = playbackDevice(list, savedName);
             for (const auto& d : list) { devices->addItem(QString("%1 (%2 outputs)").arg(d.name).arg(d.channels), d.id); devices->setItemData(devices->count() - 1, d.channels, Qt::UserRole + 1);
-                devices->setItemData(devices->count() - 1, d.name, Qt::UserRole + 2); if (d.isDefault) defaultIndex = devices->count() - 1; }
-            const QString savedName = preferences.value("audio/device").toString();
-            for (int i = 0; i < devices->count(); ++i) if (devices->itemData(i, Qt::UserRole + 2).toString() == savedName) defaultIndex = i;
+                devices->setItemData(devices->count() - 1, d.name, Qt::UserRole + 2); if (preferred && d.id == preferred->id) defaultIndex = devices->count() - 1; }
+            if (!preferred && !savedName.isEmpty()) {
+                devices->addItem(savedName + " (missing)"); defaultIndex = devices->count() - 1;
+                devices->setItemData(defaultIndex, 64, Qt::UserRole + 1);
+            }
             devices->setCurrentIndex(defaultIndex);
         } catch (const std::exception& error) { c_.report(QString::fromUtf8(error.what())); }
         channels->setMaximum(std::max(1, std::min(64, devices->currentData(Qt::UserRole + 1).toInt())));
+        channels->setValue(requestedChannels);
     };
     connect(api, &QComboBox::currentIndexChanged, &dialog, refreshDevices);
     connect(devices, &QComboBox::currentIndexChanged, &dialog, [&] { channels->setMaximum(std::max(1, std::min(64, devices->currentData(Qt::UserRole + 1).toInt()))); }); refreshDevices();
     channels->setValue(preferences.value("audio/channels", 2).toInt());
     const int savedBuffer = buffer->findData(preferences.value("audio/buffer", 512).toInt()); if (savedBuffer >= 0) buffer->setCurrentIndex(savedBuffer);
-    form->addRow("Audio driver", api); form->addRow("Single output device", devices); form->addRow("Open output channels", channels); form->addRow("Buffer size", buffer);
-    auto* audioApply = button("Connect audio device"); audioApply->setObjectName("connectAudioOutput"); form->addRow(audioApply);
-    connect(audioApply, &QPushButton::clicked, &dialog, [&] {
-        if (devices->currentIndex() < 0) { QMessageBox::warning(&dialog, "No device", "No audio output device is available"); return; }
+    devices->setObjectName("audioOutputDevice"); channels->setObjectName("audioOutputChannels");
+    form->addRow("Play sound through", devices); form->addRow("Outputs to use", channels);
+    auto* advanced = new QGroupBox("Advanced audio settings"); auto* advancedForm = new QFormLayout(advanced);
+    advancedForm->addRow("Audio driver", api); advancedForm->addRow("Buffer size", buffer);
+    auto* advancedToggle = new QCheckBox("Show driver and latency settings"); form->addRow(advancedToggle); form->addRow(advanced);
+    advanced->hide(); connect(advancedToggle, &QCheckBox::toggled, advanced, &QWidget::setVisible);
+    buffer->setToolTip("512 samples is a good starting point. Increase if audio crackles; decrease for lower latency.");
+    channels->setToolTip("Stereo speakers use 2 outputs. A show interface may need more for Guide and Click.");
+    auto* audioApply = button("Use audio settings"); audioApply->setObjectName("connectAudioOutput"); form->addRow(audioApply);
+    auto useAudio = [&] {
+        if (!devices->currentData().isValid()) { c_.report("Choose an available audio output, or plug in the missing device and click Refresh devices."); return; }
         const bool ok = c_.configureAudio(static_cast<RtAudio::Api>(api->currentData().toInt()), devices->currentData().toUInt(), devices->currentData(Qt::UserRole + 2).toString(), channels->value(), buffer->currentData().toUInt());
         if (!ok) QMessageBox::warning(&dialog, "Audio connection failed", c_.status);
-    });
+    };
+    connect(audioApply, &QPushButton::clicked, &dialog, useAudio);
+    connect(devices, &QComboBox::activated, &dialog, useAudio);
     auto* routing = new QLabel("Track routing is edited in the track inspector.\nGuide and Click start disconnected. For one interface with four outputs,\nuse Main 1/2, Guide 3/Off, Click 4/Off. Windows: prefer the interface's ASIO driver."); routing->setWordWrap(true); form->addRow(routing);
-    auto* midiPort = new QComboBox; midiPort->addItem("Disconnected", -1); const auto ports = c_.midi.ports(); for (int i = 0; i < ports.size(); ++i) midiPort->addItem(ports[i], i);
-    const int savedPort = midiPort->findText(preferences.value("midi/port").toString()); if (savedPort >= 0) midiPort->setCurrentIndex(savedPort);
-    form->addRow("Native MIDI output", midiPort); auto* midiConnect = button("Connect MIDI output"); midiConnect->setObjectName("connectMidiOutput"); form->addRow(midiConnect);
-    connect(midiConnect, &QPushButton::clicked, &dialog, [&] { if (!c_.configureMidi(midiPort->currentData().toInt())) QMessageBox::warning(&dialog, "MIDI connection failed", c_.status); });
+    auto* midiBox = new QGroupBox("MIDI · control lights, instruments or other apps"); auto* midiForm = new QFormLayout(midiBox); layout->addWidget(midiBox);
+    auto* midiHint = new QLabel("Only needed for cues that send MIDI. Choose a destination once; selecting it connects immediately and Play reconnects it next time.");
+    midiHint->setWordWrap(true); midiForm->addRow(midiHint);
+    auto* midiPort = new QComboBox; midiPort->setObjectName("midiOutputDevice");
+    auto refreshMidi = [&] {
+        midiPort->clear(); midiPort->addItem("No MIDI device", -1);
+        const QString remembered = c_.midi.connected() ? c_.midi.name() : QSettings().value("midi/port").toString();
+        const auto ports = c_.canEdit(false) ? c_.midi.ports() : QStringList{c_.midi.name()};
+        for (int i = 0; i < ports.size(); ++i) if (!ports[i].isEmpty()) midiPort->addItem(ports[i], i);
+        const int savedPort = midiPort->findText(remembered);
+        if (savedPort >= 0) midiPort->setCurrentIndex(savedPort);
+        else if (!remembered.isEmpty()) { midiPort->addItem(remembered + " (missing)", -2); midiPort->setCurrentIndex(midiPort->count() - 1); }
+    };
+    refreshMidi(); midiForm->addRow("Send cues to", midiPort);
+    auto* midiConnect = button("Reconnect MIDI device"); midiConnect->setObjectName("connectMidiOutput"); midiForm->addRow(midiConnect);
+    auto useMidi = [&] {
+        const int port = midiPort->currentData().toInt();
+        if (port == -2) { c_.report("This MIDI destination is missing. Plug it in and click Refresh devices."); return; }
+        if (!c_.configureMidi(port)) QMessageBox::warning(&dialog, "MIDI connection failed", c_.status);
+    };
+    connect(midiPort, &QComboBox::activated, &dialog, useMidi);
+    connect(midiConnect, &QPushButton::clicked, &dialog, useMidi);
+    auto* refreshPorts = button("Refresh devices", layout); refreshPorts->setObjectName("refreshOutputDevices");
+    connect(refreshPorts, &QPushButton::clicked, &dialog, [&] { if (c_.canEdit(false)) { refreshDevices(); refreshMidi(); } });
+    auto* displayBox = new QGroupBox("Picture · audience display"); auto* displayForm = new QFormLayout(displayBox); layout->addWidget(displayBox);
     auto* displays = new QComboBox; const auto screens = QGuiApplication::screens();
     for (int i = 0; i < screens.size(); ++i) displays->addItem(QString("%1 · %2 × %3%4").arg(screens[i]->name()).arg(screens[i]->size().width()).arg(screens[i]->size().height()).arg(screens[i] == screen() ? " (editor)" : ""), i);
-    form->addRow("Program display", displays); auto* displayOpen = button("Open fullscreen program output"); displayOpen->setObjectName("openProgramDisplay"); form->addRow(displayOpen);
+    displayForm->addRow("Show picture on", displays); auto* displayOpen = button("Open fullscreen program output"); displayOpen->setObjectName("openProgramDisplay"); displayForm->addRow(displayOpen);
     connect(displayOpen, &QPushButton::clicked, &dialog, [&] { openOutput(displays->currentData().toInt()); });
-    auto* displayClose = button("Close program output"); form->addRow(displayClose); connect(displayClose, &QPushButton::clicked, &dialog, [this] { if (outputWindow_) outputWindow_->hide(); });
-    layout->addLayout(form); auto* close = new QDialogButtonBox(QDialogButtonBox::Close); layout->addWidget(close); connect(close, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    auto* displayClose = button("Close program output"); displayForm->addRow(displayClose); connect(displayClose, &QPushButton::clicked, &dialog, [this] { if (outputWindow_) outputWindow_->hide(); });
+    auto* feedback = new QLabel; feedback->setWordWrap(true); feedback->setStyleSheet("color: #e5c47d;"); outer->addWidget(feedback);
+    connect(&c_, &Controller::message, &dialog, [feedback](const QString& text) { feedback->setText(text); });
+    auto* close = new QDialogButtonBox(QDialogButtonBox::Close); outer->addWidget(close); connect(close, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     bool wasEditable = c_.canEdit(false);
     auto updateConnections = [&] {
         if (c_.showMode || c_.busy) { dialog.reject(); return; }
         const bool editable = c_.canEdit(false);
         if (editable && !wasEditable) {
             const int requestedChannels = preferences.value("audio/channels", 2).toInt();
-            refreshDevices(); channels->setValue(requestedChannels);
+            refreshDevices(); refreshMidi(); channels->setValue(requestedChannels);
         }
         wasEditable = editable;
         const QString reason = editable ? QString() : "Use Stop All before changing audio or MIDI connections; this silences any running async audio.";
-        for (QWidget* control : std::initializer_list<QWidget*>{api, devices, channels, buffer, midiPort, midiConnect}) {
+        for (QWidget* control : std::initializer_list<QWidget*>{api, devices, channels, buffer, midiPort, midiConnect, refreshPorts}) {
             control->setEnabled(editable); control->setToolTip(reason);
         }
-        audioApply->setEnabled(editable && devices->count() > 0);
-        audioApply->setToolTip(editable && devices->count() == 0 ? "No audio output device is available" : reason);
+        const bool audioAvailable = devices->currentData().isValid();
+        audioApply->setEnabled(editable && audioAvailable);
+        audioApply->setToolTip(editable && !audioAvailable ? "Choose an available device or click Refresh devices after plugging it in" : reason);
         stopForSettings->setVisible(!editable);
         const QString state = c_.transport.state() == State::Held ? "Held at a stop marker." : c_.transport.state() == State::Playing ? "Playback is running." : "Async audio is still running.";
-        connectionStatus->setText(editable ? "Audio and MIDI connections can be changed." : state + " Audio and MIDI connections are locked. Use Stop All to silence audio and unlock them.");
+        connectionStatus->setText(editable ?
+            (c_.device.running() ? "Audio: " + c_.audioName : "Audio: automatic on Play") + "\n" +
+            (c_.midi.connected() ? "MIDI: " + c_.midi.name() : c_.needsMidi() ? "MIDI: choose a destination for this show's cues" : "MIDI: not needed for this show") : state + " Audio and MIDI connections are locked. Use Stop All to silence audio and unlock them.");
         displayOpen->setEnabled(displays->count() > 0);
     };
     connect(&c_, &Controller::tick, &dialog, updateConnections);

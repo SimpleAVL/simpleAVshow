@@ -2,6 +2,8 @@ First development prerelease of SimpleAVShow, a native timeline editor and playe
 
 Includes audio/video/image/text tracks, four composed picture layers, hold and MIDI cues, async ambience, multichannel audio routing, automation, fullscreen program output, and Show mode. Includes the fix allowing Outputs to open at a stop marker in edit mode, with visibly disabled connection controls and a Stop All action.
 
+Play prepares the remembered audio output automatically, using default speakers on first use, and reconnects remembered MIDI destinations when needed. Outputs separates audio, MIDI, and picture settings; selecting a device connects immediately. Missing remembered devices are shown explicitly and block playback. Routing presets and a guided MIDI editor add note names, named controls, program numbers, centered pitch bend, message previews, and test sending.
+
 ## Downloads
 
 | Platform | Package | Launch |

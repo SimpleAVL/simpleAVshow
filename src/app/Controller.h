@@ -21,7 +21,8 @@ public:
     AudioDevice device;
     MidiOutput midi;
     bool showMode = false, dirty = false, busy = false;
-    QString path, status = "Choose an audio device in Outputs", audioName;
+    QString path, status = "Press Play to use your speakers. Choose show equipment in Outputs.", audioName;
+    QString playbackProblem;
     Frame position() const { return transport.position(); }
     bool canEdit(bool report = true);
     bool edit(const std::function<void(Project&)>& mutation);
@@ -33,6 +34,9 @@ public:
     void stopAll();
     bool configureAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer);
     bool configureMidi(int port);
+    bool testMidi(const std::vector<unsigned char>& message);
+    bool needsMidi() const;
+    QString midiDestination() const { return midiName_; }
     void setShowMode(bool enabled);
     QImage compose();
     void save(QString target);
@@ -48,6 +52,7 @@ private:
     RtAudio::Api api_ = RtAudio::UNSPECIFIED;
     unsigned deviceId_ = 0, channels_ = 2, buffer_ = 512;
     bool configured_ = false;
+    QString midiName_;
     std::map<std::string, std::unique_ptr<VideoReader>> videos_;
     std::shared_ptr<const Show> armed_;
     std::thread midiThread_;
@@ -58,5 +63,9 @@ private:
     void arm(Frame position);
     void startMidiThread();
     void stopMidiThread();
+    bool prepareAudio();
+    bool prepareMidi();
+    bool openAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer);
+    bool openMidi(int port);
 };
 }

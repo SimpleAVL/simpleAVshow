@@ -11,8 +11,11 @@ The packages include their runtime dependencies. No development SDK is needed.
 These builds are unsigned; macOS is ad-hoc signed, without notarization.
 Windows and macOS may display their usual downloaded-app security prompts.
 
-Open Outputs and connect your audio interface before pressing Play. Configure
-track routing and your MIDI port there. Device connections are never automatic.
+Press Play to prepare the remembered audio output, or default speakers on first
+use. Choose show equipment in Outputs; selecting a device connects it immediately.
+Choose a MIDI destination once if your show sends MIDI cues; Play reconnects it.
+Missing remembered devices block playback. Use the track inspector routing
+presets for speakers, mono feeds, or silence. Guide and Click start silent.
 Use --demo to open the demonstration, or create a fresh project in the editor.
 
 This is a development prototype. Automated transport, media, persistence, and

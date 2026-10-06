@@ -9,6 +9,7 @@ class QSpinBox; class QLineEdit; class QCheckBox; class QTextEdit; class QTableW
 class QStackedWidget; class QGroupBox; class QScrollArea; class QAction;
 
 namespace sav {
+class MidiMessageEditor;
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
@@ -33,10 +34,12 @@ private:
     QLineEdit *trackName_ = nullptr, *markerName_ = nullptr;
     QDoubleSpinBox *trackGain_ = nullptr, *trackPan_ = nullptr, *clipStart_ = nullptr, *clipDuration_ = nullptr, *clipOffset_ = nullptr,
         *clipGain_ = nullptr, *clipPan_ = nullptr, *clipX_ = nullptr, *clipY_ = nullptr, *clipScale_ = nullptr, *clipOpacity_ = nullptr, *markerTime_ = nullptr;
-    QSpinBox *trackLeft_ = nullptr, *trackRight_ = nullptr, *midiChannel_ = nullptr, *midiData1_ = nullptr, *midiData2_ = nullptr;
+    QSpinBox *trackLeft_ = nullptr, *trackRight_ = nullptr;
     QCheckBox *trackMute_ = nullptr, *trackAsync_ = nullptr, *clipLoop_ = nullptr, *markerHold_ = nullptr;
-    QComboBox *curveProperty_ = nullptr, *midiType_ = nullptr, *midiTiming_ = nullptr;
-    QLineEdit* midiRaw_ = nullptr;
+    QComboBox *curveProperty_ = nullptr, *midiTiming_ = nullptr;
+    MidiMessageEditor* midiEditor_ = nullptr;
+    QPushButton* midiTest_ = nullptr;
+    QLabel* midiDestination_ = nullptr;
     QTextEdit* clipText_ = nullptr;
     QTableWidget* curveTable_ = nullptr;
     QGroupBox *audioTransform_ = nullptr, *videoTransform_ = nullptr, *trackAudio_ = nullptr;

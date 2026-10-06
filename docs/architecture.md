@@ -24,13 +24,13 @@ Software picture composition, GUI presentation, refresh, and device/display late
 
 ## MIDI
 
-A dedicated 1 ms polling worker sends RtMidi messages from an immutable snapshot. Seek/Stop All advance an epoch to invalidate stale queued events. The worker joins before reconfiguration. The bridge is a native MIDI port; no network protocol is assumed. Complete MIDI 1.0 messages, including bounded SysEx, are validated.
+A dedicated 1 ms polling worker sends RtMidi messages from an immutable snapshot. Seek/Stop All advance an epoch to invalidate stale queued events. The worker joins before reconfiguration. The bridge is a native MIDI port; no network protocol is assumed. Complete MIDI 1.0 messages, including bounded SysEx, are validated. The cue editor maps musical values to the existing byte representation: note names, named controllers, programs 1–128, and signed pitch bend centered at zero. Test sending joins the worker before sending directly, then restarts it; testing requires editability.
 
 Scheduling has OS/driver jitter and may precede audible buffer presentation. Measurement and compensation are future work.
 
 ## Projects
 
-`.savshow` is versioned JSON with integer audio-frame timing and relative media paths. Validation checks IDs, ranges, routing, MIDI, envelope ordering, picture overlaps, and limits. QSaveFile replaces files atomically. Generated demo assets export on first save; other media stays external. Undo/redo retains 32 snapshots sharing media. Editing/audio-MIDI connection changes/saving require no active playback or async voices; Show mode additionally locks seeks and Outputs access. In edit mode, Outputs remains accessible during playback/holds for inspection and program display controls. Connection controls show their locked state and offer Stop All to unlock; inspecting a live show avoids probing audio drivers.
+`.savshow` is versioned JSON with integer audio-frame timing and relative media paths. Validation checks IDs, ranges, routing, MIDI, envelope ordering, picture overlaps, and limits. QSaveFile replaces files atomically. Generated demo assets export on first save; other media stays external. Undo/redo retains 32 snapshots sharing media. Editing/audio-MIDI connection changes/saving require no active playback or async voices; Show mode additionally locks seeks and Outputs access. In edit mode, Outputs remains accessible during playback/holds for inspection and program display controls. Connection controls show their locked state and offer Stop All to unlock; inspecting a live show avoids probing audio and MIDI drivers. On Play, while stopped with no active async voices, the controller prepares the remembered audio device (or the system default on first use) and the remembered MIDI destination when required. This preparation also works in Show mode. Missing remembered devices never fall back to other destinations. Device selection connects immediately; channel/buffer changes have a separate Apply action.
 
 ## Next milestones
 

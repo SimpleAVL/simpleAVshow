@@ -1,6 +1,14 @@
 #include "media/AudioDevice.h"
 
 namespace sav {
+std::optional<DeviceDescription> playbackDevice(const std::vector<DeviceDescription>& devices, const QString& rememberedName) {
+    if (!rememberedName.isEmpty()) {
+        for (const auto& device : devices) if (device.name == rememberedName) return device;
+        return std::nullopt;
+    }
+    for (const auto& device : devices) if (device.isDefault) return device;
+    return devices.empty() ? std::nullopt : std::optional<DeviceDescription>(devices.front());
+}
 std::vector<std::pair<RtAudio::Api, QString>> AudioDevice::apis() const {
     std::vector<RtAudio::Api> compiled; RtAudio::getCompiledApi(compiled);
     std::vector<std::pair<RtAudio::Api, QString>> result;

@@ -60,6 +60,7 @@ if(SAV_BUILD_APP)
   add_library(sav_desktop
     src/app/Project.cpp src/app/Controller.cpp
     src/app/Timeline.cpp src/app/ProgramView.cpp src/app/MainWindow.cpp
+    src/app/MidiMessageEditor.cpp
     src/media/Media.cpp src/media/AudioDevice.cpp src/media/MidiOutput.cpp
   )
   target_include_directories(sav_desktop PUBLIC src PRIVATE ${FFMPEG_INCLUDE_DIR})
