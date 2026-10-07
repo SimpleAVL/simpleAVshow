@@ -8,6 +8,18 @@ This is a **development prototype**. CI builds and tests the app on macOS, Windo
 
 Full builds and packages run on pushes to `main` or manual workflow runs. Pull requests targeting `main` run playback-engine tests on all three platforms and the Linux media/UI tests, without packaging. Other branch pushes do not trigger CI, and newer runs cancel superseded runs on the same branch or pull request.
 
+All app builds wait for the core tests on every platform. A core failure cancels the remaining core matrix jobs and skips the app builds. The final `CI` check fails if any required build/test job fails, is cancelled, or is unexpectedly skipped; macOS/Windows app jobs are intentionally skipped on pull requests.
+
+### Merge requirements
+
+The repository ruleset in [.github/main-ruleset.json](.github/main-ruleset.json) requires pull requests to `main`, an up-to-date branch, and a passing `CI` check from GitHub Actions, with no bypass actors. The JSON file must be applied to GitHub; committing it alone does not enforce merge requirements. Once this workflow has reported a successful `CI` check, an administrator can import the file under **Settings → Rules → Rulesets**, or create the ruleset from the repository root:
+
+```sh
+gh api --method POST repos/staubichsauger/simpleAVshow/rulesets --input .github/main-ruleset.json
+```
+
+If the ruleset already exists, update it rather than creating another copy. GitHub currently rejects ruleset/branch-protection requests for this private repository with HTTP 403 and an instruction to upgrade to GitHub Pro or make the repository public. Merge enforcement remains unavailable until the repository has a [plan that supports rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets).
+
 ## Downloads
 
 Download the packages from [GitHub Releases](https://github.com/staubichsauger/simpleAVshow/releases):
