@@ -4,6 +4,7 @@
 #include <QFileInfo>
 #include <QMetaObject>
 #include <QPainter>
+#include <QStandardPaths>
 #include <chrono>
 #include <set>
 
@@ -31,15 +32,25 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
     }); timer_.start(); midiWatch_.start();
     autosave_.setInterval(60000);
     connect(&autosave_, &QTimer::timeout, this, [this] {
-        if (!dirty || path.isEmpty() || busy) return;
-        try { writeProject(project, path + ".autosave"); }
-        catch (const std::exception& e) { report("Autosave failed: " + QString::fromUtf8(e.what())); }
+        // Extracted package media is temporary, and generated media has no file to reference yet.
+        if (!dirty || busy || project.packageDirectory) return;
+        const bool untitled = path.isEmpty();
+        if (untitled && std::any_of(project.assets.cbegin(), project.assets.cend(), [](const MediaAsset& a) { return a.path.isEmpty(); })) return;
+        try {
+            if (untitled) QDir().mkpath(QFileInfo(autosavePath()).absolutePath());
+            writeProject(project, autosavePath());
+        } catch (const std::exception& e) { report("Autosave failed: " + QString::fromUtf8(e.what())); }
     }); autosave_.start();
 }
 Controller::~Controller() {
     timer_.stop(); stopMidiThread(); device.close();
 }
 void Controller::report(QString text) { status = text; emit message(text); }
+QString Controller::untitledAutosavePath() {
+    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/Untitled.savshow.autosave";
+}
+QString Controller::autosavePath() const { return path.isEmpty() ? untitledAutosavePath() : path + ".autosave"; }
+void Controller::discardAutosave() { QFile::remove(autosavePath()); }
 bool Controller::canEdit(bool reportFailure) {
     const bool allowed = !showMode && !busy && transport.state() != State::Playing && transport.state() != State::Held &&
         transport.asyncVoices() == 0;
@@ -333,6 +344,7 @@ void Controller::save(QString target) {
         const QString directory = QFileInfo(target).absolutePath() + "/" + QFileInfo(target).completeBaseName() + ".media";
         const auto sourceDirectory = project.packageDirectory;
         materializeProjectMedia(candidate, directory);
+        const QString previous = path;
         writeProject(candidate, target); project.assets = std::move(candidate.assets); bindAudio(project); project.packageDirectory.reset(); path = target; dirty = false;
         // Undo must not restore temporary package paths or unsaved generated media.
         for (auto* history : {&undo_, &redo_}) for (auto& snapshot : *history) {
@@ -345,6 +357,9 @@ void Controller::save(QString target) {
             bindAudio(snapshot);
         }
         if (sourceDirectory) arm(position());
+        // The edits now live in target; a sidecar left next to the previous file would offer them again.
+        for (const auto& saved : {target, previous}) if (!saved.isEmpty()) QFile::remove(saved + ".autosave");
+        QFile::remove(untitledAutosavePath());
         report("Saved " + QFileInfo(target).fileName()); emit changed();
     } catch (const std::exception& e) { report("Save failed: " + QString::fromUtf8(e.what())); }
 }

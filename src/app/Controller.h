@@ -44,6 +44,10 @@ public:
     QImage compose();
     void save(QString target);
     void report(QString message);
+    // Sidecar for crash recovery: next to the show, or in app data while untitled.
+    QString autosavePath() const;
+    static QString untitledAutosavePath();
+    void discardAutosave();
     bool routesValid() const;
     unsigned lateFrames = 0;
 signals:

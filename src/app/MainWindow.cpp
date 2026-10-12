@@ -660,21 +660,39 @@ void MainWindow::openOutput(int index) {
     outputWindow_->setGeometry(screens[index]->geometry()); outputWindow_->showFullScreen(); activateWindow();
 }
 void MainWindow::openPath(const QString& path) {
-    if (!c_.canEdit()) return; c_.busy = true;
+    if (!c_.canEdit()) return;
+    // A sidecar opens as unsaved edits to its show, so Save replaces the show rather than writing "x.savshow.autosave.savshow".
+    QString source = path, target = isProjectPackage(path) ? QString() : path;
+    bool recovered = path.endsWith(".savshow.autosave", Qt::CaseInsensitive);
+    if (recovered) target = path == Controller::untitledAutosavePath() ? QString() : target.chopped(QString(".autosave").size());
+    else if (const QFileInfo sidecar(path + ".autosave"); !target.isEmpty() && sidecar.exists() && sidecar.lastModified() > QFileInfo(path).lastModified()) {
+        QMessageBox box(QMessageBox::Question, "Recover unsaved changes?",
+            "An autosave of “" + QFileInfo(path).fileName() + "” from " + QLocale().toString(sidecar.lastModified(), QLocale::ShortFormat) + " is newer than the saved show.",
+            QMessageBox::NoButton, this);
+        box.setInformativeText("Recovering opens the autosave as unsaved changes. Opening the saved show keeps the autosave until the next autosave or save replaces it.");
+        auto* recover = box.addButton("Recover autosave", QMessageBox::AcceptRole);
+        box.addButton("Open saved show", QMessageBox::RejectRole); box.setDefaultButton(recover); box.exec();
+        if (box.clickedButton() == recover) { source = sidecar.filePath(); recovered = true; }
+    }
+    c_.busy = true;
     auto* progress = new QProgressDialog("Opening project and preparing media…", QString(), 0, 0, this); progress->setWindowModality(Qt::WindowModal); progress->setMinimumDuration(0); progress->show();
     auto* watcher = new QFutureWatcher<ProjectResult>(this);
-    connect(watcher, &QFutureWatcher<ProjectResult>::finished, this, [this, watcher, progress, path] {
+    connect(watcher, &QFutureWatcher<ProjectResult>::finished, this, [this, watcher, progress, path, target, recovered] {
         const auto result = watcher->result(); c_.busy = false; progress->deleteLater(); watcher->deleteLater();
         if (!result.error.isEmpty()) { QMessageBox::warning(this, "Could not open project", result.error); return; }
         timeline_->selectedClip.clear(); timeline_->selectedMarker.clear(); timeline_->selectedTrack = 0;
-        c_.replace(result.project, isProjectPackage(path) ? QString() : path);
-        if (isProjectPackage(path)) {
+        c_.replace(result.project, target);
+        if (recovered) {
+            c_.dirty = true;
+            c_.report(target.isEmpty() ? "Recovered an unsaved show. Save it to keep it." : "Recovered autosave. Save to replace " + QFileInfo(target).fileName() + ".");
+            refresh();
+        } else if (isProjectPackage(path)) {
             c_.dirty = true;
             c_.report("Opened package. Save this show to keep an editable copy, or use Export package to share it.");
             refresh();
         }
     });
-    watcher->setFuture(QtConcurrent::run([path] { ProjectResult result; try { result.project = readProject(path); } catch (const std::exception& e) { result.error = QString::fromUtf8(e.what()); } return result; }));
+    watcher->setFuture(QtConcurrent::run([source] { ProjectResult result; try { result.project = readProject(source); } catch (const std::exception& e) { result.error = QString::fromUtf8(e.what()); } return result; }));
 }
 void MainWindow::save(bool as) {
     if (!c_.canEdit()) return;
@@ -721,10 +739,20 @@ void MainWindow::writePackage(const QString& path) {
     }
     refresh();
 }
+void MainWindow::offerUntitledRecovery() {
+    const QFileInfo sidecar(Controller::untitledAutosavePath());
+    if (!sidecar.exists() || !c_.canEdit(false)) return;
+    const auto answer = QMessageBox::question(this, "Recover unsaved show?",
+        "SimpleAVShow closed before an untitled show was saved. Recover the autosave from " + QLocale().toString(sidecar.lastModified(), QLocale::ShortFormat) + "?",
+        QMessageBox::Yes | QMessageBox::Discard, QMessageBox::Yes);
+    if (answer == QMessageBox::Yes) openPath(sidecar.filePath());
+    else QFile::remove(sidecar.filePath());
+}
 bool MainWindow::checkDiscard() {
     if (!c_.dirty) return true;
     const auto result = QMessageBox::question(this, "Unsaved show", "Save changes to this show?", QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
-    if (result == QMessageBox::Cancel) return false; if (result == QMessageBox::Save) { save(); return !c_.dirty; } return true;
+    if (result == QMessageBox::Cancel) return false; if (result == QMessageBox::Save) { save(); return !c_.dirty; }
+    c_.discardAutosave(); return true;
 }
 void MainWindow::closeEvent(QCloseEvent* event) {
     if (c_.busy) { c_.report("Wait for media preparation to finish before closing"); event->ignore(); return; }

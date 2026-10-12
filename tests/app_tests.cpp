@@ -212,6 +212,27 @@ private slots:
         raw->clear(); QVERIFY(!editor.message(bytes, error));
         type->setCurrentIndex(0); QVERIFY(editor.message(bytes, error)); QVERIFY(bytes.empty());
     }
+    void autosaveRecoveryReplacesTheShowAndIsRemovedOnSave() {
+        QTemporaryDir dir; const auto show = dir.filePath("show.savshow");
+        Project saved = newProject(); saved.title = "Saved"; writeProject(saved, show);
+        Project edited = saved; edited.title = "Autosaved"; writeProject(edited, show + ".autosave");
+        QFile sidecar(show + ".autosave"); QVERIFY(sidecar.open(QIODevice::ReadWrite));
+        QVERIFY(sidecar.setFileTime(QFileInfo(show).lastModified().addSecs(60), QFileDevice::FileModificationTime)); sidecar.close();
+        MainWindow window; auto& c = window.controller(); bool asked = false;
+        QTimer::singleShot(0, &window, [&] {
+            auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget()); if (!box) return;
+            asked = true; for (auto* button : box->buttons()) if (button->text() == "Recover autosave") button->click();
+        });
+        window.openPath(show); QTRY_VERIFY_WITH_TIMEOUT(!c.busy, 15000);
+        QVERIFY(asked); QCOMPARE(c.project.title, QString("Autosaved")); QCOMPARE(c.path, show); QVERIFY(c.dirty);
+        c.save(c.path); QVERIFY(!c.dirty); QVERIFY(!QFileInfo::exists(show + ".autosave"));
+        QCOMPARE(readProject(show).title, QString("Autosaved"));
+        // Opening a sidecar directly also targets its show.
+        writeProject(saved, show + ".autosave"); window.openPath(show + ".autosave"); QTRY_VERIFY_WITH_TIMEOUT(!c.busy, 15000);
+        QCOMPARE(c.path, show); QVERIFY(c.dirty); QCOMPARE(c.project.title, QString("Saved"));
+        QCOMPARE(c.autosavePath(), show + ".autosave");
+        c.path.clear(); QVERIFY(c.autosavePath().endsWith("/Untitled.savshow.autosave"));
+    }
     void quittingDuringShowModeRequiresConfirmation() {
         MainWindow window; window.show(); window.controller().setShowMode(true);
         bool asked = false;

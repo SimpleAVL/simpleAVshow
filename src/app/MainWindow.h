@@ -16,6 +16,8 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     Controller& controller() { return c_; }
     void openPath(const QString& path);
+    // Offers the untitled-show sidecar left by a crash; call once after startup.
+    void offerUntitledRecovery();
 protected:
     void closeEvent(QCloseEvent* event) override;
     bool eventFilter(QObject* object, QEvent* event) override;

@@ -35,6 +35,8 @@ int main(int argc, char** argv) {
         window.controller().seek(sav::frames(time));
     }
     window.show();
+    if (!parser.isSet("demo") && !parser.isSet("screenshot") && parser.positionalArguments().isEmpty())
+        QTimer::singleShot(0, &window, [&window] { window.offerUntitledRecovery(); });
     if (parser.isSet("screenshot")) QTimer::singleShot(1000, &app, [&] {
         const QString path = parser.value("screenshot"); QDir().mkpath(QFileInfo(path).absolutePath());
         if (!window.grab().save(path)) app.exit(2); else app.exit(0);
