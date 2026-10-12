@@ -11,6 +11,9 @@ namespace sav {
 struct MediaAsset {
     QString id, path, name;
     bool image = false, video = false;
+    // Missing or unreadable when the show opened; clips keep their place until the source is relinked.
+    bool offline = false;
+    QString problem;
     double duration = 0, fps = 24;
     int width = 0, height = 0;
     QImage still;

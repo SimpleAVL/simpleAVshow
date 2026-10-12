@@ -113,7 +113,8 @@ void validate(const Project& p) {
         if (!c.assetId.empty() && !p.assets.contains(QString::fromStdString(c.assetId))) fail("Clip references a missing asset");
         const bool visualTrack = p.show.tracks[c.track].visual;
         const auto asset = p.assets.constFind(QString::fromStdString(c.assetId));
-        if (visualTrack) {
+        if (asset != p.assets.cend() && asset->offline) {} // Source checks resume once the media is relinked.
+        else if (visualTrack) {
             if (c.text.empty() && (asset == p.assets.cend() || (!asset->image && !asset->video))) fail("Visual clip has no picture source");
             if (asset != p.assets.cend() && asset->video && seconds(c.offset) >= asset->duration) fail("Video offset is beyond the source");
         } else if (!c.audio || c.offset >= c.audio->length()) fail("Audio clip has no source or an invalid offset");
@@ -187,9 +188,16 @@ int readInt(const QJsonObject& o, const char* key, int fallback) {
     return static_cast<int>(n);
 }
 MediaAsset loadAsset(const MediaAsset& entry) {
-    auto a = loadMedia(entry.path);
-    a.id = entry.id; if (!entry.name.isEmpty()) a.name = entry.name;
-    return a;
+    try {
+        auto a = loadMedia(entry.path);
+        a.id = entry.id; if (!entry.name.isEmpty()) a.name = entry.name;
+        return a;
+    } catch (const std::exception& e) {
+        // One missing or damaged file must not prevent opening the show.
+        MediaAsset a = entry; a.offline = true; a.problem = QString::fromUtf8(e.what());
+        if (a.name.isEmpty()) a.name = QFileInfo(a.path).fileName();
+        return a;
+    }
 }
 }
 void writeProject(const Project& p, const QString& path) {

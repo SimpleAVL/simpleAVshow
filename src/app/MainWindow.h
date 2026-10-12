@@ -68,6 +68,8 @@ private:
     void autoApply(QWidget* field);
     void applyCurve();
     void importMedia();
+    // Finds offline sources by file name below a chosen folder; after opening, asks first.
+    void relinkMedia(bool afterOpening = false);
     void placeAsset(QString id, int track, Frame time);
     void addText();
     void addMarker();

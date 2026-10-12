@@ -265,6 +265,24 @@ private slots:
         QCOMPARE(clip().duration, frames(3)); QVERIFY(c.status.contains("end of the source"));
         c.dirty = false;
     }
+    void missingMediaOpensOfflineAndRelinks() {
+        QTemporaryDir dir; QDir().mkpath(dir.filePath("a")); QDir().mkpath(dir.filePath("b"));
+        writeBytes(dir.filePath("a/sound.wav"), waveBytes(16, 1, 2, 48000));
+        Project project = newProject(); auto asset = loadMedia(dir.filePath("a/sound.wav")); project.assets.insert(asset.id, asset);
+        Clip clip; clip.id = "c"; clip.assetId = asset.id.toStdString(); clip.track = 2; clip.duration = asset.audio->length(); project.show.clips.push_back(clip);
+        bindAudio(project); writeProject(project, dir.filePath("show.savshow"));
+        QVERIFY(QFile::rename(dir.filePath("a/sound.wav"), dir.filePath("b/sound.wav")));
+        auto opened = readProject(dir.filePath("show.savshow"));
+        QVERIFY(opened.assets.first().offline); QCOMPARE(opened.show.clips.size(), std::size_t{1});
+        Controller c; c.replace(opened, dir.filePath("show.savshow"));
+        QCOMPARE(c.missingMedia(), QStringList{dir.filePath("a/sound.wav")});
+        c.toggle(); QCOMPARE(c.transport.state(), State::Stopped); QVERIFY(c.status.contains("missing"));
+        // Saving keeps the original reference so a later relink or restored drive still finds it.
+        c.save(dir.filePath("show.savshow")); QVERIFY(readProject(dir.filePath("show.savshow")).assets.first().offline);
+        auto relinked = loadMedia(dir.filePath("b/sound.wav")); relinked.id = asset.id; relinked.name = asset.name;
+        QVERIFY(c.edit([&](Project& p) { p.assets.insert(relinked.id, relinked); }));
+        QVERIFY(c.missingMedia().isEmpty()); QVERIFY(c.project.show.clips[0].audio);
+    }
     void quittingDuringShowModeRequiresConfirmation() {
         MainWindow window; window.show(); window.controller().setShowMode(true);
         bool asked = false;
@@ -294,9 +312,9 @@ private slots:
         Controller c; auto project = newProject();
         MediaAsset unused; unused.id = "unused"; unused.name = "Unused"; unused.video = true; unused.duration = 1; unused.path = "/nonexistent/unused.mov";
         project.assets.insert(unused.id, unused); c.replace(project);
-        QVERIFY(c.missingVideo().isEmpty());
+        QVERIFY(c.missingMedia().isEmpty());
         QVERIFY(c.edit([](Project& p) { Clip clip; clip.id = "v"; clip.assetId = "unused"; clip.track = 0; clip.duration = frames(1); p.show.clips.push_back(clip); }));
-        QCOMPARE(c.missingVideo(), QString("/nonexistent/unused.mov"));
+        QCOMPARE(c.missingMedia(), QStringList{"/nonexistent/unused.mov"});
     }
     void missingMidiExplainsSetupAndDoesNotStartPlayback() {
         Controller c; auto project = newProject();
@@ -569,7 +587,11 @@ private slots:
         auto missing = saved; auto assets = missing["assets"].toArray();
         for (auto&& value : assets) { auto asset = value.toObject(); asset["path"] = "absent/" + asset["path"].toString(); value = asset; }
         missing["assets"] = assets;
-        QVERIFY(failure(missing).startsWith("Media file is missing"));
+        // Missing media opens offline; clips keep their places until relinked.
+        QCOMPARE(failure(missing), QString());
+        const auto offline = readProject(dir.filePath("typed.savshow"));
+        for (const auto& asset : offline.assets) { QVERIFY(asset.offline); QVERIFY(asset.problem.startsWith("Media file is missing")); }
+        QCOMPARE(offline.show.clips.size(), loaded.show.clips.size());
         const struct { const char* array; int index; const char* key; QJsonValue value; } cases[] = {
             {"tracks", 2, "gain", "x"}, {"tracks", 2, "left", 1e10}, {"tracks", 2, "right", 1.5}, {"tracks", 2, "muted", 1},
             {"tracks", 0, "name", QJsonValue::Null}, {"clips", 0, "loop", "yes"}, {"clips", 0, "track", "0"}, {"clips", 0, "opacity", true},

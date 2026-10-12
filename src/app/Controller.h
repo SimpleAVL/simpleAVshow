@@ -38,7 +38,8 @@ public:
     bool configureMidi(int port);
     bool testMidi(const std::vector<unsigned char>& message);
     bool needsMidi() const;
-    QString missingVideo() const;
+    // Offline sources and vanished videos used on the timeline.
+    QStringList missingMedia() const;
     // Problems worth fixing before a performance; empty when the show is ready.
     QStringList preflight();
     QString midiDestination() const { return midiName_; }

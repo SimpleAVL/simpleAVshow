@@ -133,8 +133,9 @@ void Controller::toggle() {
         if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and press Play to retry, or reopen the project to rebuild changed or damaged caches."); playbackProblem = status; return; }
         // Resuming a live show never blocks on picture or MIDI; it warns and continues.
         const bool resuming = state == State::Held || transport.asyncVoices() || (state == State::Paused && device.running());
-        if (const QString missing = missingVideo(); !missing.isEmpty()) {
-            report("Video source is missing: " + missing); playbackProblem = status;
+        if (const auto missing = missingMedia(); !missing.isEmpty()) {
+            report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
+            playbackProblem = status;
             if (!resuming) return;
         }
         if (needsMidi() && !prepareMidi()) { playbackProblem = status; if (!resuming) return; }
@@ -183,7 +184,7 @@ bool Controller::openMidi(int port) {
 QStringList Controller::preflight() {
     QStringList problems;
     if (dirty) problems << "The show has unsaved changes.";
-    if (const auto missing = missingVideo(); !missing.isEmpty()) problems << "Video source is missing: " + missing;
+    for (const auto& missing : missingMedia()) problems << "Media is missing: " + missing;
     if (needsMidi() && !midi.connected()) {
         const QString remembered = QSettings().value("midi/port").toString();
         if (remembered.isEmpty()) problems << "MIDI cues need a destination. Choose one in Outputs.";
@@ -200,12 +201,14 @@ QStringList Controller::preflight() {
     } else if (device.running() && !routesValid()) problems << "A track is routed to more outputs than the audio interface provides.";
     return problems;
 }
-QString Controller::missingVideo() const {
+QStringList Controller::missingMedia() const {
+    QStringList missing;
     for (const auto& clip : project.show.clips) {
         const auto asset = project.assets.constFind(QString::fromStdString(clip.assetId));
-        if (asset != project.assets.cend() && asset->video && !QFileInfo::exists(asset->path)) return asset->path;
+        if (asset == project.assets.cend() || missing.contains(asset->path)) continue;
+        if (asset->offline || (asset->video && !QFileInfo::exists(asset->path))) missing << asset->path;
     }
-    return {};
+    return missing;
 }
 void Controller::watchMidi() {
     if (!needsMidi() || midiName_.isEmpty() || busy) return;

@@ -13,6 +13,7 @@
 #include <QFormLayout>
 #include <QFutureWatcher>
 #include <QGroupBox>
+#include <QDirIterator>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -125,6 +126,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     exportPackageAction_->setToolTip("Copy this show and all media library items into a portable .savpack file");
     file->addSeparator(); file->addAction("Open demonstration", this, [this] { if (c_.canEdit() && checkDiscard()) { c_.replace(demoProject()); c_.dirty = true; refresh(); } });
     file->addSeparator(); file->addAction("Import media…", QKeySequence("Ctrl+I"), this, &MainWindow::importMedia);
+    file->addAction("Relink missing media…", this, [this] { relinkMedia(); });
     auto* edit = menuBar()->addMenu("Edit");
     edit->addAction("Undo", QKeySequence::Undo, &c_, &Controller::undo);
     edit->addAction("Redo", QKeySequence::Redo, &c_, &Controller::redo);
@@ -337,8 +339,9 @@ void MainWindow::refresh() {
     library_->clear();
     for (const auto& a : c_.project.assets) {
         const QString type = a.image ? "IMAGE" : a.video ? "VIDEO" : "AUDIO";
-        auto* item = new QListWidgetItem(a.name + "\n" + type + "  ·  " + QString::number(a.duration, 'f', 1) + " s", library_);
-        item->setData(Qt::UserRole, a.id); item->setToolTip(a.path.isEmpty() ? "Generated demonstration media" : a.path);
+        auto* item = new QListWidgetItem(a.name + "\n" + (a.offline ? QString("OFFLINE  ·  relink from File") : type + "  ·  " + QString::number(a.duration, 'f', 1) + " s"), library_);
+        item->setData(Qt::UserRole, a.id); item->setToolTip(a.path.isEmpty() ? "Generated demonstration media" : a.offline ? a.path + "\n" + a.problem : a.path);
+        if (a.offline) item->setForeground(QColor("#f0a66e"));
     }
     cues_->clear(); std::vector<const Marker*> sorted;
     for (const auto& marker : c_.project.show.markers) sorted.push_back(&marker);
@@ -551,6 +554,50 @@ void MainWindow::importMedia() {
         for (const auto& path : paths) {
             try { auto a = loadMedia(path); result.assets.push_back(std::move(a)); }
             catch (const std::exception& e) { result.errors << QFileInfo(path).fileName() + ": " + QString::fromUtf8(e.what()); }
+        }
+        return result;
+    }));
+}
+void MainWindow::relinkMedia(bool afterOpening) {
+    QStringList missing;
+    for (const auto& a : c_.project.assets) if (a.offline) missing << a.name + "  —  " + a.problem;
+    if (missing.isEmpty()) { if (!afterOpening) c_.report("All media is online."); return; }
+    if (!c_.canEdit()) return;
+    if (afterOpening) {
+        QMessageBox box(QMessageBox::Warning, "Media is missing", QString("%1 media file%2 could not be loaded. Their clips stay on the timeline but are silent or blank until relinked.")
+            .arg(missing.size()).arg(missing.size() == 1 ? "" : "s"), QMessageBox::Close, this);
+        box.setDetailedText(missing.join("\n"));
+        auto* locate = box.addButton("Locate folder…", QMessageBox::AcceptRole); box.setDefaultButton(locate); box.exec();
+        if (box.clickedButton() != locate) return;
+    }
+    const QString folder = QFileDialog::getExistingDirectory(this, "Folder containing the missing media");
+    if (folder.isEmpty()) return;
+    // Search by file name below the chosen folder, then load matches off the GUI thread.
+    QMap<QString, QString> wanted; // Lower-case file name → asset id.
+    for (const auto& a : c_.project.assets) if (a.offline) wanted.insert(QFileInfo(a.path).fileName().toLower(), a.id);
+    c_.busy = true;
+    auto* progress = new QProgressDialog("Searching for missing media…", QString(), 0, 0, this); progress->setWindowModality(Qt::WindowModal); progress->setMinimumDuration(0); progress->show();
+    auto* watcher = new QFutureWatcher<MediaResult>(this);
+    connect(watcher, &QFutureWatcher<MediaResult>::finished, this, [this, watcher, progress] {
+        const auto result = watcher->result(); c_.busy = false; progress->deleteLater(); watcher->deleteLater();
+        if (!result.assets.empty()) c_.edit([&](Project& p) { for (const auto& a : result.assets) p.assets.insert(a.id, a); });
+        int remaining = 0; for (const auto& a : c_.project.assets) remaining += a.offline;
+        const QString summary = QString("Relinked %1 media file%2.").arg(result.assets.size()).arg(result.assets.size() == 1 ? "" : "s") +
+            (remaining ? QString(" %1 still missing.").arg(remaining) : "");
+        if (!result.errors.isEmpty()) QMessageBox::warning(this, "Some media could not be relinked", summary + "\n\n" + result.errors.join("\n\n"));
+        c_.report(summary); if (!remaining) c_.playbackProblem.clear();
+    });
+    const auto offline = c_.project.assets;
+    watcher->setFuture(QtConcurrent::run([folder, wanted, offline]() {
+        MediaResult result; QSet<QString> found;
+        for (QDirIterator it(folder, QDir::Files, QDirIterator::Subdirectories); it.hasNext();) {
+            const QString path = it.next(); const auto key = QFileInfo(path).fileName().toLower();
+            if (!wanted.contains(key) || found.contains(key)) continue;
+            found.insert(key);
+            try {
+                auto a = loadMedia(path); const auto& entry = offline[wanted.value(key)];
+                a.id = entry.id; a.name = entry.name; result.assets.push_back(std::move(a));
+            } catch (const std::exception& e) { result.errors << QFileInfo(path).fileName() + ": " + QString::fromUtf8(e.what()); }
         }
         return result;
     }));
@@ -803,6 +850,7 @@ void MainWindow::openPath(const QString& path) {
         if (!result.error.isEmpty()) { QMessageBox::warning(this, "Could not open project", result.error); return; }
         timeline_->selectedClip.clear(); timeline_->selectedMarker.clear(); timeline_->selectedTrack = 0;
         c_.replace(result.project, target);
+        QTimer::singleShot(0, this, [this] { if (std::any_of(c_.project.assets.cbegin(), c_.project.assets.cend(), [](const MediaAsset& a) { return a.offline; })) relinkMedia(true); });
         if (recovered) {
             c_.dirty = true;
             c_.report(target.isEmpty() ? "Recovered an unsaved show. Save it to keep it." : "Recovered autosave. Save to replace " + QFileInfo(target).fileName() + ".");
