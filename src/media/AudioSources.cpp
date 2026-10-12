@@ -29,7 +29,7 @@ namespace {
 constexpr qint64 stereoBytes = 2 * sizeof(float);
 constexpr qint64 legacyHeader = 8 + 8 + 1 + 32 + 32, metadataHeader = legacyHeader + 32;
 constexpr char legacyMagic[] = "SAVPCM01", cacheMagic[] = "SAVMETA2";
-constexpr char indexMagic[] = "SAVIDX01";
+constexpr char indexMagic[] = "SAVIDX01", waveMagic[] = "SAVWAV01";
 constexpr qint64 staleAge = 7ll * 24 * 3600 * 1000;
 constexpr qint64 racyWindow = 2000; // Coarse (FAT: 2 s) timestamps can hide a rewrite during hashing.
 constexpr qsizetype maxIndexEntries = 4096;
@@ -204,6 +204,13 @@ public:
           size_(QFileInfo(path_).size()) {}
     Frame length() const noexcept override { return length_; }
     void prepare(AudioData& data) {
+        // A sidecar keyed like the source index skips reading unchanged files on reopen;
+        // read() still verifies every block against the recorded hashes.
+        const auto source = stamp(path_);
+        if (!source.path.isEmpty())
+            sidecar_ = audioCacheDirectory() + '/' + QString::fromLatin1(QCryptographicHash::hash(source.path.toUtf8(), QCryptographicHash::Sha256).toHex()) + ".wave";
+        if (loadSidecar(source, data)) return;
+        const auto started = QDateTime::currentMSecsSinceEpoch();
         data.peaks.resize(static_cast<std::size_t>((length_ + AudioData::peakStride - 1) / AudioData::peakStride));
         std::array<float, AudioBuffer::blockFrames * 2> scratch{};
         for (Frame first = 0; first < length_; first += AudioBuffer::blockFrames) {
@@ -216,6 +223,7 @@ public:
                 peak = std::max(peak, std::max(std::abs(scratch[i * 2]), std::abs(scratch[i * 2 + 1])));
             }
         }
+        if (settled(source, stamp(path_), started)) saveSidecar(source, data);
     }
     void read(Frame first, float* stereo, std::size_t count) const override {
         checkRange(first, count, length_);
@@ -227,12 +235,45 @@ public:
         for (Frame frame = blockFirst; frame < end; frame += AudioBuffer::blockFrames) {
             const auto size = std::min(AudioBuffer::blockFrames, end - frame) * stride;
             const QByteArrayView block(bytes.constData() + (frame - blockFirst) * stride, static_cast<qsizetype>(size));
-            if (QCryptographicHash::hash(block, QCryptographicHash::Sha256) != blockHashes_[static_cast<std::size_t>(frame / AudioBuffer::blockFrames)])
+            if (QCryptographicHash::hash(block, QCryptographicHash::Sha256) != blockHashes_[static_cast<std::size_t>(frame / AudioBuffer::blockFrames)]) {
+                if (!sidecar_.isEmpty()) QFile::remove(sidecar_); // Its hashes may predate a same-stamp rewrite.
                 changed("PCM audio source changed; reopen the project: " + path_);
+            }
         }
         decode(reinterpret_cast<const uchar*>(bytes.constData()) + (first - blockFirst) * stride, stereo, count);
     }
 private:
+    QByteArray sidecarHeader(const Stamp& source) const {
+        QByteArray header; QDataStream stream(&header, QIODevice::WriteOnly); stream.setByteOrder(QDataStream::LittleEndian);
+        stream.writeRawData(waveMagic, 8);
+        stream << source.size << source.modified << offset_ << static_cast<qint64>(length_) << static_cast<qint32>(channels_)
+               << static_cast<qint32>(bits_) << static_cast<quint8>(floating_);
+        return header;
+    }
+    bool loadSidecar(const Stamp& source, AudioData& data) {
+        QFile file(sidecar_);
+        if (sidecar_.isEmpty() || !file.open(QIODevice::ReadOnly)) return false;
+        const auto bytes = file.readAll(), header = sidecarHeader(source);
+        const qint64 blocks = (length_ + AudioBuffer::blockFrames - 1) / AudioBuffer::blockFrames;
+        const qint64 peaks = (length_ + AudioData::peakStride - 1) / AudioData::peakStride, body = bytes.size() - 32;
+        if (body != header.size() + blocks * 32 + peaks * static_cast<qint64>(sizeof(float)) || !bytes.startsWith(header) ||
+            QCryptographicHash::hash(QByteArrayView(bytes).first(body), QCryptographicHash::Sha256) != bytes.last(32)) return false;
+        const char* at = bytes.constData() + header.size();
+        for (qint64 i = 0; i < blocks; ++i, at += 32) blockHashes_.emplace_back(at, 32);
+        data.peaks.resize(static_cast<std::size_t>(peaks)); std::memcpy(data.peaks.data(), at, static_cast<std::size_t>(peaks) * sizeof(float));
+        touch(sidecar_);
+        return true;
+    }
+    void saveSidecar(const Stamp& source, const AudioData& data) const {
+        if (sidecar_.isEmpty() || !QDir().mkpath(audioCacheDirectory())) return;
+        auto bytes = sidecarHeader(source);
+        for (const auto& hash : blockHashes_) bytes += hash;
+        bytes.append(reinterpret_cast<const char*>(data.peaks.data()), static_cast<qsizetype>(data.peaks.size() * sizeof(float)));
+        bytes += QCryptographicHash::hash(bytes, QCryptographicHash::Sha256);
+        // Concurrent writers for the same stamp produce identical files; the last one wins.
+        QSaveFile file(sidecar_);
+        if (file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size()) file.commit();
+    }
     QByteArray readBytes(Frame first, std::size_t count) const {
         const QFileInfo info(path_);
         const qint64 stride = channels_ * (bits_ / 8);
@@ -269,6 +310,7 @@ private:
     int channels_, bits_;
     bool floating_;
     qint64 size_;
+    QString sidecar_;
     std::vector<QByteArray> blockHashes_;
 };
 }
@@ -355,7 +397,7 @@ void trimAudioCache(qint64 maxBytes) {
     if (!directory.exists()) return;
     QLockFile trimming(directory.filePath("trim.lock")); trimming.setStaleLockTime(0);
     if (!trimming.tryLock(0)) return; // Another import or instance is already trimming.
-    struct Entry { QString key; qint64 bytes = 0, used = 0; bool committed = false, current = false; };
+    struct Entry { QString key; qint64 bytes = 0, used = 0; bool committed = false, current = false, sidecar = false; };
     std::map<QString, Entry> entries;
     const auto now = QDateTime::currentMSecsSinceEpoch();
     for (const auto& file : directory.entryInfoList(QDir::Files)) {
@@ -363,6 +405,13 @@ void trimAudioCache(qint64 maxBytes) {
         // Live conversions keep writing; a day-old temporary was left by a crash.
         if (file.fileName().startsWith("preparing-")) {
             if (now - modified > 24ll * 3600 * 1000) QFile::remove(file.filePath());
+            continue;
+        }
+        if (file.suffix() == "wave") {
+            // Direct WAV sidecars only save rehashing; they are never adopted unverified.
+            auto& entry = entries[file.fileName()]; QFile sidecar(file.filePath());
+            entry.key = file.completeBaseName(); entry.bytes = file.size(); entry.used = modified; entry.sidecar = true;
+            entry.current = sidecar.open(QIODevice::ReadOnly) && sidecar.read(8) == QByteArray(waveMagic, 8);
             continue;
         }
         if (file.suffix() != "pcm" && file.suffix() != "meta") continue;
@@ -389,6 +438,10 @@ void trimAudioCache(qint64 maxBytes) {
     std::stable_sort(order.begin(), order.end(), [](auto a, auto b) { return a->used < b->used; });
     for (const auto* entry : order) {
         if (total <= maxBytes && (entry->current || now - entry->used <= staleAge)) continue;
+        if (entry->sidecar) {
+            if (QFile::remove(directory.filePath(entry->key + ".wave"))) total -= entry->bytes;
+            continue;
+        }
         // Preparation and reuse hold the cache lock, so no instance can adopt it while it is removed.
         QLockFile lock(directory.filePath(entry->key + ".lock")); lock.setStaleLockTime(0);
         const auto pcm = directory.filePath(entry->key + ".pcm");

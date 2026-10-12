@@ -1216,6 +1216,23 @@ private slots:
         QVERIFY(file.seek(file.size() - 2)); QCOMPARE(file.write("\x01\x02", 2), 2); file.close(); setModified(recent, recentTime);
         QVERIFY(loadMedia(recent).audio); QCOMPARE(caches.entryList({"*.pcm"}, QDir::Files).size(), count + 3);
     }
+    void directPcmSidecarSkipsHashingAndKeepsChangeDetection() {
+        QTemporaryDir dir; QDir caches(detail::audioCacheDirectory()); const auto source = dir.filePath("direct.wav");
+        writeBytes(source, waveBytes(16, 1, 2, sampleRate));
+        const auto time = QDateTime::currentDateTimeUtc().addDays(-1); setModified(source, time);
+        const auto before = caches.entryList({"*.wave"}, QDir::Files).size();
+        const auto first = loadMedia(source); QCOMPARE(caches.entryList({"*.wave"}, QDir::Files).size(), before + 1);
+        const auto reopened = loadMedia(source); QCOMPARE(reopened.audio->peaks, first.audio->peaks);
+        QCOMPARE(sampleAt(*reopened.audio, 9000), waveValue(9000, 0));
+        // A same-stamp rewrite reuses the recorded hashes, so reads still detect it and drop the sidecar.
+        QFile file(source); QVERIFY(file.open(QIODevice::ReadWrite)); QVERIFY(file.seek(file.size() - 4));
+        QCOMPARE(file.write("\x00\x40\x00\x40", 4), 4); file.close(); setModified(source, time);
+        const auto stale = loadMedia(source); QCOMPARE(stale.audio->peaks, first.audio->peaks);
+        QVERIFY_THROWS_EXCEPTION(AudioSourceChanged, sampleAt(*stale.audio, stale.audio->length() - 1));
+        QCOMPARE(caches.entryList({"*.wave"}, QDir::Files).size(), before);
+        const auto fresh = loadMedia(source); QCOMPARE(sampleAt(*fresh.audio, fresh.audio->length() - 1), .5f);
+        QCOMPARE(caches.entryList({"*.wave"}, QDir::Files).size(), before + 1);
+    }
     void diskAudioCacheHasBoundedMemoryAndPersists() {
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
         QTemporaryDir dir; const QString file = dir.filePath("long-silence.flac"); QProcess process;
