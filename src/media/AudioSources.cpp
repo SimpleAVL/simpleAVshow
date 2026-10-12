@@ -1,5 +1,6 @@
 #include "media/AudioSources.h"
 #include "core/AudioBuffer.h"
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDataStream>
 #include <QDateTime>
@@ -7,12 +8,15 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QLockFile>
+#include <QMutex>
 #include <QSaveFile>
 #include <QStandardPaths>
+#include <QStorageInfo>
 #include <QSysInfo>
 #include <QTemporaryFile>
 #include <QtEndian>
 #include <cstring>
+#include <map>
 #include <stdexcept>
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -23,8 +27,9 @@ extern "C" {
 namespace sav::detail {
 namespace {
 constexpr qint64 stereoBytes = 2 * sizeof(float);
-constexpr qint64 metadataHeader = 8 + 8 + 1 + 32 + 32;
-constexpr char cacheMagic[] = "SAVPCM01";
+constexpr qint64 legacyHeader = 8 + 8 + 1 + 32 + 32, metadataHeader = legacyHeader + 32;
+constexpr char legacyMagic[] = "SAVPCM01", cacheMagic[] = "SAVMETA2";
+constexpr qint64 staleAge = 7ll * 24 * 3600 * 1000;
 [[noreturn]] void fail(const QString& message) { throw std::runtime_error(message.toStdString()); }
 [[noreturn]] void changed(const QString& message) { throw AudioSourceChanged(message.toStdString()); }
 
@@ -44,13 +49,72 @@ QByteArray peaksHash(const std::vector<float>& peaks) {
     hash.addData(QByteArrayView(reinterpret_cast<const char*>(peaks.data()), static_cast<qsizetype>(peaks.size() * sizeof(float))));
     return hash.result();
 }
+// Bump the revision when decoding changes so stale caches are rebuilt (02: one-channel input is centre mono).
+const QByteArray& decoderRevision() {
+    static const auto revision = QByteArray("SAVPCM02:") + QByteArray::number(avformat_version()) + ':' +
+        QByteArray::number(avcodec_version()) + ':' + QByteArray::number(swresample_version());
+    return revision;
+}
+const QByteArray& revisionId() {
+    static const auto id = QCryptographicHash::hash(decoderRevision(), QCryptographicHash::Sha256);
+    return id;
+}
+void touch(const QString& path) {
+    QFile file(path);
+    if (file.open(QIODevice::ReadWrite)) file.setFileTime(QDateTime::currentDateTimeUtc(), QFileDevice::FileModificationTime);
+}
+void writeMetadata(const QString& path, Frame length, bool mono, const QByteArray& checksum, const std::vector<float>& peaks) {
+    QSaveFile metadata(path);
+    if (!metadata.open(QIODevice::WriteOnly)) fail("Cannot save audio cache metadata: " + metadata.errorString());
+    QDataStream stream(&metadata); stream.setByteOrder(QDataStream::LittleEndian);
+    stream.writeRawData(cacheMagic, 8); stream.writeRawData(revisionId().constData(), 32);
+    stream << static_cast<qint64>(length) << static_cast<quint8>(mono);
+    stream.writeRawData(checksum.constData(), 32); stream.writeRawData(peaksHash(peaks).constData(), 32);
+    const auto peakBytes = static_cast<qint64>(peaks.size() * sizeof(float));
+    if (metadata.write(reinterpret_cast<const char*>(peaks.data()), peakBytes) != peakBytes ||
+        stream.status() != QDataStream::Ok || !metadata.commit()) fail("Cannot finish audio cache metadata: " + metadata.errorString());
+}
+
+// Caches referenced by live storage in this process. Each also holds a per-process
+// marker lock so other instances keep it too; Qt treats markers of dead processes as stale.
+struct CacheUse { int owners = 0; std::unique_ptr<QLockFile> marker; };
+QMutex usesMutex;
+std::map<QString, CacheUse>& cacheUses() { static std::map<QString, CacheUse> uses; return uses; }
+void retainCache(const QString& pcm) {
+    const QMutexLocker locker(&usesMutex);
+    auto& use = cacheUses()[pcm];
+    if (use.owners++) return;
+    use.marker = std::make_unique<QLockFile>(pcm.chopped(4) + '.' + QString::number(QCoreApplication::applicationPid()) + ".use");
+    use.marker->setStaleLockTime(0);
+    if (!use.marker->tryLock(0)) use.marker.reset();
+}
+void releaseCache(const QString& pcm) {
+    const QMutexLocker locker(&usesMutex);
+    const auto use = cacheUses().find(pcm);
+    if (use != cacheUses().end() && !--use->second.owners) cacheUses().erase(use);
+}
+bool cacheInUse(const QString& pcm) {
+    {
+        const QMutexLocker locker(&usesMutex);
+        if (cacheUses().count(pcm)) return true;
+    }
+    const QFileInfo info(pcm);
+    for (const auto& marker : info.dir().entryInfoList({info.completeBaseName() + ".*.use"}, QDir::Files)) {
+        QLockFile other(marker.filePath()); other.setStaleLockTime(0);
+        if (!other.tryLock(0)) return true;
+        other.unlock(); // Left by a dead process; unlocking removes it.
+    }
+    return false;
+}
+
 void checkRange(Frame first, std::size_t count, Frame length) {
     if (first < 0 || first > length || count > static_cast<std::size_t>(length - first)) fail("Invalid audio source range");
 }
 
 class PcmStorage final : public AudioStorage {
 public:
-    PcmStorage(QString path, Frame length) : path_(std::move(path)), length_(length), modified_(QFileInfo(path_).lastModified()) {}
+    PcmStorage(QString path, Frame length) : path_(std::move(path)), length_(length), modified_(QFileInfo(path_).lastModified()) { retainCache(path_); }
+    ~PcmStorage() override { releaseCache(path_); }
     Frame length() const noexcept override { return length_; }
     void read(Frame first, float* stereo, std::size_t count) const override {
         checkRange(first, count, length_);
@@ -151,10 +215,7 @@ QString audioCacheDirectory() {
 
 AudioCache::AudioCache(const QString& source) : source_(source), sourceHash_(fileHash(source)) {
     // Content identity also survives moved media and fresh package extraction paths.
-    // Bump the revision when decoding changes so stale caches are rebuilt (02: one-channel input is centre mono).
-    const auto revision = QByteArray("SAVPCM02:") + QByteArray::number(avformat_version()) + ':' +
-        QByteArray::number(avcodec_version()) + ':' + QByteArray::number(swresample_version());
-    const auto key = QString::fromLatin1(QCryptographicHash::hash(revision + sourceHash_, QCryptographicHash::Sha256).toHex());
+    const auto key = QString::fromLatin1(QCryptographicHash::hash(decoderRevision() + sourceHash_, QCryptographicHash::Sha256).toHex());
     const QDir directory(audioCacheDirectory());
     if (!QDir().mkpath(directory.path())) fail("Cannot create audio cache directory: " + directory.path());
     pcm_ = directory.filePath(key + ".pcm"); metadata_ = directory.filePath(key + ".meta");
@@ -169,14 +230,18 @@ std::shared_ptr<const AudioData> AudioCache::reuse(bool mono) const {
     QFile metadata(metadata_);
     if (!metadata.open(QIODevice::ReadOnly)) return {};
     QDataStream stream(&metadata); stream.setByteOrder(QDataStream::LittleEndian);
-    char magic[8], pcmHash[32], waveformHash[32]; qint64 length = 0; quint8 savedMono = 0;
-    if (stream.readRawData(magic, 8) != 8 || std::memcmp(magic, cacheMagic, 8)) return {};
+    char magic[8], revision[32], pcmHash[32], waveformHash[32]; qint64 length = 0; quint8 savedMono = 0;
+    if (stream.readRawData(magic, 8) != 8) return {};
+    // The key already covers the revision, so older metadata without it is upgraded in place.
+    const bool legacy = !std::memcmp(magic, legacyMagic, 8);
+    if (!legacy && (std::memcmp(magic, cacheMagic, 8) || stream.readRawData(revision, 32) != 32 ||
+        QByteArray(revision, 32) != revisionId())) return {};
     stream >> length >> savedMono;
     if (length <= 0 || length > maxFrame || savedMono > 1 || static_cast<bool>(savedMono) != mono ||
         QFileInfo(pcm_).size() != length * stereoBytes) return {};
     const auto peakCount = (length + AudioData::peakStride - 1) / AudioData::peakStride;
     const auto peakBytes = peakCount * static_cast<qint64>(sizeof(float));
-    if (metadata.size() != metadataHeader + peakBytes || stream.readRawData(pcmHash, 32) != 32 || stream.readRawData(waveformHash, 32) != 32) return {};
+    if (metadata.size() != (legacy ? legacyHeader : metadataHeader) + peakBytes || stream.readRawData(pcmHash, 32) != 32 || stream.readRawData(waveformHash, 32) != 32) return {};
     auto data = std::make_shared<AudioData>(); data->mono = mono;
     data->peaks.resize(static_cast<std::size_t>(peakCount));
     if (metadata.read(reinterpret_cast<char*>(data->peaks.data()), peakBytes) != peakBytes ||
@@ -185,6 +250,10 @@ std::shared_ptr<const AudioData> AudioCache::reuse(bool mono) const {
     try {
         if (fileHash(pcm_) != QByteArray(pcmHash, 32)) return {};
     } catch (const std::runtime_error&) { return {}; }
+    metadata.close();
+    // The metadata timestamp records use for least-recently-used trimming.
+    if (!legacy) touch(metadata_);
+    else try { writeMetadata(metadata_, length, mono, QByteArray(pcmHash, 32), data->peaks); } catch (const std::runtime_error&) {}
     data->storage = std::make_shared<PcmStorage>(pcm_, length);
     return data;
 }
@@ -207,15 +276,58 @@ std::shared_ptr<const AudioStorage> AudioCache::publish(QTemporaryFile& file, co
         if (!file.rename(pcm_)) fail("Cannot publish audio cache: " + file.errorString());
         file.setAutoRemove(false);
     }
-    QSaveFile metadata(metadata_);
-    if (!metadata.open(QIODevice::WriteOnly)) fail("Cannot save audio cache metadata: " + metadata.errorString());
-    QDataStream stream(&metadata); stream.setByteOrder(QDataStream::LittleEndian);
-    stream.writeRawData(cacheMagic, 8); stream << static_cast<qint64>(length) << static_cast<quint8>(data.mono);
-    stream.writeRawData(checksum.constData(), 32); stream.writeRawData(peaksHash(data.peaks).constData(), 32);
-    const auto peakBytes = static_cast<qint64>(data.peaks.size() * sizeof(float));
-    if (metadata.write(reinterpret_cast<const char*>(data.peaks.data()), peakBytes) != peakBytes ||
-        stream.status() != QDataStream::Ok || !metadata.commit()) fail("Cannot finish audio cache metadata: " + metadata.errorString());
-    return std::make_shared<PcmStorage>(pcm_, length);
+    writeMetadata(metadata_, length, data.mono, checksum, data.peaks);
+    auto storage = std::make_shared<PcmStorage>(pcm_, length);
+    trimAudioCache();
+    return storage;
+}
+
+void trimAudioCache(qint64 maxBytes) {
+    const QDir directory(audioCacheDirectory());
+    if (!directory.exists()) return;
+    QLockFile trimming(directory.filePath("trim.lock")); trimming.setStaleLockTime(0);
+    if (!trimming.tryLock(0)) return; // Another import or instance is already trimming.
+    struct Entry { QString key; qint64 bytes = 0, used = 0; bool committed = false, current = false; };
+    std::map<QString, Entry> entries;
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    for (const auto& file : directory.entryInfoList(QDir::Files)) {
+        const auto modified = file.lastModified().toMSecsSinceEpoch();
+        // Live conversions keep writing; a day-old temporary was left by a crash.
+        if (file.fileName().startsWith("preparing-")) {
+            if (now - modified > 24ll * 3600 * 1000) QFile::remove(file.filePath());
+            continue;
+        }
+        if (file.suffix() != "pcm" && file.suffix() != "meta") continue;
+        auto& entry = entries[file.completeBaseName()];
+        entry.key = file.completeBaseName(); entry.bytes += file.size();
+        if (file.suffix() == "pcm") {
+            if (!entry.committed) entry.used = modified;
+            continue;
+        }
+        // Metadata without the current revision (including the legacy format) is stale.
+        QFile metadata(file.filePath());
+        entry.committed = true; entry.used = modified;
+        entry.current = metadata.open(QIODevice::ReadOnly) && metadata.read(40) == QByteArray(cacheMagic, 8) + revisionId();
+    }
+    qint64 total = 0;
+    std::vector<const Entry*> order;
+    for (const auto& [key, entry] : entries) { total += entry.bytes; order.push_back(&entry); }
+    if (maxBytes < 0) {
+        // Shrinks on nearly full disks; caches still in use are never removed.
+        const QStorageInfo storage(directory.path());
+        maxBytes = 20ll << 30;
+        if (storage.isValid() && storage.bytesAvailable() >= 0) maxBytes = std::min(maxBytes, (storage.bytesAvailable() + total) / 4);
+    }
+    std::stable_sort(order.begin(), order.end(), [](auto a, auto b) { return a->used < b->used; });
+    for (const auto* entry : order) {
+        if (total <= maxBytes && (entry->current || now - entry->used <= staleAge)) continue;
+        // Preparation and reuse hold the cache lock, so no instance can adopt it while it is removed.
+        QLockFile lock(directory.filePath(entry->key + ".lock")); lock.setStaleLockTime(0);
+        const auto pcm = directory.filePath(entry->key + ".pcm");
+        if (!lock.tryLock(0) || cacheInUse(pcm) || (QFile::exists(pcm) && !QFile::remove(pcm))) continue;
+        QFile::remove(directory.filePath(entry->key + ".meta"));
+        total -= entry->bytes;
+    }
 }
 
 std::shared_ptr<const AudioData> loadPcmWave(const QString& path) {

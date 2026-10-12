@@ -24,6 +24,7 @@
 #include <QDoubleSpinBox>
 #include <QLineEdit>
 #include <QSettings>
+#include <QLockFile>
 #include <QCheckBox>
 #include <QFileDialog>
 #include <QScrollBar>
@@ -130,6 +131,20 @@ struct PaintSpy : QObject {
 };
 // A long, empty show: the playhead can travel without holds or clips.
 Project longShow() { auto p = newProject(); p.show.clips.clear(); p.show.markers.clear(); p.show.duration = frames(600); return p; }
+// Imports a resampled (cached) source and returns the new cache key.
+QString importCacheKey(const QString& path, Frame count, std::shared_ptr<const AudioData>* retained = nullptr) {
+    writeBytes(path, waveBytes(16, 1, 2, 44100, false, count));
+    QDir caches(detail::audioCacheDirectory()); const auto before = caches.entryList({"*.pcm"}, QDir::Files);
+    auto asset = loadMedia(path); if (retained) *retained = asset.audio;
+    auto created = caches.entryList({"*.pcm"}, QDir::Files);
+    for (const auto& name : before) created.removeAll(name);
+    if (created.size() != 1) throw std::runtime_error("Expected one new audio cache");
+    return created.front().chopped(4);
+}
+void setModified(const QString& path, const QDateTime& time) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadWrite) || !file.setFileTime(time, QFileDevice::FileModificationTime)) throw std::runtime_error("Cannot set fixture time");
+}
 class UnreadableStorage : public AudioStorage {
 public:
     Frame length() const noexcept override { return frames(2); }
@@ -1069,10 +1084,13 @@ private slots:
         QVERIFY(cacheFile.setFileTime(sentinel, QFileDevice::FileModificationTime)); cacheFile.close();
         QFile metaFile(metadata); QVERIFY(metaFile.open(QIODevice::ReadWrite));
         QVERIFY(metaFile.setFileTime(sentinel, QFileDevice::FileModificationTime)); metaFile.close();
-        // Same content at another path shares the artifact without rewriting it.
+        // Same content at another path shares the artifact without rewriting it;
+        // reuse only touches the metadata timestamp for least-recently-used trimming.
+        QVERIFY(metaFile.open(QIODevice::ReadOnly)); const auto metaBytes = metaFile.readAll(); metaFile.close();
         const auto moved = dir.filePath("moved.wav"); QVERIFY(QFile::copy(source, moved));
         auto reused = loadMedia(moved);
-        QCOMPARE(QFileInfo(pcm).lastModified(), sentinel); QCOMPARE(QFileInfo(metadata).lastModified(), sentinel);
+        QCOMPARE(QFileInfo(pcm).lastModified(), sentinel); QVERIFY(QFileInfo(metadata).lastModified() > sentinel);
+        QVERIFY(metaFile.open(QIODevice::ReadOnly)); QCOMPARE(metaFile.readAll(), metaBytes); metaFile.close();
         QCOMPARE(reused.audio->peaks, peaks);
         float sample[2]; reused.audio->storage->read(1234, sample, 1); QCOMPARE(sample[0], expected[2468]);
         reused.audio.reset();
@@ -1110,6 +1128,64 @@ private slots:
         QCOMPARE(sampleAt(*a.audio, 100), sampleAt(*b.audio, 100));
         QCOMPARE(caches.entryList({"*.pcm"}, QDir::Files).size(), before.size() + 1);
         QCOMPARE(caches.entryList({"preparing-*", "*.lock"}, QDir::Files).size(), 0);
+    }
+    void audioCacheTrimRemovesLeastRecentlyUsedUnlockedCaches() {
+        QTemporaryDir dir; QDir caches(detail::audioCacheDirectory());
+        std::shared_ptr<const AudioData> held;
+        const auto oldest = importCacheKey(dir.filePath("a.wav"), 4410), older = importCacheKey(dir.filePath("b.wav"), 4420);
+        const auto newer = importCacheKey(dir.filePath("c.wav"), 4430), inUse = importCacheKey(dir.filePath("d.wav"), 4440, &held);
+        const auto locked = importCacheKey(dir.filePath("e.wav"), 4450);
+        const auto now = QDateTime::currentDateTimeUtc();
+        // Every other cache is older than these; the held and locked ones are the least recently used.
+        setModified(caches.filePath(oldest + ".meta"), now.addSecs(3600)); setModified(caches.filePath(older + ".meta"), now.addSecs(7200));
+        setModified(caches.filePath(newer + ".meta"), now.addSecs(10800));
+        for (const auto& key : {inUse, locked}) setModified(caches.filePath(key + ".meta"), now.addDays(-1));
+        QCOMPARE(caches.entryList({inUse + ".*.use"}, QDir::Files).size(), 1);
+        QLockFile preparing(caches.filePath(locked + ".lock")); QVERIFY(preparing.tryLock(0));
+        qint64 budget = 0;
+        for (const auto& key : {older, newer, inUse, locked})
+            budget += QFileInfo(caches.filePath(key + ".pcm")).size() + QFileInfo(caches.filePath(key + ".meta")).size();
+        detail::trimAudioCache(budget);
+        QVERIFY(!QFileInfo::exists(caches.filePath(oldest + ".pcm"))); QVERIFY(!QFileInfo::exists(caches.filePath(oldest + ".meta")));
+        for (const auto& key : {older, newer, inUse, locked}) {
+            QVERIFY(QFileInfo::exists(caches.filePath(key + ".pcm"))); QVERIFY(QFileInfo::exists(caches.filePath(key + ".meta")));
+        }
+        QVERIFY(std::isfinite(sampleAt(*held, 100)));
+        // Released and unlocked caches become removable again; markers disappear with their owners.
+        held.reset(); preparing.unlock();
+        QCOMPARE(caches.entryList({inUse + ".*.use"}, QDir::Files).size(), 0);
+        detail::trimAudioCache(0);
+        QCOMPARE(caches.entryList({"*.pcm", "*.meta", "*.lock", "*.use"}, QDir::Files).size(), 0);
+    }
+    void audioCacheTrimExpiresStaleRevisions() {
+        QTemporaryDir dir; QDir caches(detail::audioCacheDirectory());
+        const auto expired = importCacheKey(dir.filePath("a.wav"), 4410), recent = importCacheKey(dir.filePath("b.wav"), 4420);
+        const auto current = importCacheKey(dir.filePath("c.wav"), 4430), legacy = importCacheKey(dir.filePath("d.wav"), 4440);
+        const auto now = QDateTime::currentDateTimeUtc();
+        // Another decoder revision or FFmpeg build is stale; only a week without use expires it.
+        for (const auto& key : {expired, recent}) {
+            QFile meta(caches.filePath(key + ".meta")); QVERIFY(meta.open(QIODevice::ReadWrite));
+            QVERIFY(meta.seek(8)); QCOMPARE(meta.write("\xff", 1), 1); meta.close();
+        }
+        setModified(caches.filePath(expired + ".meta"), now.addDays(-8)); setModified(caches.filePath(recent + ".meta"), now.addDays(-6));
+        setModified(caches.filePath(current + ".meta"), now.addDays(-30));
+        // Metadata from before revisions were recorded counts as stale once unused for a week.
+        QFile meta(caches.filePath(legacy + ".meta")); QVERIFY(meta.open(QIODevice::ReadOnly));
+        auto bytes = meta.readAll(); meta.close(); bytes.remove(8, 32); bytes.replace(0, 8, "SAVPCM01");
+        const auto orphan = QString(64, u'f'); writeBytes(caches.filePath(orphan + ".meta"), bytes);
+        writeBytes(caches.filePath(orphan + ".pcm"), QByteArray(16, '\0'));
+        for (const auto& name : {orphan + ".meta", orphan + ".pcm"}) setModified(caches.filePath(name), now.addDays(-8));
+        writeBytes(caches.filePath("preparing-crashed"), "x"); setModified(caches.filePath("preparing-crashed"), now.addDays(-2));
+        detail::trimAudioCache(std::numeric_limits<qint64>::max());
+        QVERIFY(!QFileInfo::exists(caches.filePath(expired + ".meta"))); QVERIFY(!QFileInfo::exists(caches.filePath(expired + ".pcm")));
+        QVERIFY(!QFileInfo::exists(caches.filePath(orphan + ".meta"))); QVERIFY(!QFileInfo::exists(caches.filePath("preparing-crashed")));
+        for (const auto& key : {recent, current}) QVERIFY(QFileInfo::exists(caches.filePath(key + ".pcm")));
+        // Legacy metadata at a current key is still valid and upgraded in place when reused.
+        writeBytes(caches.filePath(legacy + ".meta"), bytes);
+        const auto pcmTime = QFileInfo(caches.filePath(legacy + ".pcm")).lastModified();
+        QVERIFY(loadMedia(dir.filePath("d.wav")).audio);
+        QCOMPARE(QFileInfo(caches.filePath(legacy + ".pcm")).lastModified(), pcmTime);
+        QVERIFY(meta.open(QIODevice::ReadOnly)); QCOMPARE(meta.read(8), QByteArray("SAVMETA2")); meta.close();
     }
     void diskAudioCacheHasBoundedMemoryAndPersists() {
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
