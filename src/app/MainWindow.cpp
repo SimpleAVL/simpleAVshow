@@ -728,6 +728,16 @@ bool MainWindow::checkDiscard() {
 }
 void MainWindow::closeEvent(QCloseEvent* event) {
     if (c_.busy) { c_.report("Wait for media preparation to finish before closing"); event->ignore(); return; }
+    // Quitting mid-performance must be deliberate; Cancel is the default so Space or Enter keeps the show running.
+    const State state = c_.transport.state();
+    if (c_.showMode || state == State::Playing || state == State::Held || c_.transport.asyncVoices()) {
+        QMessageBox box(QMessageBox::Warning, "Show is running", c_.showMode ? "Show mode is active." : "Playback is active.",
+            QMessageBox::Cancel, this);
+        box.setInformativeText("Quitting stops all audio, MIDI cues, and the program output.");
+        auto* quit = box.addButton("Stop and quit", QMessageBox::DestructiveRole);
+        box.setDefaultButton(QMessageBox::Cancel); box.exec();
+        if (box.clickedButton() != quit) { event->ignore(); return; }
+    }
     if (!checkDiscard()) { event->ignore(); return; }
     c_.stopAll(); event->accept();
 }

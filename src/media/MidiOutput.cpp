@@ -9,23 +9,34 @@ QStringList MidiOutput::ports() {
     } catch (const RtMidiError&) {}
     return result;
 }
+void MidiOutput::onError(RtMidiError::Type type, const std::string& text, void* self) {
+    if (type != RtMidiError::DEBUG_WARNING) static_cast<MidiOutput*>(self)->error_ = text;
+}
 bool MidiOutput::open(int port, QString& error) {
     close(); if (port < 0) return true;
     try {
         output_ = std::make_unique<RtMidiOut>();
+        // Without a callback RtMidi only prints send warnings, so a vanished device would fail silently.
+        output_->setErrorCallback(&MidiOutput::onError, this);
         if (static_cast<unsigned>(port) >= output_->getPortCount()) { error = "MIDI port is no longer available"; close(); return false; }
         name_ = QString::fromStdString(output_->getPortName(port));
-        output_->openPort(port, "SimpleAVShow"); return true;
+        output_->openPort(port, "SimpleAVShow");
+        if (!error_.empty() || !output_->isPortOpen()) { error = error_.empty() ? "Cannot open MIDI port" : QString::fromStdString(error_); close(); return false; }
+        return true;
     } catch (const RtMidiError& e) { error = QString::fromStdString(e.getMessage()); close(); return false; }
 }
 bool MidiOutput::send(const std::vector<unsigned char>& message, QString& error) {
     if (message.empty()) return true;
     if (!connected()) { error = "MIDI cue not sent: no output port is connected"; return false; }
     if (!validMidi(message)) { error = "Invalid MIDI message"; return false; }
-    try { output_->sendMessage(&message); return true; }
-    catch (const RtMidiError& e) { error = QString::fromStdString(e.getMessage()); return false; }
+    try {
+        error_.clear(); output_->sendMessage(&message);
+        if (error_.empty()) return true;
+        error = "MIDI cue not sent to " + name_ + ": " + QString::fromStdString(error_);
+    } catch (const RtMidiError& e) { error = QString::fromStdString(e.getMessage()); }
+    lost_.store(true); return false;
 }
-void MidiOutput::close() { output_.reset(); name_.clear(); }
+void MidiOutput::close() { output_.reset(); name_.clear(); error_.clear(); lost_.store(false); }
 bool validMidi(const std::vector<unsigned char>& message) {
     if (message.empty()) return true;
     if (message.size() > 4096 || message[0] < 0x80) return false;

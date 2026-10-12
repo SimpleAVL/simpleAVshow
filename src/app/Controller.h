@@ -5,6 +5,8 @@
 #include <QObject>
 #include <QTimer>
 #include <QSettings>
+#include <QElapsedTimer>
+#include <set>
 #include <functional>
 #include <map>
 #include <thread>
@@ -36,6 +38,7 @@ public:
     bool configureMidi(int port);
     bool testMidi(const std::vector<unsigned char>& message);
     bool needsMidi() const;
+    QString missingVideo() const;
     QString midiDestination() const { return midiName_; }
     void setShowMode(bool enabled);
     QImage compose();
@@ -57,11 +60,14 @@ private:
     std::shared_ptr<const Show> armed_;
     std::thread midiThread_;
     std::atomic<bool> midiStop_{true};
+    QElapsedTimer midiWatch_;
+    std::set<std::string> videoErrors_;
     QImage lastPicture_;
     Frame lastComposed_ = -1;
     std::vector<Project> undo_, redo_;
     void arm(Frame position);
     void startMidiThread();
+    void watchMidi();
     void stopMidiThread();
     bool prepareAudio();
     bool prepareMidi();

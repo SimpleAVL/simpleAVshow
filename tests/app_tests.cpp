@@ -15,6 +15,7 @@
 #include <QListWidget>
 #include <QTableWidget>
 #include <QDialog>
+#include <QMessageBox>
 #include <QLabel>
 #include <QAction>
 #include <QTimer>
@@ -191,6 +192,28 @@ private slots:
         raw->clear(); QVERIFY(!editor.message(bytes, error));
         type->setCurrentIndex(0); QVERIFY(editor.message(bytes, error)); QVERIFY(bytes.empty());
     }
+    void quittingDuringShowModeRequiresConfirmation() {
+        MainWindow window; window.show(); window.controller().setShowMode(true);
+        bool asked = false;
+        QTimer::singleShot(0, &window, [&] {
+            auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget()); if (!box) return;
+            asked = true; QCOMPARE(box->defaultButton(), box->button(QMessageBox::Cancel)); box->button(QMessageBox::Cancel)->click();
+        });
+        QVERIFY(!window.close()); QVERIFY(asked); QVERIFY(window.isVisible());
+        QTimer::singleShot(0, &window, [&] {
+            auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget()); if (!box) return;
+            for (auto* button : box->buttons()) if (button->text() == "Stop and quit") button->click();
+        });
+        window.controller().dirty = false; QVERIFY(window.close());
+    }
+    void onlyTimelineVideosCanBlockPlayback() {
+        Controller c; auto project = newProject();
+        MediaAsset unused; unused.id = "unused"; unused.name = "Unused"; unused.video = true; unused.duration = 1; unused.path = "/nonexistent/unused.mov";
+        project.assets.insert(unused.id, unused); c.replace(project);
+        QVERIFY(c.missingVideo().isEmpty());
+        QVERIFY(c.edit([](Project& p) { Clip clip; clip.id = "v"; clip.assetId = "unused"; clip.track = 0; clip.duration = frames(1); p.show.clips.push_back(clip); }));
+        QCOMPARE(c.missingVideo(), QString("/nonexistent/unused.mov"));
+    }
     void missingMidiExplainsSetupAndDoesNotStartPlayback() {
         Controller c; auto project = newProject();
         project.show.markers = {{"midi", "Lighting cue", frames(1), false, MidiTiming::Arrival, {0xc0, 0}}};
@@ -361,10 +384,14 @@ private slots:
         for (const auto& asset : c.project.assets) {
             QVERIFY(asset.path.startsWith(dir.filePath("edited.media") + "/")); QVERIFY(QFileInfo::exists(asset.path));
         }
-        c.undo(); QVERIFY(c.project.packageDirectory); QCOMPARE(c.project.title, generated.title);
-        c.redo(); QCOMPARE(c.project.title, QString("An edited copy")); QVERIFY(QFileInfo::exists(temporary));
-        // Destroy every extracted-source owner, then reopen the saved project and the original package.
-        c.replace(newProject()); QVERIFY(!QFileInfo::exists(temporary));
+        // Undo history follows the saved media, so the extraction is released and undo never restores its paths.
+        QVERIFY(!QFileInfo::exists(temporary));
+        c.undo(); QVERIFY(!c.project.packageDirectory); QCOMPARE(c.project.title, generated.title);
+        for (const auto& asset : c.project.assets) QVERIFY(asset.path.startsWith(dir.filePath("edited.media") + "/"));
+        const auto autosave = dir.filePath("undone.savshow"); writeProject(c.project, autosave);
+        QCOMPARE(readProject(autosave).title, generated.title);
+        c.redo(); QCOMPARE(c.project.title, QString("An edited copy"));
+        c.replace(newProject());
         const auto restored = readProject(dir.filePath("edited.savshow")); QCOMPARE(restored.title, QString("An edited copy"));
         const auto original = readProject(package); QCOMPARE(original.title, generated.title);
     }
