@@ -26,6 +26,7 @@
 #include <QSettings>
 #include <QCheckBox>
 #include <QFileDialog>
+#include <QScrollBar>
 #include <archive.h>
 #include <archive_entry.h>
 #include <limits>
@@ -123,6 +124,12 @@ float sampleAt(const AudioData& audio, Frame frame) {
     if (!audio.storage) return audio.samples[frame * 2];
     float stereo[2]; audio.storage->read(frame, stereo, 1); return stereo[0];
 }
+struct PaintSpy : QObject {
+    QRegion region; int count = 0;
+    bool eventFilter(QObject*, QEvent* e) override { if (e->type() == QEvent::Paint) { region += static_cast<QPaintEvent*>(e)->region(); ++count; } return false; }
+};
+// A long, empty show: the playhead can travel without holds or clips.
+Project longShow() { auto p = newProject(); p.show.clips.clear(); p.show.markers.clear(); p.show.duration = frames(600); return p; }
 class UnreadableStorage : public AudioStorage {
 public:
     Frame length() const noexcept override { return frames(2); }
@@ -1117,6 +1124,54 @@ private slots:
         for (Frame i = 0; i < frames(.6); ++i) {
             QCOMPARE(out[i * 2], sampleAt(*asset.audio, i)); QCOMPARE(out[i * 2 + 1], 0.f);
         }
+    }
+    void timelineTrimStopsAtNonLoopingSourceEnd() {
+        Controller c; auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}}; project.show.duration = frames(60);
+        auto audio = std::make_shared<AudioData>(); audio->samples.assign(static_cast<std::size_t>(frames(4)) * 2, 0.f);
+        MediaAsset asset; asset.id = "tone"; asset.name = "Tone"; asset.audio = audio; project.assets.insert(asset.id, asset);
+        Clip clip; clip.id = "a"; clip.assetId = "tone"; clip.audio = audio; clip.offset = frames(1); clip.duration = frames(2); project.show.clips.push_back(clip);
+        c.replace(project); Timeline timeline(c); timeline.resize(900, 300); timeline.show(); QVERIFY(QTest::qWaitForWindowExposed(&timeline));
+        timeline.setZoom(50); auto* view = timeline.viewport();
+        auto send = [&](QEvent::Type type, int x, Qt::MouseButtons buttons) {
+            QMouseEvent e(type, QPointF(x, 90), view->mapToGlobal(QPointF(x, 90)), Qt::LeftButton, buttons, Qt::NoModifier); QApplication::sendEvent(view, &e);
+        };
+        send(QEvent::MouseButtonPress, 288, Qt::LeftButton); send(QEvent::MouseMove, 500, Qt::LeftButton); send(QEvent::MouseMove, 800, Qt::LeftButton);
+        send(QEvent::MouseButtonRelease, 800, Qt::NoButton);
+        QCOMPARE(c.project.show.clips[0].duration, frames(3)); QCOMPARE(c.project.show.clips[0].offset, frames(1));
+        c.undo(); QVERIFY(c.edit([](Project& p) { p.show.clips[0].loop = true; }));
+        send(QEvent::MouseButtonPress, 288, Qt::LeftButton); send(QEvent::MouseMove, 800, Qt::LeftButton); send(QEvent::MouseButtonRelease, 800, Qt::NoButton);
+        QVERIFY(c.project.show.clips[0].duration > frames(10)); c.dirty = false;
+    }
+    void timelineZoomAnchorsPlayheadAndCursor() {
+        Controller c; c.replace(longShow()); Timeline timeline(c); timeline.resize(900, 300); timeline.show(); QVERIFY(QTest::qWaitForWindowExposed(&timeline));
+        auto x = [&](double t) { return 190 + t * timeline.zoom() - timeline.horizontalScrollBar()->value(); };
+        c.seek(frames(20)); const double before = x(20); timeline.setZoom(40);
+        QCOMPARE(timeline.zoom(), 40.); QVERIFY(std::abs(x(20) - before) <= 1); QVERIFY(timeline.horizontalScrollBar()->value() > 0);
+        QSignalSpy zoomed(&timeline, &Timeline::zoomChanged);
+        const double anchor = (400 - 190 + timeline.horizontalScrollBar()->value()) / timeline.zoom();
+        QWheelEvent wheel(QPointF(400, 120), timeline.viewport()->mapToGlobal(QPointF(400, 120)), {}, {0, 120}, Qt::NoButton, Qt::ControlModifier, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(timeline.viewport(), &wheel);
+        QCOMPARE(zoomed.count(), 1); QVERIFY(timeline.zoom() > 40); QVERIFY(std::abs(x(anchor) - 400) <= 1);
+        timeline.zoomToFit(); QCOMPARE(zoomed.count(), 2); QCOMPARE(timeline.horizontalScrollBar()->maximum(), 0);
+        QVERIFY(600 * timeline.zoom() <= timeline.viewport()->width() - 190);
+    }
+    void timelineFollowsPlayheadUnlessUserScrolled() {
+        Controller c; c.replace(longShow()); Timeline timeline(c); timeline.resize(900, 300); timeline.show(); QVERIFY(QTest::qWaitForWindowExposed(&timeline));
+        const double width = timeline.viewport()->width() - 190; QVERIFY(c.transport.command({Action::Play}));
+        c.transport.render(nullptr, static_cast<unsigned>(frames(10)), 0); emit c.tick(); QCOMPARE(timeline.horizontalScrollBar()->value(), 0);
+        c.transport.render(nullptr, static_cast<unsigned>(frames(20)), 0); emit c.tick();
+        const double x = 190 + 30 * timeline.zoom() - timeline.horizontalScrollBar()->value(); QVERIFY(std::abs(x - (190 + width * .15)) <= 2);
+        timeline.horizontalScrollBar()->setValue(0); c.transport.render(nullptr, static_cast<unsigned>(frames(10)), 0); emit c.tick();
+        QCOMPARE(timeline.horizontalScrollBar()->value(), 0); c.stopAll();
+    }
+    void timelinePlayheadTicksRepaintOnlyStrips() {
+        Controller c; c.replace(longShow()); Timeline timeline(c); timeline.resize(900, 300); timeline.show(); QVERIFY(QTest::qWaitForWindowExposed(&timeline));
+        QTest::qWait(50); PaintSpy spy; timeline.viewport()->installEventFilter(&spy);
+        QVERIFY(c.transport.command({Action::Play})); c.transport.render(nullptr, static_cast<unsigned>(frames(1)), 0); emit c.tick();
+        QTRY_VERIFY(spy.count > 0); QVERIFY(spy.region.boundingRect().width() < 60); QCOMPARE(spy.region.boundingRect().height(), timeline.viewport()->height());
+        spy.count = 0; emit c.tick(); QTest::qWait(50); QCOMPARE(spy.count, 0);
+        timeline.viewport()->removeEventFilter(&spy); c.stopAll();
     }
 };
 QTEST_MAIN(AppTests)
