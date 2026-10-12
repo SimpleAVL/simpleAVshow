@@ -64,11 +64,11 @@ Status: `open`, `fixed`, `wontfix` (with reason), `deferred`.
 | ID | Sev | Status | Finding |
 |----|-----|--------|---------|
 | P1 | Medium | open | **Saving an opened package freezes the GUI.** `materializeProjectMedia` copies all extracted media and re-hashes audio on the GUI thread with no progress (`Project.cpp:252-258`). **Fix:** run it on a worker with progress; try rename before copy. |
-| P2 | Medium | open | **Package extraction has no disk budget.** Compressed entries (zip bombs) and unreferenced `media/*` entries are accepted, and free space is not checked. Extraction folders in `%TEMP%` leak after a crash. **Fix:** accept only stored `media/<uuid>.<ext>` entries that the manifest references; check sizes against free space; sweep stale `simpleavshow-package-*` folders at startup. |
+| P2 | Medium | fixed | **Package extraction has no disk budget.** Compressed entries (zip bombs) and unreferenced `media/*` entries are accepted, and free space is not checked. Extraction folders in `%TEMP%` leak after a crash. **Fix:** accept only stored `media/<uuid>.<ext>` entries that the manifest references; check sizes against free space; sweep stale `simpleavshow-package-*` folders at startup. |
 | P3 | Medium | fixed | **Windows leaks extracted video folders.** `Controller::replace` releases the old project's `QTemporaryDir` before `arm(0)` closes video readers, so Windows cannot delete open files. **Fix:** close readers before releasing the old project. |
-| P4 | Low | open | **Windows device names pass the package filename check** (`media/CON`, `media/NUL.wav`; `ProjectPackage.cpp:85`). Fixed by the UUID-only rule in P2. |
-| P5 | Low | open | **Loose JSON value types.** Wrong types are coerced (`"gain":"x"` → 1, `"left":1e10` → disconnected). Every asset is decoded before the structure is validated, and unknown fields are dropped on re-save. **Fix:** strict type checks; validate structure before loading media. |
-| P6 | Low | open | **Failed saves leave partial files.** `materializeProjectMedia` leaves earlier copies behind when a later step fails. |
+| P4 | Low | fixed | **Windows device names pass the package filename check** (`media/CON`, `media/NUL.wav`; `ProjectPackage.cpp:85`). Fixed by the UUID-only rule in P2. |
+| P5 | Low | fixed | **Loose JSON value types.** Wrong types are coerced (`"gain":"x"` → 1, `"left":1e10` → disconnected). Every asset is decoded before the structure is validated, and unknown fields are dropped on re-save. **Fix:** strict type checks; validate structure before loading media. |
+| P6 | Low | fixed | **Failed saves leave partial files.** `materializeProjectMedia` leaves earlier copies behind when a later step fails. |
 | P7 | Low | open | **Every edit copies the whole project three times** (candidate, undo, armed). This is acceptable now but scales with show size. |
 
 ## CI and build
@@ -76,10 +76,10 @@ Status: `open`, `fixed`, `wontfix` (with reason), `deferred`.
 | ID | Sev | Status | Finding |
 |----|-----|--------|---------|
 | C1 | Medium | open | **The Windows app never builds on pull requests.** Windows and macOS app jobs are skipped on PRs, so MSVC/ASIO/Windows path behaviour first runs after merge. |
-| C2 | Medium | open | **`cancel-in-progress: true` also cancels `main` builds.** **Fix:** `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`. |
-| C3 | Medium | open | **Unpinned supply chain.** linuxdeploy comes from the `continuous` tag without a checksum; actions are pinned by tag, not SHA; RtAudio is cloned by tag; core jobs use floating `*-latest` runners. |
+| C2 | Medium | fixed | **`cancel-in-progress: true` also cancels `main` builds.** **Fix:** `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`. |
+| C3 | Medium | fixed | **Unpinned supply chain.** linuxdeploy comes from the `continuous` tag without a checksum; actions are pinned by tag, not SHA; RtAudio is cloned by tag; core jobs use floating `*-latest` runners. |
 | C4 | Low | open | **License collection over-collects.** It copies every `/usr/share/doc/*/copyright` on the runner rather than what ships; ASIO SDK obligations are undocumented. |
-| C5 | Low | open | **No ThreadSanitizer job.** A TSan build of the transport tests would check callback/worker/UI interactions. |
+| C5 | Low | fixed | **No ThreadSanitizer job.** A TSan build of the transport tests would check callback/worker/UI interactions. |
 
 ## Test gaps
 
