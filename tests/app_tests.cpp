@@ -21,6 +21,7 @@
 #include <QTimer>
 #include <QComboBox>
 #include <QSpinBox>
+#include <QDoubleSpinBox>
 #include <QLineEdit>
 #include <QSettings>
 #include <QCheckBox>
@@ -241,6 +242,28 @@ private slots:
         QTRY_VERIFY(next->text().contains("Act one · in 0:12")); QVERIFY(next->text().contains("1:30 left"));
         window.controller().seek(frames(20)); QTRY_VERIFY(next->text().contains("Finale · in 0:55"));
         window.controller().setShowMode(false); window.controller().dirty = false;
+    }
+    void inspectorAppliesTouchedFieldsAutomatically() {
+        MainWindow window; window.show(); auto& c = window.controller();
+        QVERIFY(c.edit([](Project& p) { Clip clip; clip.id = "t"; clip.text = "Hello"; clip.track = 0; clip.duration = frames(5); clip.opacity = 1. / 3; p.show.clips.push_back(clip); }));
+        window.findChild<Timeline*>()->selectClip("t");
+        auto* scale = window.findChild<QDoubleSpinBox*>("clipScale"); QVERIFY(scale);
+        const auto clip = [&] { return c.project.show.clips.back(); };
+        scale->setValue(2); QVERIFY(QMetaObject::invokeMethod(scale, "editingFinished"));
+        QCOMPARE(clip().scale, 2.); QCOMPARE(clip().opacity, 1. / 3); // Untouched fields keep exact values.
+        c.undo(); QCOMPARE(clip().scale, 1.); c.redo();
+        // A pending field edit is flushed without overwriting a change made elsewhere (e.g. a timeline drag).
+        scale->setValue(3);
+        QVERIFY(c.edit([](Project& p) { p.show.clips.back().start = frames(2); }));
+        QCOMPARE(clip().start, frames(2)); QCOMPARE(clip().scale, 3.);
+        // Lengthening a one-shot video clip stops at the end of its source.
+        MediaAsset video; video.id = "video"; video.name = "Clip.mov"; video.video = true; video.duration = 4; video.path = "/nonexistent/clip.mov";
+        QVERIFY(c.edit([&](Project& p) { p.assets.insert(video.id, video); Clip v; v.id = "v"; v.assetId = "video"; v.track = 0; v.start = frames(10); v.duration = frames(2); v.offset = frames(1); p.show.clips.push_back(v); }));
+        window.findChild<Timeline*>()->selectClip("v");
+        auto* length = window.findChildren<QDoubleSpinBox*>().at(0); for (auto* spin : window.findChildren<QDoubleSpinBox*>()) if (spin->isVisible() && spin->value() == 2.) length = spin;
+        length->setValue(10); QVERIFY(QMetaObject::invokeMethod(length, "editingFinished"));
+        QCOMPARE(clip().duration, frames(3)); QVERIFY(c.status.contains("end of the source"));
+        c.dirty = false;
     }
     void quittingDuringShowModeRequiresConfirmation() {
         MainWindow window; window.show(); window.controller().setShowMode(true);

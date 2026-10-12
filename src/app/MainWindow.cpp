@@ -241,11 +241,11 @@ void MainWindow::buildInspector() {
         if (output == -1) { trackLeft_->setValue(1); trackRight_->setValue(2); trackPan_->setValue(0); }
         else if (output == -3) { trackLeft_->setValue(0); trackRight_->setValue(0); }
         else if (output > 0) { trackLeft_->setValue(output); trackRight_->setValue(0); trackPan_->setValue(0); }
-        route->setCurrentIndex(0);
+        route->setCurrentIndex(0); if (output != -2) { inspectorDirty_ = true; touched_.insert({trackLeft_, trackRight_, trackPan_}); commitInspector(); }
     });
     trackPan_->setToolTip("−1 = left, 0 = center, +1 = right. With one connected output, stereo sources are summed to mono at full level and pan has no effect.");
     audio->addRow("Volume (1 = full)", trackGain_); audio->addRow("Pan", trackPan_); audio->addRow("Left → output", trackLeft_); audio->addRow("Right → output", trackRight_);
-    auto* routeHint = new QLabel("Choose a preset, then Apply track. Guide and Click start silent so they do not reach the audience. Use separate interface outputs for them."); routeHint->setWordWrap(true); routeHint->setStyleSheet("color: #88a0be; font-size: 10px;"); audio->addRow(routeHint);
+    auto* routeHint = new QLabel("Presets and fields apply immediately. Guide and Click start silent so they do not reach the audience. Use separate interface outputs for them."); routeHint->setWordWrap(true); routeHint->setStyleSheet("color: #88a0be; font-size: 10px;"); audio->addRow(routeHint);
     trackLayout->addWidget(trackAudio_); auto* applyTrackButton = button("Apply track", trackLayout); connect(applyTrackButton, &QPushButton::clicked, this, &MainWindow::applyTrack); trackLayout->addStretch(); inspector_->addWidget(trackPage);
     // Clip panel.
     auto* clipPage = new QWidget; auto* clipLayout = new QVBoxLayout(clipPage); clipLayout->setContentsMargins(0, 0, 0, 0);
@@ -255,7 +255,7 @@ void MainWindow::buildInspector() {
     audioTransform_ = new QGroupBox("Audio"); auto* audioForm = new QFormLayout(audioTransform_); clipGain_ = realSpin(0, 4, .05); clipPan_ = realSpin(-1, 1, .05);
     audioForm->addRow("Gain", clipGain_); audioForm->addRow("Pan", clipPan_); clipLayout->addWidget(audioTransform_);
     videoTransform_ = new QGroupBox("Picture"); auto* videoForm = new QFormLayout(videoTransform_);
-    clipX_ = realSpin(-2, 2, .05); clipY_ = realSpin(-2, 2, .05); clipScale_ = realSpin(.01, 8, .05); clipOpacity_ = realSpin(0, 1, .05);
+    clipX_ = realSpin(-2, 2, .05); clipY_ = realSpin(-2, 2, .05); clipScale_ = realSpin(.01, 8, .05); clipOpacity_ = realSpin(0, 1, .05); clipScale_->setObjectName("clipScale"); clipOpacity_->setObjectName("clipOpacity");
     videoForm->addRow("X (frame widths)", clipX_); videoForm->addRow("Y (frame heights)", clipY_); videoForm->addRow("Scale", clipScale_); videoForm->addRow("Opacity", clipOpacity_); clipLayout->addWidget(videoTransform_);
     auto* applyClipButton = button("Apply clip", clipLayout); connect(applyClipButton, &QPushButton::clicked, this, &MainWindow::applyClip);
     auto* automation = new QGroupBox("Automation · follows show time"); auto* automationLayout = new QVBoxLayout(automation);
@@ -318,13 +318,17 @@ void MainWindow::buildInspector() {
     });
     auto* midiSetup = button("Device…", midiButtons); connect(midiSetup, &QPushButton::clicked, this, &MainWindow::outputSettings);
     midiLayout->addLayout(midiButtons);
-    cueLayout->addWidget(midiBox); auto* applyCueButton = button("Apply cue", cueLayout); connect(applyCueButton, &QPushButton::clicked, this, &MainWindow::applyMarker);
+    cueLayout->addWidget(midiBox); auto* applyCueButton = button("Apply cue", cueLayout); connect(applyCueButton, &QPushButton::clicked, this, [this] { applyMarker(true); });
     connect(markerHold_, &QCheckBox::toggled, this, [this](bool hold) {
         if (!hold) midiTiming_->setCurrentIndex(0);
         midiTiming_->setEnabled(hold); midiTiming_->setToolTip(hold ? "" : "Without a hold, the message is sent when the playhead reaches this cue.");
     });
     cueLayout->addStretch(); inspector_->addWidget(cuePage);
     inspectorScroll_ = new QScrollArea; inspectorScroll_->setWidgetResizable(true); inspectorScroll_->setWidget(wrapper); inspectorScroll_->setMinimumWidth(280);
+    // Fields apply when left (Enter or focus change) and toggles at once; each change is one undo step.
+    for (QWidget* field : std::initializer_list<QWidget*>{trackName_, trackMute_, trackAsync_, trackGain_, trackPan_, trackLeft_, trackRight_,
+            clipStart_, clipDuration_, clipOffset_, clipLoop_, clipText_, clipGain_, clipPan_, clipX_, clipY_, clipScale_, clipOpacity_,
+            markerName_, markerTime_, markerHold_, midiTiming_}) autoApply(field);
 }
 
 Clip* MainWindow::selectedClip() { for (auto& clip : c_.project.show.clips) if (clip.id == timeline_->selectedClip.toStdString()) return &clip; return nullptr; }
@@ -411,7 +415,10 @@ void MainWindow::updateRoutingPresets() {
         trackRouting_->addItem(QString("Mono · output %1").arg(n), n);
 }
 void MainWindow::updateInspector() {
-    refreshing_ = true;
+    commitInspector();
+    refreshing_ = true; inspectorDirty_ = false; touched_.clear();
+    inspectedClip_ = selectedClip() ? selectedClip()->id : std::string(); inspectedMarker_ = !selectedClip() && selectedMarker() ? selectedMarker()->id : std::string();
+    inspectedTrack_ = timeline_->selectedTrack;
     if (auto* clip = selectedClip()) {
         inspector_->setCurrentIndex(1); clipStart_->setValue(seconds(clip->start)); clipDuration_->setValue(seconds(clip->duration)); clipOffset_->setValue(seconds(clip->offset)); clipLoop_->setChecked(clip->loop);
         const bool visual = c_.project.show.tracks[clip->track].visual; audioTransform_->setVisible(!visual); videoTransform_->setVisible(visual); clipText_->setVisible(!clip->text.empty());
@@ -440,25 +447,78 @@ void MainWindow::updateCurve() {
         curveTable_->setItem(row, 1, new QTableWidgetItem(QString::number(point.value, 'f', 3)));
     }
 }
+namespace {
+// Untouched fields keep their exact model value instead of the spin box's rounded display.
+double kept(const QDoubleSpinBox* spin, double model) { return std::abs(spin->value() - model) < .5 * std::pow(10., -spin->decimals()) ? model : spin->value(); }
+Frame kept(const QDoubleSpinBox* spin, Frame model) { return std::abs(spin->value() - seconds(model)) < .5 * std::pow(10., -spin->decimals()) ? model : frames(spin->value()); }
+}
 void MainWindow::applyTrack() {
-    const int index = timeline_->selectedTrack; Track edited = c_.project.show.tracks[index];
-    edited.name = trackName_->text().toStdString(); edited.muted = trackMute_->isChecked();
-    if (!edited.visual) { edited.async = trackAsync_->isChecked(); edited.gain = trackGain_->value(); edited.pan = trackPan_->value(); edited.left = trackLeft_->value() - 1; edited.right = trackRight_->value() - 1; }
+    inspectorDirty_ = false;
+    const int index = inspectedTrack_; if (index < 0 || static_cast<std::size_t>(index) >= c_.project.show.tracks.size()) return;
+    const Track& current = c_.project.show.tracks[index]; Track edited = current;
+    const auto pick = [this](QWidget* field, auto shown, auto model) { return use(field) ? shown : model; };
+    edited.name = pick(trackName_, trackName_->text().toStdString(), current.name); edited.muted = pick(trackMute_, trackMute_->isChecked(), current.muted);
+    if (!edited.visual) {
+        edited.async = pick(trackAsync_, trackAsync_->isChecked(), current.async); edited.gain = pick(trackGain_, kept(trackGain_, current.gain), current.gain);
+        edited.pan = pick(trackPan_, kept(trackPan_, current.pan), current.pan); edited.left = pick(trackLeft_, trackLeft_->value() - 1, current.left); edited.right = pick(trackRight_, trackRight_->value() - 1, current.right);
+    }
+    if (edited.name == current.name && edited.muted == current.muted && edited.async == current.async && edited.gain == current.gain && edited.pan == current.pan &&
+        edited.left == current.left && edited.right == current.right) return;
     c_.edit([=](Project& p) { p.show.tracks[index] = edited; });
 }
 void MainWindow::applyClip() {
-    auto* clip = selectedClip(); if (!clip) return; Clip edited = *clip;
-    edited.start = frames(clipStart_->value()); edited.duration = frames(clipDuration_->value()); edited.offset = frames(clipOffset_->value()); edited.loop = clipLoop_->isChecked();
-    edited.gain = clipGain_->value(); edited.pan = clipPan_->value(); edited.x = clipX_->value(); edited.y = clipY_->value(); edited.scale = clipScale_->value(); edited.opacity = clipOpacity_->value();
-    if (!edited.text.empty()) edited.text = clipText_->toPlainText().toStdString();
+    inspectorDirty_ = false;
+    const Clip* clip = nullptr; for (const auto& c : c_.project.show.clips) if (c.id == inspectedClip_) clip = &c;
+    if (!clip) return; Clip edited = *clip;
+    const auto real = [this](QDoubleSpinBox* field, auto model) { return use(field) ? kept(field, model) : model; };
+    edited.start = real(clipStart_, clip->start); edited.duration = real(clipDuration_, clip->duration); edited.offset = real(clipOffset_, clip->offset);
+    if (use(clipLoop_)) edited.loop = clipLoop_->isChecked();
+    edited.gain = real(clipGain_, clip->gain); edited.pan = real(clipPan_, clip->pan); edited.x = real(clipX_, clip->x); edited.y = real(clipY_, clip->y);
+    edited.scale = real(clipScale_, clip->scale); edited.opacity = real(clipOpacity_, clip->opacity);
+    if (!edited.text.empty() && use(clipText_)) edited.text = clipText_->toPlainText().toStdString();
+    // A one-shot clip cannot outlast its source; the remainder would be silence or a frozen frame.
+    const auto asset = c_.project.assets.constFind(QString::fromStdString(edited.assetId));
+    const Frame source = edited.audio ? edited.audio->length() : asset != c_.project.assets.cend() && asset->video ? frames(asset->duration) : 0;
+    if (!edited.loop && source > 0 && edited.offset + edited.duration > source) {
+        edited.duration = std::max<Frame>(1, source - edited.offset);
+        c_.report("Length is limited to the end of the source. Enable Loop source to play longer.");
+    }
+    if (edited.start == clip->start && edited.duration == clip->duration && edited.offset == clip->offset && edited.loop == clip->loop && edited.gain == clip->gain &&
+        edited.pan == clip->pan && edited.x == clip->x && edited.y == clip->y && edited.scale == clip->scale && edited.opacity == clip->opacity && edited.text == clip->text) return;
     c_.edit([=](Project& p) { for (auto& c : p.show.clips) if (c.id == edited.id) c = edited; });
 }
-void MainWindow::applyMarker() {
-    auto* marker = selectedMarker(); if (!marker) return; Marker edited = *marker;
-    edited.name = markerName_->text().toStdString(); edited.time = frames(markerTime_->value()); edited.hold = markerHold_->isChecked(); edited.timing = midiTiming_->currentIndex() == 0 ? MidiTiming::Arrival : MidiTiming::Resume;
+void MainWindow::applyMarker(bool requireMidi) {
+    inspectorDirty_ = false;
+    const Marker* marker = nullptr; for (const auto& m : c_.project.show.markers) if (m.id == inspectedMarker_) marker = &m;
+    if (!marker) return; Marker edited = *marker;
+    if (use(markerName_)) edited.name = markerName_->text().toStdString();
+    if (use(markerTime_)) edited.time = kept(markerTime_, marker->time);
+    if (use(markerHold_) || use(midiTiming_)) { edited.hold = markerHold_->isChecked(); edited.timing = midiTiming_->currentIndex() == 0 ? MidiTiming::Arrival : MidiTiming::Resume; }
     QString error;
-    if (!midiEditor_->message(edited.message, error)) { c_.report(error); return; }
+    // The MIDI message applies with Apply cue; automatic commits keep the stored one.
+    if (requireMidi) {
+        if (std::vector<unsigned char> bytes; midiEditor_->message(bytes, error)) edited.message = bytes;
+        else { c_.report(error); return; }
+    }
+    if (edited.name == marker->name && edited.time == marker->time && edited.hold == marker->hold && edited.timing == marker->timing && edited.message == marker->message) return;
     c_.edit([=](Project& p) { for (auto& m : p.show.markers) if (m.id == edited.id) m = edited; });
+}
+void MainWindow::commitInspector() {
+    if (!inspectorDirty_ || refreshing_) return;
+    if (!c_.canEdit(false)) { inspectorDirty_ = false; return; }
+    automatic_ = true;
+    if (!inspectedClip_.empty()) applyClip(); else if (!inspectedMarker_.empty()) applyMarker(false); else applyTrack();
+    automatic_ = false; touched_.clear();
+}
+void MainWindow::autoApply(QWidget* field) {
+    const auto dirty = [this, field] { if (!refreshing_) { inspectorDirty_ = true; touched_.insert(field); } };
+    const auto commit = [this, field] { if (!refreshing_) { inspectorDirty_ = true; touched_.insert(field); commitInspector(); } };
+    if (auto* edit = qobject_cast<QLineEdit*>(field)) { connect(edit, &QLineEdit::textEdited, this, dirty); connect(edit, &QLineEdit::editingFinished, this, &MainWindow::commitInspector); }
+    else if (auto* spin = qobject_cast<QDoubleSpinBox*>(field)) { connect(spin, &QDoubleSpinBox::valueChanged, this, dirty); connect(spin, &QDoubleSpinBox::editingFinished, this, &MainWindow::commitInspector); }
+    else if (auto* spin = qobject_cast<QSpinBox*>(field)) { connect(spin, &QSpinBox::valueChanged, this, dirty); connect(spin, &QSpinBox::editingFinished, this, &MainWindow::commitInspector); }
+    else if (auto* box = qobject_cast<QCheckBox*>(field)) connect(box, &QCheckBox::toggled, this, commit);
+    else if (auto* combo = qobject_cast<QComboBox*>(field)) connect(combo, &QComboBox::activated, this, commit);
+    else if (auto* text = qobject_cast<QTextEdit*>(field)) connect(text, &QTextEdit::textChanged, this, dirty);
 }
 void MainWindow::applyCurve() {
     const auto* clip = selectedClip(); if (!clip) return; const auto id = clip->id; const int property = curveProperty_->currentIndex(); Envelope curve;

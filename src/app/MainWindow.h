@@ -3,6 +3,7 @@
 #include "app/Timeline.h"
 #include "app/ProgramView.h"
 #include <QMainWindow>
+#include <set>
 
 class QListWidget; class QLabel; class QPushButton; class QComboBox; class QDoubleSpinBox;
 class QSpinBox; class QLineEdit; class QCheckBox; class QTextEdit; class QTableWidget;
@@ -47,7 +48,12 @@ private:
     QTextEdit* clipText_ = nullptr;
     QTableWidget* curveTable_ = nullptr;
     QGroupBox *audioTransform_ = nullptr, *videoTransform_ = nullptr, *trackAudio_ = nullptr;
-    bool refreshing_ = false, outputLost_ = false;
+    bool refreshing_ = false, outputLost_ = false, inspectorDirty_ = false, automatic_ = false;
+    // Fields changed since the inspector last showed the model; automatic commits apply only these.
+    std::set<QWidget*> touched_;
+    bool use(QWidget* field) const { return !automatic_ || touched_.contains(field); }
+    std::string inspectedClip_, inspectedMarker_;
+    int inspectedTrack_ = -1;
     QString outputScreen_;
     void buildInspector();
     void refresh();
@@ -57,7 +63,9 @@ private:
     void updateCurve();
     void applyTrack();
     void applyClip();
-    void applyMarker();
+    void applyMarker(bool requireMidi = true);
+    void commitInspector();
+    void autoApply(QWidget* field);
     void applyCurve();
     void importMedia();
     void placeAsset(QString id, int track, Frame time);
