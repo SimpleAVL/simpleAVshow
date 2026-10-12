@@ -107,11 +107,13 @@ jobs:
           15106be885c1c48a021198e7e1e9a48ce9d02a86dd0a1848f00bdbf3c1c92724  /tmp/linuxdeploy-plugin-qt-x86_64.AppImage
           EOF
           chmod +x /tmp/linuxdeploy*.AppImage
-          python3 packaging/collect_licenses.py linux AppDir/usr/share/simpleavshow/licenses
           cp packaging/README.txt README.md AppDir/usr/share/simpleavshow/
           cp -R docs AppDir/usr/share/simpleavshow/
           cp assets/icon.svg /tmp/simpleavshow.svg
-          /tmp/linuxdeploy-x86_64.AppImage --appdir AppDir --executable build/simpleavshow --desktop-file packaging/simpleavshow.desktop --icon-file /tmp/simpleavshow.svg --plugin qt --output appimage
+          # Deploy first so notices cover exactly the bundled libraries, then pack.
+          /tmp/linuxdeploy-x86_64.AppImage --appdir AppDir --executable build/simpleavshow --desktop-file packaging/simpleavshow.desktop --icon-file /tmp/simpleavshow.svg --plugin qt
+          python3 packaging/collect_licenses.py linux AppDir/usr/share/simpleavshow/licenses --appdir AppDir
+          /tmp/linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage
           mv SimpleAVShow-linux-x86_64.AppImage artifacts/
       - name: Smoke test the packaged app
         if: github.event_name != 'pull_request'

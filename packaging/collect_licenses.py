@@ -24,6 +24,7 @@ def main():
     parser.add_argument("--vcpkg", type=Path)
     parser.add_argument("--qt", type=Path)
     parser.add_argument("--ffmpeg", type=Path)
+    parser.add_argument("--appdir", type=Path)
     args = parser.parse_args()
     args.destination.mkdir(parents=True, exist_ok=True)
     shutil.copy2("packaging/README.txt", args.destination / "THIRD-PARTY.txt")
@@ -55,14 +56,29 @@ def main():
                 copy_notices(cellar / formula["name"] / installed["version"],
                              args.destination / formula["name"])
     elif args.platform == "linux":
-        # Distribution copyright files include dependency-specific license texts.
-        for source in Path("/usr/share/doc").glob("*/copyright"):
-            target = args.destination / source.parent.name / "copyright"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+        if not args.appdir:
+            parser.error("Linux requires --appdir after linuxdeploy has bundled libraries")
+        # Only packages owning a bundled library or Qt plugin ship; their
+        # distribution copyright files carry the dependency-specific texts.
+        bundled = sorted({path.name for path in args.appdir.rglob("*.so*") if path.is_file()})
+        packages = set()
+        for name in bundled:
+            owners = subprocess.run(["dpkg", "-S", f"*/{name}"], capture_output=True, text=True).stdout
+            for line in owners.splitlines():
+                for owner in line.split(": ", 1)[0].split(","):
+                    packages.add(owner.strip().split(":")[0])
+        if not packages:
+            raise RuntimeError("No bundled libraries were traced to distribution packages")
+        for package in sorted(packages):
+            source = Path("/usr/share/doc") / package / "copyright"
+            if source.is_file():
+                target = args.destination / package / "copyright"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
         metadata = subprocess.check_output(
-            ["dpkg-query", "-W", "-f=${Package}\t${Version}\n"], text=True)
+            ["dpkg-query", "-W", "-f=${Package}\t${Version}\n", *sorted(packages)], text=True)
         (args.destination / "packages.txt").write_text(metadata)
+        (args.destination / "bundled-libraries.txt").write_text("\n".join(bundled) + "\n")
         copy_notices(Path("/tmp/rtaudio"), args.destination / "rtaudio-6.0.1")
     else:
         if not args.vcpkg or not args.qt or not args.ffmpeg:

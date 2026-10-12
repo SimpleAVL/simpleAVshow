@@ -78,7 +78,7 @@ Status: `open`, `fixed`, `wontfix` (with reason), `deferred`.
 | C1 | Medium | open | **The Windows app never builds on pull requests.** Windows and macOS app jobs are skipped on PRs, so MSVC/ASIO/Windows path behaviour first runs after merge. |
 | C2 | Medium | fixed | **`cancel-in-progress: true` also cancels `main` builds.** **Fix:** `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`. |
 | C3 | Medium | fixed | **Unpinned supply chain.** linuxdeploy comes from the `continuous` tag without a checksum; actions are pinned by tag, not SHA; RtAudio is cloned by tag; core jobs use floating `*-latest` runners. |
-| C4 | Low | open | **License collection over-collects.** It copies every `/usr/share/doc/*/copyright` on the runner rather than what ships; ASIO SDK obligations are undocumented. |
+| C4 | Low | partly fixed (Linux collects only packages owning bundled libraries — unverified until the next main build; ASIO SDK terms still undocumented) | **License collection over-collects.** It copies every `/usr/share/doc/*/copyright` on the runner rather than what ships; ASIO SDK obligations are undocumented. |
 | C5 | Low | fixed | **No ThreadSanitizer job.** A TSan build of the transport tests would check callback/worker/UI interactions. |
 
 ## Test gaps
