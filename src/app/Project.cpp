@@ -160,6 +160,37 @@ Frame readFrame(const QJsonObject& o, const char* key) {
         throw std::runtime_error(std::string("Invalid frame field: ") + key);
     return static_cast<Frame>(n);
 }
+// Optional fields keep their version-1 defaults when absent, but a present value must have the written type.
+[[noreturn]] void invalidField(const char* key) { throw std::runtime_error(std::string("Invalid project field: ") + key); }
+QJsonObject readObject(const QJsonValue& v) {
+    if (!v.isObject()) throw std::runtime_error("Invalid project entry");
+    return v.toObject();
+}
+QString readString(const QJsonObject& o, const char* key) {
+    const auto v = o.value(key); if (v.isUndefined()) return {};
+    if (!v.isString()) invalidField(key);
+    return v.toString();
+}
+bool readBool(const QJsonObject& o, const char* key) {
+    const auto v = o.value(key); if (v.isUndefined()) return false;
+    if (!v.isBool()) invalidField(key);
+    return v.toBool();
+}
+double readNumber(const QJsonObject& o, const char* key, double fallback) {
+    const auto v = o.value(key); if (v.isUndefined()) return fallback;
+    if (!v.isDouble() || !std::isfinite(v.toDouble())) invalidField(key);
+    return v.toDouble();
+}
+int readInt(const QJsonObject& o, const char* key, int fallback) {
+    const double n = readNumber(o, key, fallback);
+    if (std::floor(n) != n || n < std::numeric_limits<int>::min() || n > std::numeric_limits<int>::max()) invalidField(key);
+    return static_cast<int>(n);
+}
+MediaAsset loadAsset(const MediaAsset& entry) {
+    auto a = loadMedia(entry.path);
+    a.id = entry.id; if (!entry.name.isEmpty()) a.name = entry.name;
+    return a;
+}
 }
 void writeProject(const Project& p, const QString& path) {
     validate(p);
@@ -190,42 +221,40 @@ void writeProject(const Project& p, const QString& path) {
     const auto bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
     if (file.write(bytes) != bytes.size() || !file.commit()) throw std::runtime_error(file.errorString().toStdString());
 }
-Project readProject(const QString& path) {
-    if (isProjectPackage(path)) return readProjectPackage(path);
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) throw std::runtime_error(file.errorString().toStdString());
-    QJsonParseError parseError; const auto doc = QJsonDocument::fromJson(file.readAll(), &parseError);
+Project parseProject(const QByteArray& json, const QString& directory) {
+    QJsonParseError parseError; const auto doc = QJsonDocument::fromJson(json, &parseError);
     if (parseError.error != QJsonParseError::NoError || !doc.isObject()) throw std::runtime_error("Invalid project JSON");
     const auto root = doc.object();
     if (root["format"] != "simpleavshow" || root["version"].toInt() != 1) throw std::runtime_error("Unsupported project version");
     for (const char* name : {"tracks", "clips", "markers", "assets"}) if (!root[name].isArray()) throw std::runtime_error("Missing project array");
-    Project p; p.title = root["title"].toString(); p.width = root["width"].toInt(); p.height = root["height"].toInt(); p.fps = root["fps"].toDouble();
+    Project p; p.title = readString(root, "title"); p.width = readInt(root, "width", 0); p.height = readInt(root, "height", 0); p.fps = readNumber(root, "fps", 0);
     p.show.duration = readFrame(root, "duration");
+    const QDir dir(directory);
     for (auto value : root["assets"].toArray()) {
-        const auto o = value.toObject(); const auto id = o["id"].toString();
-        if (id.isEmpty() || p.assets.contains(id)) throw std::runtime_error("Duplicate or missing asset ID");
-        auto a = loadMedia(QFileInfo(path).absoluteDir().absoluteFilePath(o["path"].toString()));
-        a.id = id; if (!o["name"].toString().isEmpty()) a.name = o["name"].toString();
-        p.assets.insert(id, std::move(a));
+        const auto o = readObject(value); MediaAsset a; a.id = readString(o, "id"); a.name = readString(o, "name");
+        if (a.id.isEmpty() || p.assets.contains(a.id)) throw std::runtime_error("Duplicate or missing asset ID");
+        const auto source = readString(o, "path"); if (source.isEmpty()) invalidField("path");
+        a.path = dir.absoluteFilePath(source); p.assets.insert(a.id, std::move(a));
     }
     for (auto value : root["tracks"].toArray()) {
-        const auto o = value.toObject();
-        p.show.tracks.push_back({o["id"].toString().toStdString(), o["name"].toString().toStdString(), o["visual"].toBool(), o["async"].toBool(),
-            o["muted"].toBool(), o["gain"].toDouble(1), o["pan"].toDouble(), o["left"].toInt(-1), o["right"].toInt(-1)});
+        const auto o = readObject(value);
+        p.show.tracks.push_back({readString(o, "id").toStdString(), readString(o, "name").toStdString(), readBool(o, "visual"), readBool(o, "async"),
+            readBool(o, "muted"), readNumber(o, "gain", 1), readNumber(o, "pan", 0), readInt(o, "left", -1), readInt(o, "right", -1)});
     }
     for (auto value : root["clips"].toArray()) {
-        const auto o = value.toObject(); Clip c;
-        c.id = o["id"].toString().toStdString(); c.assetId = o["asset"].toString().toStdString(); c.text = o["text"].toString().toStdString(); c.track = o["track"].toInt(-1);
-        c.start = readFrame(o, "start"); c.duration = readFrame(o, "duration"); c.offset = readFrame(o, "offset"); c.loop = o["loop"].toBool();
-        c.gain = o["gain"].toDouble(1); c.pan = o["pan"].toDouble(); c.x = o["x"].toDouble(); c.y = o["y"].toDouble(); c.scale = o["scale"].toDouble(1); c.opacity = o["opacity"].toDouble(1);
+        const auto o = readObject(value); Clip c;
+        c.id = readString(o, "id").toStdString(); c.assetId = readString(o, "asset").toStdString(); c.text = readString(o, "text").toStdString(); c.track = readInt(o, "track", -1);
+        c.start = readFrame(o, "start"); c.duration = readFrame(o, "duration"); c.offset = readFrame(o, "offset"); c.loop = readBool(o, "loop");
+        c.gain = readNumber(o, "gain", 1); c.pan = readNumber(o, "pan", 0); c.x = readNumber(o, "x", 0); c.y = readNumber(o, "y", 0);
+        c.scale = readNumber(o, "scale", 1); c.opacity = readNumber(o, "opacity", 1);
         c.volume = readCurve(o["volume"]); c.balance = readCurve(o["balance"]); c.positionX = readCurve(o["positionX"]);
         c.positionY = readCurve(o["positionY"]); c.size = readCurve(o["size"]); c.alpha = readCurve(o["alpha"]);
         p.show.clips.push_back(std::move(c));
     }
     for (auto value : root["markers"].toArray()) {
-        const auto o = value.toObject(); Marker m;
-        m.id = o["id"].toString().toStdString(); m.name = o["name"].toString().toStdString(); m.time = readFrame(o, "time"); m.hold = o["hold"].toBool();
-        const QString timing = o["timing"].toString();
+        const auto o = readObject(value); Marker m;
+        m.id = readString(o, "id").toStdString(); m.name = readString(o, "name").toStdString(); m.time = readFrame(o, "time"); m.hold = readBool(o, "hold");
+        const QString timing = readString(o, "timing");
         if (timing != "arrival" && timing != "resume") throw std::runtime_error("Invalid MIDI timing");
         m.timing = timing == "resume" ? MidiTiming::Resume : MidiTiming::Arrival;
         if (!o["message"].isArray()) throw std::runtime_error("Invalid MIDI bytes");
@@ -236,48 +265,68 @@ Project readProject(const QString& path) {
         }
         p.show.markers.push_back(std::move(m));
     }
-    bindAudio(p); validate(p); return p;
+    return p;
+}
+void loadProjectMedia(Project& p) {
+    for (auto& a : p.assets) a = loadAsset(a);
+    bindAudio(p); validate(p);
+}
+Project readProject(const QString& path) {
+    if (isProjectPackage(path)) return readProjectPackage(path);
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) throw std::runtime_error(file.errorString().toStdString());
+    Project p = parseProject(file.readAll(), QFileInfo(path).absolutePath());
+    loadProjectMedia(p); return p;
 }
 void materializeProjectMedia(Project& p, const QString& directory) {
     QDir dir(directory);
+    const bool existed = dir.exists();
     QMap<QString, QString> copied;
-    for (auto& a : p.assets) {
-        const bool extracted = p.packageDirectory && !a.path.isEmpty() &&
-            QFileInfo(a.path).absoluteFilePath().startsWith(p.packageDirectory->path() + "/");
-        if (!a.path.isEmpty() && !extracted) continue;
-        if (!QDir().mkpath(dir.absolutePath())) throw std::runtime_error("Cannot create media directory");
-        if (extracted) {
-            if (!copied.contains(a.path)) {
-                const QString target = dir.filePath(newId() + "." + QFileInfo(a.path).suffix());
-                if (!QFile::copy(a.path, target)) throw std::runtime_error("Cannot copy packaged media: " + a.path.toStdString());
-                copied.insert(a.path, target);
+    QStringList created;
+    try {
+        for (auto& a : p.assets) {
+            const bool extracted = p.packageDirectory && !a.path.isEmpty() &&
+                QFileInfo(a.path).absoluteFilePath().startsWith(p.packageDirectory->path() + "/");
+            if (!a.path.isEmpty() && !extracted) continue;
+            if (!QDir().mkpath(dir.absolutePath())) throw std::runtime_error("Cannot create media directory");
+            if (extracted) {
+                if (!copied.contains(a.path)) {
+                    // QFile::copy writes a temporary file and renames it, so a failed copy leaves nothing behind.
+                    const QString target = dir.filePath(newId() + "." + QFileInfo(a.path).suffix());
+                    if (!QFile::copy(a.path, target)) throw std::runtime_error("Cannot copy packaged media: " + a.path.toStdString());
+                    created.append(target); copied.insert(a.path, target);
+                }
+                a.path = copied.value(a.path);
+                // Direct PCM storage must follow the saved copy before package
+                // extraction is released. Converted sources reuse their disk cache.
+                if (a.audio) a.audio = loadMedia(a.path).audio;
+                continue;
             }
-            a.path = copied.value(a.path);
-            // Direct PCM storage must follow the saved copy before package
-            // extraction is released. Converted sources reuse their disk cache.
-            if (a.audio) a.audio = loadMedia(a.path).audio;
-            continue;
+            const QString target = dir.filePath(newId() + (a.image ? ".png" : ".wav"));
+            QSaveFile file(target);
+            if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error(file.errorString().toStdString());
+            if (a.image) {
+                if (!a.still.save(&file, "PNG")) throw std::runtime_error("Cannot save generated image");
+            } else if (a.audio && !a.audio->storage) {
+                QDataStream out(&file); out.setByteOrder(QDataStream::LittleEndian);
+                const quint16 channels = a.audio->mono ? 1 : 2;
+                const auto size = static_cast<quint64>(a.audio->length()) * channels * 2;
+                if (size > std::numeric_limits<quint32>::max() - 36) throw std::runtime_error("Generated audio is too large for WAV export");
+                const auto bytes = static_cast<quint32>(size);
+                out.writeRawData("RIFF", 4); out << quint32(bytes + 36); out.writeRawData("WAVEfmt ", 8);
+                out << quint32(16) << quint16(1) << channels << quint32(sampleRate) << quint32(sampleRate * channels * 2) << quint16(channels * 2) << quint16(16);
+                out.writeRawData("data", 4); out << bytes;
+                for (std::size_t i = 0; i < a.audio->samples.size(); i += a.audio->mono ? 2 : 1)
+                    out << static_cast<qint16>(std::clamp(a.audio->samples[i], -1.f, 1.f) * 32767);
+                if (out.status() != QDataStream::Ok) throw std::runtime_error("Cannot write generated audio");
+            } else throw std::runtime_error("Asset has no source file");
+            if (!file.commit()) throw std::runtime_error(file.errorString().toStdString());
+            created.append(target); a.path = target;
         }
-        const QString target = dir.filePath(newId() + (a.image ? ".png" : ".wav"));
-        QSaveFile file(target);
-        if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error(file.errorString().toStdString());
-        if (a.image) {
-            if (!a.still.save(&file, "PNG")) throw std::runtime_error("Cannot save generated image");
-        } else if (a.audio && !a.audio->storage) {
-            QDataStream out(&file); out.setByteOrder(QDataStream::LittleEndian);
-            const quint16 channels = a.audio->mono ? 1 : 2;
-            const auto size = static_cast<quint64>(a.audio->length()) * channels * 2;
-            if (size > std::numeric_limits<quint32>::max() - 36) throw std::runtime_error("Generated audio is too large for WAV export");
-            const auto bytes = static_cast<quint32>(size);
-            out.writeRawData("RIFF", 4); out << quint32(bytes + 36); out.writeRawData("WAVEfmt ", 8);
-            out << quint32(16) << quint16(1) << channels << quint32(sampleRate) << quint32(sampleRate * channels * 2) << quint16(channels * 2) << quint16(16);
-            out.writeRawData("data", 4); out << bytes;
-            for (std::size_t i = 0; i < a.audio->samples.size(); i += a.audio->mono ? 2 : 1)
-                out << static_cast<qint16>(std::clamp(a.audio->samples[i], -1.f, 1.f) * 32767);
-            if (out.status() != QDataStream::Ok) throw std::runtime_error("Cannot write generated audio");
-        } else throw std::runtime_error("Asset has no source file");
-        if (!file.commit()) throw std::runtime_error(file.errorString().toStdString());
-        a.path = target;
+    } catch (...) {
+        for (const auto& file : created) QFile::remove(file);
+        if (!existed) QDir().rmdir(dir.absolutePath());
+        throw;
     }
     p.packageDirectory.reset();
     bindAudio(p);

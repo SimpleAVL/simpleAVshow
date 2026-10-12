@@ -31,6 +31,7 @@
 #include <QStandardPaths>
 #include <QUuid>
 #include <QtEndian>
+#include <filesystem>
 #include <future>
 
 using namespace sav;
@@ -126,6 +127,25 @@ public:
     Frame length() const noexcept override { return frames(2); }
     void read(Frame, float*, std::size_t) const override { throw std::runtime_error("Cache is unavailable"); }
 };
+// A valid manifest referencing one image under the exporter's UUID naming.
+struct PackageFixture { QByteArray manifest, image; QString name; };
+PackageFixture packageFixture(const QString& directory) {
+    PackageFixture f; f.name = "media/" + newId() + ".png";
+    QImage image(4, 4, QImage::Format_RGB32); image.fill(Qt::red);
+    if (!QDir().mkpath(directory + "/media") || !image.save(directory + "/" + f.name)) throw std::runtime_error("Cannot write package fixture");
+    Project p = newProject(); auto asset = loadMedia(directory + "/" + f.name); p.assets.insert(asset.id, asset);
+    writeProject(p, directory + "/project.savshow");
+    QFile manifest(directory + "/project.savshow"), source(directory + "/" + f.name);
+    if (!manifest.open(QIODevice::ReadOnly) || !source.open(QIODevice::ReadOnly)) throw std::runtime_error("Cannot read package fixture");
+    f.manifest = manifest.readAll(); f.image = source.readAll(); return f;
+}
+QString openFailure(const QString& path, const QByteArray& bytes) {
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size()) return "Cannot write fixture";
+    file.close();
+    try { readProject(path); } catch (const std::runtime_error& e) { return QString::fromUtf8(e.what()); }
+    return {};
+}
 }
 class AppTests : public QObject {
     Q_OBJECT
@@ -439,16 +459,100 @@ private slots:
             {{"project.savshow", R"({"assets":[{"path":"media/missing.png"}]})"}},
             {{"project.savshow", "not JSON"}}
         };
-        auto reject = [&](const QByteArray& bytes) {
-            QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); QCOMPARE(file.write(bytes), bytes.size()); file.close();
-            QVERIFY_THROWS_EXCEPTION(std::runtime_error, readProject(path));
-        };
+        auto reject = [&](const QByteArray& bytes) { QVERIFY(!openFailure(path, bytes).isEmpty()); };
         for (const auto& fixture : fixtures) reject(zipBytes(fixture));
-        auto bytes = zipBytes({{"media/a.png", "unique corruption payload"}, {"project.savshow", manifest}});
-        const auto offset = bytes.indexOf("unique corruption payload"); QVERIFY(offset >= 0); bytes[offset] = 'X'; reject(bytes);
+        const auto valid = packageFixture(dir.filePath("fixture"));
+        auto bytes = zipBytes({{valid.name, valid.image}, {"project.savshow", valid.manifest}});
+        QCOMPARE(openFailure(path, bytes), QString());
+        const auto offset = bytes.indexOf(valid.image); QVERIFY(offset >= 0); bytes[offset + valid.image.size() / 2] ^= 1;
+        QVERIFY(openFailure(path, bytes).contains("CRC"));
         reject(bytes.left(bytes.size() / 2));
         reject("not a ZIP");
         QVERIFY(!QFileInfo::exists(dir.filePath("outside")));
+    }
+    void packageMediaMustBeStoredReferencedAndExporterNamed() {
+        QTemporaryDir dir; const auto path = dir.filePath("test.savpack"); const auto fixture = packageFixture(dir.filePath("fixture"));
+        const ZipEntry manifest{"project.savshow", fixture.manifest}, image{fixture.name, fixture.image};
+        QCOMPARE(openFailure(path, zipBytes({manifest, image})), QString());
+        // Deflated media could expand far beyond its declared budget; only the manifest may be compressed.
+        QVERIFY(openFailure(path, zipBytes({manifest, image}, false, true)).contains(fixture.name));
+        const auto unused = "media/" + newId() + ".png";
+        QVERIFY(openFailure(path, zipBytes({manifest, image, {unused, fixture.image}})).contains("unreferenced"));
+        for (const QString name : {QString("media/CON"), QString("media/NUL.wav"), QString("media/picture.png"),
+                 "media/" + newId().toUpper() + ".png", fixture.name.chopped(4)}) {
+            auto renamed = fixture.manifest; renamed.replace(fixture.name.toUtf8(), name.toUtf8());
+            QVERIFY(openFailure(path, zipBytes({{"project.savshow", renamed}, {name, fixture.image}})).startsWith("Unsafe"));
+        }
+    }
+    void projectJsonTypesAreStrictBeforeMediaLoads() {
+        QTemporaryDir dir; Project p = demoProject(); materializeProjectMedia(p, dir.filePath("show.media"));
+        const auto path = dir.filePath("show.savshow"); writeProject(p, path);
+        QFile input(path); QVERIFY(input.open(QIODevice::ReadOnly)); const auto saved = QJsonDocument::fromJson(input.readAll()).object(); input.close();
+        auto edited = [](QJsonObject root, const char* array, int index, const char* key, const QJsonValue& value) {
+            auto items = root[array].toArray(); auto item = items[index].toObject();
+            if (value.isUndefined()) item.remove(key); else item[key] = value;
+            items[index] = item; root[array] = items; return root;
+        };
+        auto failure = [&](const QJsonObject& root) { return openFailure(dir.filePath("typed.savshow"), QJsonDocument(root).toJson()); };
+        // Optional fields omitted by hand-written version-1 files keep their defaults.
+        auto sparse = saved;
+        for (const char* key : {"name", "muted", "gain", "pan"}) sparse = edited(sparse, "tracks", 2, key, QJsonValue::Undefined);
+        for (const char* key : {"text", "loop", "gain", "scale", "opacity"}) sparse = edited(sparse, "clips", 0, key, QJsonValue::Undefined);
+        QCOMPARE(failure(sparse), QString());
+        const auto loaded = readProject(dir.filePath("typed.savshow"));
+        QCOMPARE(loaded.show.tracks[2].gain, 1.); QVERIFY(!loaded.show.tracks[2].muted); QCOMPARE(loaded.show.clips[0].scale, 1.);
+        // Every asset is unreachable, so structural errors must be reported before any media is opened.
+        auto missing = saved; auto assets = missing["assets"].toArray();
+        for (auto&& value : assets) { auto asset = value.toObject(); asset["path"] = "absent/" + asset["path"].toString(); value = asset; }
+        missing["assets"] = assets;
+        QVERIFY(failure(missing).startsWith("Media file is missing"));
+        const struct { const char* array; int index; const char* key; QJsonValue value; } cases[] = {
+            {"tracks", 2, "gain", "x"}, {"tracks", 2, "left", 1e10}, {"tracks", 2, "right", 1.5}, {"tracks", 2, "muted", 1},
+            {"tracks", 0, "name", QJsonValue::Null}, {"clips", 0, "loop", "yes"}, {"clips", 0, "track", "0"}, {"clips", 0, "opacity", true},
+            {"markers", 0, "hold", "true"}, {"markers", 0, "timing", 1}, {"assets", 0, "name", 5}, {"assets", 0, "path", QJsonValue::Null}
+        };
+        for (const auto& c : cases)
+            QCOMPARE(failure(edited(missing, c.array, c.index, c.key, c.value)), QString("Invalid project field: ") + c.key);
+        auto tracks = missing["tracks"].toArray(); tracks[0] = 5; auto entry = missing; entry["tracks"] = tracks;
+        QCOMPARE(failure(entry), QString("Invalid project entry"));
+        missing["width"] = 1920.5; QCOMPARE(failure(missing), QString("Invalid project field: width"));
+    }
+    void failedMaterializationRemovesCreatedFiles() {
+        QTemporaryDir dir; const auto target = dir.filePath("show.media");
+        Project p = newProject(); MediaAsset image; image.id = "a-image"; image.image = true;
+        image.still = QImage(4, 4, QImage::Format_RGB32); image.still.fill(Qt::red); p.assets.insert(image.id, image);
+        MediaAsset broken; broken.id = "z-broken"; p.assets.insert(broken.id, broken);
+        QVERIFY_THROWS_EXCEPTION(std::runtime_error, materializeProjectMedia(p, target)); QVERIFY(!QFileInfo::exists(target));
+        QVERIFY(QDir().mkpath(target));
+        QVERIFY_THROWS_EXCEPTION(std::runtime_error, materializeProjectMedia(p, target));
+        QVERIFY(QFileInfo::exists(target)); QVERIFY(QDir(target).isEmpty());
+        // Copies of extracted package media are removed as well.
+        const auto package = dir.filePath("demo.savpack"); writeProjectPackage(demoProject(), package);
+        auto packaged = readProject(package); packaged.assets.insert(broken.id, broken);
+        QVERIFY_THROWS_EXCEPTION(std::runtime_error, materializeProjectMedia(packaged, target));
+        QVERIFY(QDir(target).isEmpty()); QVERIFY(packaged.packageDirectory);
+    }
+    void stalePackageDirectoriesAreRemoved() {
+        auto make = [](const QString& prefix) {
+            const auto path = QDir::temp().filePath(prefix + QUuid::createUuid().toString(QUuid::Id128));
+            QDir().mkpath(path + "/media"); QFile file(path + "/media/a.wav"); if (file.open(QIODevice::WriteOnly)) file.write("x");
+            return path;
+        };
+        auto age = [](const QString& path) {
+            std::filesystem::last_write_time(std::filesystem::path(path.toStdU16String()),
+                std::filesystem::file_time_type::clock::now() - std::chrono::hours(48));
+        };
+        const auto stale = make("simpleavshow-package-"), staging = make("simpleavshow-export-"),
+            fresh = make("simpleavshow-package-"), unrelated = make("simpleavshow-other-");
+        for (const auto& path : {stale, staging, unrelated}) age(path);
+        // A package open in a running instance keeps its lock, however old its folder is.
+        QTemporaryDir dir; const auto package = dir.filePath("demo.savpack"); writeProjectPackage(demoProject(), package);
+        auto open = readProject(package); const auto live = open.packageDirectory->path(); age(live);
+        removeStalePackageDirectories();
+        QVERIFY(!QFileInfo::exists(stale)); QVERIFY(!QFileInfo::exists(staging));
+        QVERIFY(QFileInfo::exists(fresh)); QVERIFY(QFileInfo::exists(unrelated)); QVERIFY(QFileInfo::exists(live + "/media"));
+        open = newProject(); QVERIFY(!QFileInfo::exists(live));
+        for (const auto& path : {fresh, unrelated}) QVERIFY(QDir(path).removeRecursively());
     }
     void packageExportActionRespectsEditingLocks() {
         MainWindow window;

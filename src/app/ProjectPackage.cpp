@@ -7,9 +7,11 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLockFile>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
+#include <QStorageInfo>
 #include <cerrno>
 #include <cstdio>
 #include <limits>
@@ -19,6 +21,7 @@
 namespace sav {
 namespace {
 constexpr qint64 chunkSize = 1024 * 1024;
+constexpr qint64 maxManifestSize = 256 * chunkSize, spaceMargin = 64 * chunkSize;
 void checkArchive(archive* a, int result) {
     if (result != ARCHIVE_OK) {
         const char* error = archive_error_string(a);
@@ -82,9 +85,52 @@ void addFile(archive* writer, const QString& name, const QString& source) {
     checkArchive(writer, archive_write_finish_entry(writer));
 }
 bool safeMediaPath(const QString& path) {
-    static const QRegularExpression allowed("\\Amedia/[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9]{1,16})?\\z");
-    return path.size() <= 255 && allowed.match(path).hasMatch();
+    // Only the exporter's own names, which also excludes Windows device names and case variants.
+    static const QRegularExpression allowed("\\Amedia/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.[a-z0-9]{1,16}\\z");
+    return allowed.match(path).hasMatch();
 }
+using Reader = std::unique_ptr<archive, decltype(&archive_read_free)>;
+Reader openPackage(ReadContext& input) {
+    if (!input.file.seek(0)) throw std::runtime_error(input.file.errorString().toStdString());
+    Reader reader(archive_read_new(), archive_read_free);
+    if (!reader) throw std::bad_alloc();
+    checkArchive(reader.get(), archive_read_support_format_zip_seekable(reader.get()));
+    checkArchive(reader.get(), archive_read_set_seek_callback(reader.get(), seekBytes));
+    checkArchive(reader.get(), archive_read_open(reader.get(), &input, nullptr, readBytes, nullptr));
+    return reader;
+}
+template <class Write> void readEntry(archive* reader, const QString& name, qint64 size, Write write) {
+    qint64 remaining = size;
+    QByteArray buffer(static_cast<int>(chunkSize), '\0');
+    for (;;) {
+        const auto count = archive_read_data(reader, buffer.data(), static_cast<size_t>(buffer.size()));
+        if (count < 0) checkArchive(reader, ARCHIVE_FATAL);
+        if (count == 0) break;
+        if (count > remaining) throw std::runtime_error("Package entry exceeds its declared size");
+        write(buffer.constData(), static_cast<qint64>(count));
+        remaining -= count;
+    }
+    if (remaining != 0) throw std::runtime_error("Incomplete package entry: " + name.toStdString());
+}
+QString entryName(archive_entry* entry) {
+    const char* name = archive_entry_pathname(entry);
+    return name ? QString::fromUtf8(name) : QString();
+}
+// The lock marks a live extraction so another instance's startup sweep leaves it alone.
+struct PackageDirectory : QTemporaryDir {
+    PackageDirectory() : QTemporaryDir(QDir::tempPath() + "/simpleavshow-package-XXXXXX") {}
+    QLockFile lock{filePath(".lock")};
+};
+}
+
+void removeStalePackageDirectories() {
+    const auto cutoff = QDateTime::currentDateTime().addDays(-1);
+    for (const auto& info : QDir::temp().entryInfoList({"simpleavshow-package-*", "simpleavshow-export-*"}, QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks)) {
+        if (info.lastModified() > cutoff) continue;
+        QLockFile lock(info.absoluteFilePath() + "/.lock"); lock.setStaleLockTime(0);
+        if (!lock.tryLock(0)) continue;
+        lock.unlock(); QDir(info.absoluteFilePath()).removeRecursively();
+    }
 }
 
 bool isProjectPackage(const QString& path) { return path.endsWith(".savpack", Qt::CaseInsensitive); }
@@ -135,57 +181,84 @@ void writeProjectPackage(const Project& project, const QString& path) {
 }
 
 Project readProjectPackage(const QString& path) {
-    auto directory = std::make_shared<QTemporaryDir>(QDir::tempPath() + "/simpleavshow-package-XXXXXX");
-    if (!directory->isValid() || !QDir().mkpath(directory->filePath("media"))) throw std::runtime_error("Cannot create package working directory");
     ReadContext input;
     input.file.setFileName(path);
     if (!input.file.open(QIODevice::ReadOnly)) throw std::runtime_error(input.file.errorString().toStdString());
-    std::unique_ptr<archive, decltype(&archive_read_free)> reader(archive_read_new(), archive_read_free);
-    if (!reader) throw std::bad_alloc();
-    checkArchive(reader.get(), archive_read_support_format_zip_seekable(reader.get()));
-    checkArchive(reader.get(), archive_read_set_seek_callback(reader.get(), seekBytes));
-    checkArchive(reader.get(), archive_read_open(reader.get(), &input, nullptr, readBytes, nullptr));
-    QSet<QString> files, foldedNames;
+    // First pass: check every header and read only the manifest, so media is extracted once its budget is known.
+    QMap<QString, qint64> media;
+    QSet<QString> foldedNames;
+    QByteArray manifest;
+    bool hasManifest = false;
+    qint64 required = spaceMargin;
+    {
+        auto reader = openPackage(input);
+        archive_entry* entry = nullptr;
+        for (;;) {
+            const auto result = archive_read_next_header(reader.get(), &entry);
+            if (result == ARCHIVE_EOF) break;
+            checkArchive(reader.get(), result);
+            const auto name = entryName(entry);
+            const bool isManifest = name == "project.savshow";
+            // libarchive reports the current ZIP entry's method; stored media cannot expand beyond its archive bytes.
+            const char* format = archive_format_name(reader.get());
+            const bool stored = format && QByteArray(format).endsWith("(uncompressed)");
+            if ((!isManifest && (!safeMediaPath(name) || !stored)) || foldedNames.contains(name.toLower()) ||
+                archive_entry_filetype(entry) != AE_IFREG || archive_entry_symlink(entry) || archive_entry_hardlink(entry) ||
+                archive_entry_is_encrypted(entry) || !archive_entry_size_is_set(entry) || archive_entry_size(entry) < 0)
+                throw std::runtime_error("Unsafe or duplicate package entry: " + name.toStdString());
+            foldedNames.insert(name.toLower());
+            const qint64 size = archive_entry_size(entry);
+            if (isManifest) {
+                if (size > maxManifestSize) throw std::runtime_error("Package project file is too large");
+                manifest.reserve(static_cast<qsizetype>(size)); hasManifest = true;
+                readEntry(reader.get(), name, size, [&](const char* data, qint64 count) { manifest.append(data, count); });
+                continue;
+            }
+            if (size > std::numeric_limits<qint64>::max() - required) throw std::runtime_error("Package is too large");
+            required += size; media.insert(name, size);
+        }
+        checkArchive(reader.get(), archive_read_close(reader.get()));
+    }
+    if (!hasManifest) throw std::runtime_error("Package is missing project.savshow");
+    QJsonParseError error;
+    const auto doc = QJsonDocument::fromJson(manifest, &error);
+    if (error.error != QJsonParseError::NoError || !doc.isObject() || !doc.object()["assets"].isArray()) throw std::runtime_error("Invalid package project JSON");
+    // Validate every reference before the regular project reader can access any files.
+    QSet<QString> referenced;
+    for (const auto& value : doc.object()["assets"].toArray()) {
+        const auto source = value.toObject()["path"].toString();
+        if (!safeMediaPath(source) || !media.contains(source)) throw std::runtime_error("Package references missing or external media: " + source.toStdString());
+        referenced.insert(source);
+    }
+    for (auto it = media.cbegin(); it != media.cend(); ++it)
+        if (!referenced.contains(it.key())) throw std::runtime_error("Package contains unreferenced media: " + it.key().toStdString());
+    auto directory = std::make_shared<PackageDirectory>();
+    if (!directory->isValid() || !directory->lock.tryLock(0) || !QDir().mkpath(directory->filePath("media")))
+        throw std::runtime_error("Cannot create package working directory");
+    Project project = parseProject(manifest, directory->path());
+    const auto available = QStorageInfo(directory->path()).bytesAvailable();
+    if (available >= 0 && required > available)
+        throw std::runtime_error(QString("Not enough free disk space to open the package: %1 MiB needed in %2")
+            .arg((required + chunkSize - 1) / chunkSize).arg(QDir::toNativeSeparators(QDir::tempPath())).toStdString());
+    // Second pass: extract exactly the media entries recorded above.
+    auto reader = openPackage(input);
     archive_entry* entry = nullptr;
     for (;;) {
         const auto result = archive_read_next_header(reader.get(), &entry);
         if (result == ARCHIVE_EOF) break;
         checkArchive(reader.get(), result);
-        const char* rawName = archive_entry_pathname(entry);
-        const QString name = rawName ? QString::fromUtf8(rawName) : QString();
-        if ((name != "project.savshow" && !safeMediaPath(name)) || foldedNames.contains(name.toLower()) ||
-            archive_entry_filetype(entry) != AE_IFREG || archive_entry_symlink(entry) || archive_entry_hardlink(entry) ||
-            archive_entry_is_encrypted(entry) || !archive_entry_size_is_set(entry) || archive_entry_size(entry) < 0)
-            throw std::runtime_error("Unsafe or duplicate package entry: " + name.toStdString());
-        foldedNames.insert(name.toLower()); files.insert(name);
+        const auto name = entryName(entry);
+        if (name == "project.savshow") continue;
+        if (!media.contains(name) || archive_entry_size(entry) != media.value(name)) throw std::runtime_error("Package changed while opening");
         QFile output(directory->filePath(name));
         if (!output.open(QIODevice::WriteOnly | QIODevice::NewOnly)) throw std::runtime_error(output.errorString().toStdString());
-        qint64 remaining = archive_entry_size(entry);
-        QByteArray buffer(static_cast<int>(chunkSize), '\0');
-        for (;;) {
-            const auto count = archive_read_data(reader.get(), buffer.data(), static_cast<size_t>(buffer.size()));
-            if (count < 0) checkArchive(reader.get(), ARCHIVE_FATAL);
-            if (count == 0) break;
-            if (count > remaining) throw std::runtime_error("Package entry exceeds its declared size");
-            if (output.write(buffer.constData(), count) != count) throw std::runtime_error(output.errorString().toStdString());
-            remaining -= count;
-        }
-        if (remaining != 0 || !output.flush()) throw std::runtime_error("Incomplete package entry: " + name.toStdString());
+        readEntry(reader.get(), name, media.value(name), [&](const char* data, qint64 count) {
+            if (output.write(data, count) != count) throw std::runtime_error(output.errorString().toStdString());
+        });
+        if (!output.flush()) throw std::runtime_error("Incomplete package entry: " + name.toStdString());
     }
     checkArchive(reader.get(), archive_read_close(reader.get()));
-    if (!files.contains("project.savshow")) throw std::runtime_error("Package is missing project.savshow");
-    const auto manifest = directory->filePath("project.savshow");
-    QFile file(manifest);
-    if (!file.open(QIODevice::ReadOnly)) throw std::runtime_error(file.errorString().toStdString());
-    QJsonParseError error;
-    const auto doc = QJsonDocument::fromJson(file.readAll(), &error);
-    if (error.error != QJsonParseError::NoError || !doc.isObject() || !doc.object()["assets"].isArray()) throw std::runtime_error("Invalid package project JSON");
-    // Validate every reference before the regular project reader can access any files.
-    for (const auto& value : doc.object()["assets"].toArray()) {
-        const auto source = value.toObject()["path"].toString();
-        if (!safeMediaPath(source) || !files.contains(source)) throw std::runtime_error("Package references missing or external media: " + source.toStdString());
-    }
-    Project project = readProject(manifest);
+    loadProjectMedia(project);
     project.packageDirectory = std::move(directory);
     return project;
 }

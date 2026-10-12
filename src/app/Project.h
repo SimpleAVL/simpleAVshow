@@ -21,12 +21,18 @@ Project newProject();
 Project demoProject();
 void validate(const Project& project);
 void bindAudio(Project& project);
+// Type-checks a manifest without touching media; asset paths resolve against directory.
+Project parseProject(const QByteArray& json, const QString& directory);
+// Loads each asset source, then binds and validates the complete project.
+void loadProjectMedia(Project& project);
 Project readProject(const QString& path);
 void writeProject(const Project& project, const QString& path);
 bool isProjectPackage(const QString& path);
 Project readProjectPackage(const QString& path);
 void writeProjectPackage(const Project& project, const QString& path);
 void materializeProjectMedia(Project& project, const QString& directory);
+// Removes package extractions abandoned by crashed instances; call once at startup.
+void removeStalePackageDirectories();
 QString timecode(Frame position, double fps = 24);
 Envelope* envelope(Clip& clip, int property);
 const Envelope* envelope(const Clip& clip, int property);
