@@ -311,6 +311,37 @@ private slots:
         QCOMPARE(c.project.show.markers[0].name, std::string("Hold 2")); QCOMPARE(c.project.show.markers[1].name, std::string("Hold 3"));
         c.dirty = false;
     }
+    void editingActionsSplitDuplicateNudgePasteAndJump() {
+        MainWindow window; window.show(); auto& c = window.controller();
+        const auto act = [&](const QString& text) { for (auto* a : window.findChildren<QAction*>()) if (a->text() == text) { a->trigger(); return true; } return false; };
+        QVERIFY(c.edit([](Project& p) {
+            Clip clip; clip.id = "t"; clip.text = "Hello"; clip.track = 0; clip.start = frames(2); clip.duration = frames(4);
+            clip.alpha.points = {{0, 0}, {frames(4), 1}}; p.show.clips.push_back(clip);
+            p.show.markers = {{"a", "A", frames(1), true}, {"b", "B", frames(9), true}};
+        }));
+        auto* timeline = window.findChild<Timeline*>(); timeline->selectClip("t");
+        c.seek(frames(3)); QVERIFY(act("Split clip at playhead"));
+        QCOMPARE(c.project.show.clips.size(), std::size_t{2});
+        const auto& head = c.project.show.clips[0]; const auto& tail = c.project.show.clips[1];
+        QCOMPARE(head.duration, frames(1)); QCOMPARE(tail.start, frames(3)); QCOMPARE(tail.duration, frames(3)); QCOMPARE(tail.offset, frames(1));
+        QCOMPARE(head.alpha.points.back().value, .25); QCOMPARE(tail.alpha.points.front().value, .25); QCOMPARE(tail.alpha.points.back().time, frames(3));
+        QVERIFY(act("Duplicate clip")); QCOMPARE(c.project.show.clips.back().start, frames(6));
+        QVERIFY(act("Nudge right one frame")); QCOMPARE(c.project.show.clips.back().start, frames(6) + frames(1. / 24));
+        QVERIFY(act("Copy clip")); timeline->selectedTrack = 0; c.seek(frames(12)); QVERIFY(act("Paste clip at playhead"));
+        QCOMPARE(c.project.show.clips.size(), std::size_t{4}); QCOMPARE(c.project.show.clips.back().start, frames(12));
+        c.seek(frames(5)); QVERIFY(act("Next cue")); QCOMPARE(c.position(), frames(9)); QCOMPARE(timeline->selectedMarker, QString("b"));
+        QVERIFY(act("Previous cue")); QCOMPARE(c.position(), frames(1));
+        QVERIFY(act("Nudge right one second")); QCOMPARE(c.project.show.markers[0].time, frames(2));
+        // Markers drag along the ruler.
+        timeline->resize(1200, 400); timeline->setZoom(22); timeline->horizontalScrollBar()->setValue(0);
+        auto* viewport = timeline->viewport(); const int x = 190 + 2 * 22;
+        QTest::mousePress(viewport, Qt::LeftButton, {}, QPoint(x, 40));
+        QMouseEvent move(QEvent::MouseMove, QPointF(x + 44, 40), viewport->mapToGlobal(QPointF(x + 44, 40)), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewport, &move);
+        QTest::mouseRelease(viewport, Qt::LeftButton, {}, QPoint(x + 44, 40));
+        QCOMPARE(c.project.show.markers[0].time, frames(4));
+        c.dirty = false;
+    }
     void quittingDuringShowModeRequiresConfirmation() {
         MainWindow window; window.show(); window.controller().setShowMode(true);
         bool asked = false;

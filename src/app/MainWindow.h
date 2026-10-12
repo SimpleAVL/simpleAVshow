@@ -3,6 +3,7 @@
 #include "app/Timeline.h"
 #include "app/ProgramView.h"
 #include <QMainWindow>
+#include <optional>
 #include <set>
 
 class QListWidget; class QLabel; class QPushButton; class QComboBox; class QDoubleSpinBox;
@@ -21,6 +22,8 @@ public:
     void offerUntitledRecovery();
 protected:
     void closeEvent(QCloseEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
     bool eventFilter(QObject* object, QEvent* event) override;
 private:
     Controller c_;
@@ -51,6 +54,7 @@ private:
     bool refreshing_ = false, outputLost_ = false, inspectorDirty_ = false, automatic_ = false;
     // Fields changed since the inspector last showed the model; automatic commits apply only these.
     std::set<QWidget*> touched_;
+    std::optional<Clip> clipboard_;
     bool use(QWidget* field) const { return !automatic_ || touched_.contains(field); }
     std::string inspectedClip_, inspectedMarker_;
     int inspectedTrack_ = -1;
@@ -68,6 +72,11 @@ private:
     void autoApply(QWidget* field);
     void applyCurve();
     void importMedia();
+    void importPaths(const QStringList& paths);
+    void splitClip();
+    // Moves the selected clip or cue by ±1 frame (step ±1) or by step milliseconds.
+    void nudge(int step);
+    void jumpToCue(bool forward);
     // Finds offline sources by file name below a chosen folder; after opening, asks first.
     void relinkMedia(bool afterOpening = false);
     void placeAsset(QString id, int track, Frame time);

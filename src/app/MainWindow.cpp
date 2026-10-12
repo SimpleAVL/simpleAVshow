@@ -15,6 +15,8 @@
 #include <QGroupBox>
 #include <QDirIterator>
 #include <QGuiApplication>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QKeyEvent>
@@ -133,6 +135,29 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     edit->addAction("Undo", QKeySequence::Undo, &c_, &Controller::undo);
     edit->addAction("Redo", QKeySequence::Redo, &c_, &Controller::redo);
     edit->addAction("Delete selected clip / cue", this, &MainWindow::deleteSelection);
+    edit->addSeparator();
+    edit->addAction("Copy clip", QKeySequence::Copy, this, [this] {
+        if (const auto* clip = selectedClip()) { clipboard_ = *clip; c_.report("Copied clip. Paste places it at the playhead on the selected track."); }
+    });
+    edit->addAction("Paste clip at playhead", QKeySequence::Paste, this, [this] {
+        if (!clipboard_ || !c_.canEdit()) return;
+        Clip clip = *clipboard_; clip.id = newId().toStdString(); clip.track = timeline_->selectedTrack; clip.start = c_.position();
+        if (c_.project.show.tracks[clip.track].visual != c_.project.show.tracks[clipboard_->track].visual) { c_.report("Choose a compatible picture or audio track before pasting"); return; }
+        if (c_.edit([=](Project& p) { p.show.clips.push_back(clip); })) timeline_->selectClip(QString::fromStdString(clip.id));
+    });
+    edit->addAction("Duplicate clip", QKeySequence("Ctrl+D"), this, [this] {
+        const auto* clip = selectedClip(); if (!clip || !c_.canEdit()) return;
+        Clip copy = *clip; copy.id = newId().toStdString(); copy.start = clip->end();
+        if (c_.edit([=](Project& p) { p.show.clips.push_back(copy); })) timeline_->selectClip(QString::fromStdString(copy.id));
+    });
+    edit->addAction("Split clip at playhead", QKeySequence("Ctrl+B"), this, &MainWindow::splitClip);
+    for (const auto& [label, keys, step] : std::initializer_list<std::tuple<const char*, const char*, int>>{
+            {"Nudge left one frame", "Alt+Left", -1}, {"Nudge right one frame", "Alt+Right", 1},
+            {"Nudge left one second", "Alt+Shift+Left", -1000}, {"Nudge right one second", "Alt+Shift+Right", 1000}})
+        edit->addAction(label, QKeySequence(keys), this, [this, step] { nudge(step); });
+    auto* playback = menuBar()->addMenu("Playback");
+    playback->addAction("Previous cue", QKeySequence("Ctrl+Left"), this, [this] { jumpToCue(false); });
+    playback->addAction("Next cue", QKeySequence("Ctrl+Right"), this, [this] { jumpToCue(true); });
     auto* project = menuBar()->addMenu("Project");
     project->setToolTipsVisible(true);
     project->addAction("Project settings…", this, &MainWindow::projectSettings);
@@ -229,6 +254,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(qApp, &QGuiApplication::screenRemoved, this, &MainWindow::screensChanged, Qt::QueuedConnection);
     connect(qApp, &QGuiApplication::screenAdded, this, &MainWindow::screensChanged, Qt::QueuedConnection);
     outputScreen_ = QSettings().value("display/screen").toString();
+    setAcceptDrops(true);
     qApp->installEventFilter(this); refresh();
 }
 
@@ -552,8 +578,10 @@ void MainWindow::applyCurve() {
 
 void MainWindow::importMedia() {
     if (!c_.canEdit()) return;
-    const QStringList paths = QFileDialog::getOpenFileNames(this, "Import media", {}, "Media (*.wav *.aiff *.aif *.flac *.mp3 *.ogg *.m4a *.mp4 *.mov *.mkv *.webm *.avi *.png *.jpg *.jpeg *.bmp *.webp);;All files (*)");
-    if (paths.isEmpty()) return;
+    importPaths(QFileDialog::getOpenFileNames(this, "Import media", {}, "Media (*.wav *.aiff *.aif *.flac *.mp3 *.ogg *.m4a *.mp4 *.mov *.mkv *.webm *.avi *.png *.jpg *.jpeg *.bmp *.webp);;All files (*)"));
+}
+void MainWindow::importPaths(const QStringList& paths) {
+    if (paths.isEmpty() || !c_.canEdit()) return;
     c_.busy = true;
     auto* progress = new QProgressDialog("Decoding and preparing media…", QString(), 0, 0, this); progress->setWindowModality(Qt::WindowModal); progress->setMinimumDuration(0); progress->show();
     auto* watcher = new QFutureWatcher<MediaResult>(this);
@@ -571,6 +599,59 @@ void MainWindow::importMedia() {
         }
         return result;
     }));
+}
+void MainWindow::splitClip() {
+    const auto* clip = selectedClip(); if (!clip || !c_.canEdit()) return;
+    const Frame cut = c_.position() - clip->start;
+    if (cut <= 0 || cut >= clip->duration) { c_.report("Place the playhead inside the selected clip to split it"); return; }
+    if (clip->loop) { c_.report("Looping clips cannot be split; their loop starts at the clip's source in"); return; }
+    const auto id = clip->id; const auto second = newId().toStdString();
+    const bool done = c_.edit([=](Project& p) {
+        auto it = std::find_if(p.show.clips.begin(), p.show.clips.end(), [&](const Clip& c) { return c.id == id; });
+        Clip tail = *it; tail.id = second; tail.start = it->start + cut; tail.duration = it->duration - cut; tail.offset = it->offset + cut;
+        // Clip-relative automation continues across the cut with the value at the cut.
+        for (int property = 0; property < 6; ++property) {
+            auto* head = envelope(*it, property); auto* rest = envelope(tail, property);
+            if (head->points.empty()) continue;
+            const double at = head->at(cut, propertyValue(*it, property));
+            rest->points.clear(); rest->points.push_back({0, at});
+            for (const auto& point : head->points) if (point.time > cut) rest->points.push_back({point.time - cut, point.value});
+            std::erase_if(head->points, [=](const Keyframe& point) { return point.time >= cut; }); head->points.push_back({cut, at});
+        }
+        it->duration = cut; p.show.clips.push_back(tail);
+    });
+    if (done) timeline_->selectClip(QString::fromStdString(second));
+}
+void MainWindow::nudge(int step) {
+    if (!c_.canEdit()) return;
+    const Frame delta = std::abs(step) == 1 ? std::max<Frame>(1, frames(1. / c_.project.fps)) * step : frames(step / 1000.);
+    if (const auto* clip = selectedClip()) {
+        const auto id = clip->id; const Frame start = std::clamp(clip->start + delta, Frame{0}, c_.project.show.duration - clip->duration);
+        c_.edit([=](Project& p) { for (auto& c : p.show.clips) if (c.id == id) c.start = start; });
+    } else if (const auto* marker = selectedMarker()) {
+        const auto id = marker->id; const Frame time = std::clamp(marker->time + delta, Frame{0}, c_.project.show.duration);
+        c_.edit([=](Project& p) { for (auto& m : p.show.markers) if (m.id == id) m.time = time; });
+    }
+}
+void MainWindow::jumpToCue(bool forward) {
+    const Frame now = c_.position(); const Marker* target = nullptr;
+    for (const auto& m : c_.project.show.markers) {
+        if (forward ? m.time > now && (!target || m.time < target->time) : m.time < now && (!target || m.time > target->time)) target = &m;
+    }
+    if (!target) { c_.report(forward ? "No later cue" : "No earlier cue"); return; }
+    timeline_->selectMarker(QString::fromStdString(target->id)); c_.seek(target->time);
+}
+void MainWindow::dragEnterEvent(QDragEnterEvent* event) {
+    if (event->mimeData()->hasUrls() && c_.canEdit(false)) event->acceptProposedAction();
+}
+void MainWindow::dropEvent(QDropEvent* event) {
+    QStringList paths;
+    for (const auto& url : event->mimeData()->urls()) if (url.isLocalFile()) paths << url.toLocalFile();
+    if (paths.isEmpty()) return;
+    event->acceptProposedAction();
+    // A dropped show opens; anything else imports into the media library.
+    if (paths.size() == 1 && (paths[0].endsWith(".savshow", Qt::CaseInsensitive) || isProjectPackage(paths[0]))) { if (c_.canEdit() && checkDiscard()) openPath(paths[0]); }
+    else importPaths(paths);
 }
 void MainWindow::relinkMedia(bool afterOpening) {
     QStringList missing;

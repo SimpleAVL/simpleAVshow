@@ -100,7 +100,7 @@ Frame Timeline::snap(Frame time, const std::string& ignore) const {
     Frame distance = frames(8 / zoom_);
     auto consider = [&](Frame t) { const Frame d = std::abs(t - time); if (d < distance) { distance = d; snapped = t; } };
     consider(c_.position()); consider(0);
-    for (const auto& m : c_.project.show.markers) consider(m.time);
+    for (const auto& m : c_.project.show.markers) if (m.id != ignore) consider(m.time);
     for (const auto& clip : c_.project.show.clips) if (clip.id != ignore) { consider(clip.start); consider(clip.end()); }
     return std::clamp(snapped, Frame{0}, c_.project.show.duration);
 }
@@ -199,8 +199,9 @@ void Timeline::paintEvent(QPaintEvent* event) {
         p.drawText(QRectF(x + 5, 2, 80, 22), Qt::AlignLeft | Qt::AlignVCenter, QString("%1:%2").arg(static_cast<qint64>(t) / 60, 2, 10, QChar('0')).arg(static_cast<qint64>(t) % 60, 2, 10, QChar('0')));
         p.setPen(QColor("#40516b")); p.drawLine(QPointF(x, 22), QPointF(x, 29));
     }
-    for (const auto& marker : show.markers) {
-        const double x = xAt(marker.time); const bool selected = marker.id == selectedMarker.toStdString();
+    for (std::size_t i = 0; i < show.markers.size(); ++i) {
+        const auto& marker = show.markers[i];
+        const double x = xAt(dragging_ && dragMarker_ == static_cast<int>(i) ? dragStart_ : marker.time); const bool selected = marker.id == selectedMarker.toStdString();
         p.setPen(Qt::NoPen); p.setBrush(selected ? QColor("#ffe3a4") : QColor("#d8b668"));
         QPolygonF flag{QPointF(x, 32), QPointF(x + 10, 32), QPointF(x + 10, 42), QPointF(x, 50)}; p.drawPolygon(flag);
         p.setPen(QColor("#e4c785")); p.drawText(QRectF(x + 15, 30, 150, 22), Qt::AlignLeft | Qt::AlignVCenter, QString::fromStdString(marker.name));
@@ -215,7 +216,7 @@ void Timeline::paintEvent(QPaintEvent* event) {
 }
 void Timeline::mousePressEvent(QMouseEvent* event) {
     if (event->button() != Qt::LeftButton) return;
-    press_ = event->position().toPoint(); dragTime_ = timeAt(press_.x()); dragging_ = false; dragClip_ = -1;
+    press_ = event->position().toPoint(); dragTime_ = timeAt(press_.x()); dragging_ = false; dragClip_ = -1; dragMarker_ = -1;
     if (press_.x() < header) {
         const int track = trackAt(press_.y());
         if (track >= 0 && static_cast<std::size_t>(track) < c_.project.show.tracks.size()) {
@@ -224,7 +225,13 @@ void Timeline::mousePressEvent(QMouseEvent* event) {
         return;
     }
     if (press_.y() >= 29 && press_.y() < ruler) {
-        for (const auto& marker : c_.project.show.markers) if (std::abs(xAt(marker.time) - press_.x()) < 12) { selectMarker(QString::fromStdString(marker.id)); return; }
+        for (std::size_t i = 0; i < c_.project.show.markers.size(); ++i) {
+            const auto& marker = c_.project.show.markers[i];
+            if (std::abs(xAt(marker.time) - press_.x()) >= 12) continue;
+            selectMarker(QString::fromStdString(marker.id));
+            if (c_.canEdit(false)) { dragMarker_ = static_cast<int>(i); dragStart_ = marker.time; }
+            return;
+        }
     }
     if (press_.y() < ruler) { c_.seek(snap(dragTime_)); return; }
     for (int i = static_cast<int>(c_.project.show.clips.size()) - 1; i >= 0; --i) {
@@ -241,6 +248,12 @@ void Timeline::mousePressEvent(QMouseEvent* event) {
     selectedClip.clear(); selectedMarker.clear(); emit selectionChanged(); c_.seek(snap(dragTime_));
 }
 void Timeline::mouseMoveEvent(QMouseEvent* event) {
+    if ((event->buttons() & Qt::LeftButton) && dragMarker_ >= 0 && c_.canEdit(false)) {
+        if ((event->position().toPoint() - press_).manhattanLength() < 4 && !dragging_) return;
+        dragging_ = true; const auto& marker = c_.project.show.markers[dragMarker_];
+        dragStart_ = std::clamp(snap(marker.time + timeAt(event->position().x()) - dragTime_, marker.id), Frame{0}, c_.project.show.duration);
+        viewport()->update(); return;
+    }
     if (!(event->buttons() & Qt::LeftButton) || dragClip_ < 0 || !c_.canEdit(false)) return;
     if ((event->position().toPoint() - press_).manhattanLength() < 4 && !dragging_) return;
     dragging_ = true; const auto& original = c_.project.show.clips[dragClip_];
@@ -263,6 +276,10 @@ void Timeline::mouseMoveEvent(QMouseEvent* event) {
     viewport()->update();
 }
 void Timeline::mouseReleaseEvent(QMouseEvent*) {
+    if (dragging_ && dragMarker_ >= 0) {
+        const int index = dragMarker_; const Frame time = dragStart_; dragging_ = false; dragMarker_ = -1;
+        c_.edit([=](Project& p) { p.show.markers[index].time = time; }); emit selectionChanged();
+    }
     if (dragging_ && dragClip_ >= 0) {
         const int index = dragClip_; const Frame start = dragStart_, duration = dragDuration_, offset = dragOffset_; const int track = dragTrack_;
         const int mode = dragMode_; dragging_ = false; dragClip_ = -1;
@@ -283,7 +300,7 @@ void Timeline::mouseReleaseEvent(QMouseEvent*) {
             clip.start = start; clip.duration = duration; clip.offset = offset; clip.track = track;
         }); emit selectionChanged();
     }
-    dragging_ = false; dragClip_ = -1; viewport()->update();
+    dragging_ = false; dragClip_ = -1; dragMarker_ = -1; viewport()->update();
 }
 void Timeline::mouseDoubleClickEvent(QMouseEvent* event) { if (event->position().x() >= header && !c_.showMode) c_.seek(snap(timeAt(event->position().x()))); }
 void Timeline::dragEnterEvent(QDragEnterEvent* event) { if (event->mimeData()->hasFormat("application/x-simpleavshow-asset") && c_.canEdit(false)) event->acceptProposedAction(); }
