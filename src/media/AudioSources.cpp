@@ -29,7 +29,10 @@ namespace {
 constexpr qint64 stereoBytes = 2 * sizeof(float);
 constexpr qint64 legacyHeader = 8 + 8 + 1 + 32 + 32, metadataHeader = legacyHeader + 32;
 constexpr char legacyMagic[] = "SAVPCM01", cacheMagic[] = "SAVMETA2";
+constexpr char indexMagic[] = "SAVIDX01";
 constexpr qint64 staleAge = 7ll * 24 * 3600 * 1000;
+constexpr qint64 racyWindow = 2000; // Coarse (FAT: 2 s) timestamps can hide a rewrite during hashing.
+constexpr qsizetype maxIndexEntries = 4096;
 [[noreturn]] void fail(const QString& message) { throw std::runtime_error(message.toStdString()); }
 [[noreturn]] void changed(const QString& message) { throw AudioSourceChanged(message.toStdString()); }
 
@@ -44,6 +47,68 @@ QByteArray fileHash(const QString& path) {
     }
     return hash.result();
 }
+// Canonical path, size and modification time identify an unchanged file. Content
+// rewritten with the same size and timestamp is not noticed; size or timestamp
+// changes (every normal save or copy) are.
+struct Stamp {
+    QString path; qint64 size = -1, modified = 0;
+    bool operator==(const Stamp&) const = default;
+};
+Stamp stamp(const QString& path) {
+    const QFileInfo info(path);
+    return {info.canonicalFilePath(), info.size(), info.lastModified().toMSecsSinceEpoch()};
+}
+// Records only files that did not change while hashed and were not modified within
+// the timestamp granularity, so a later same-second rewrite still gets a new stamp.
+bool settled(const Stamp& before, const Stamp& after, qint64 started) {
+    return !before.path.isEmpty() && before == after && started - before.modified > racyWindow;
+}
+
+// The index maps source stamps to content hashes so unchanged sources skip the
+// full-file hash. Readers see whole files (QSaveFile); writers serialize on a lock
+// file and skip the update if it is busy, since the index only saves work.
+struct IndexEntry { Stamp source; QByteArray hash; };
+QString indexPath() { return audioCacheDirectory() + "/source-index"; }
+QList<IndexEntry> readIndex() {
+    QList<IndexEntry> entries;
+    QFile file(indexPath());
+    if (!file.open(QIODevice::ReadOnly)) return entries;
+    QDataStream stream(&file); stream.setByteOrder(QDataStream::LittleEndian);
+    char magic[8]; quint32 count = 0;
+    if (stream.readRawData(magic, 8) != 8 || std::memcmp(magic, indexMagic, 8)) return entries;
+    stream >> count;
+    for (quint32 i = 0; i < std::min<quint32>(count, maxIndexEntries); ++i) {
+        IndexEntry entry; stream >> entry.source.path >> entry.source.size >> entry.source.modified >> entry.hash;
+        if (stream.status() != QDataStream::Ok) break;
+        if (entry.hash.size() == 32 && !entry.source.path.isEmpty()) entries.push_back(std::move(entry));
+    }
+    return entries;
+}
+void updateIndex(const Stamp& source, const QByteArray& hash) {
+    if (source.path.isEmpty() || !QDir().mkpath(audioCacheDirectory())) return;
+    QLockFile lock(indexPath() + ".lock");
+    if (!lock.tryLock(5000)) return;
+    auto entries = readIndex();
+    entries.removeIf([&](const IndexEntry& entry) { return entry.source.path == source.path; });
+    if (!hash.isEmpty()) entries.push_back({source, hash});
+    if (entries.size() > maxIndexEntries) entries.remove(0, entries.size() - maxIndexEntries);
+    QSaveFile file(indexPath());
+    if (!file.open(QIODevice::WriteOnly)) return;
+    QDataStream stream(&file); stream.setByteOrder(QDataStream::LittleEndian);
+    stream.writeRawData(indexMagic, 8); stream << static_cast<quint32>(entries.size());
+    for (const auto& entry : entries) stream << entry.source.path << entry.source.size << entry.source.modified << entry.hash;
+    if (stream.status() == QDataStream::Ok) file.commit();
+}
+QByteArray sourceHash(const QString& path) {
+    const auto before = stamp(path);
+    if (!before.path.isEmpty())
+        for (const auto& entry : readIndex()) if (entry.source == before) return entry.hash;
+    const auto started = QDateTime::currentMSecsSinceEpoch();
+    auto hash = fileHash(path);
+    if (settled(before, stamp(path), started)) updateIndex(before, hash);
+    return hash;
+}
+
 QByteArray peaksHash(const std::vector<float>& peaks) {
     QCryptographicHash hash(QCryptographicHash::Sha256);
     hash.addData(QByteArrayView(reinterpret_cast<const char*>(peaks.data()), static_cast<qsizetype>(peaks.size() * sizeof(float))));
@@ -213,7 +278,7 @@ QString audioCacheDirectory() {
         (QSysInfo::ByteOrder == QSysInfo::LittleEndian ? "/audio-pcm-v1-le" : "/audio-pcm-v1-be");
 }
 
-AudioCache::AudioCache(const QString& source) : source_(source), sourceHash_(fileHash(source)) {
+AudioCache::AudioCache(const QString& source) : source_(source), sourceHash_(sourceHash(source)) {
     // Content identity also survives moved media and fresh package extraction paths.
     const auto key = QString::fromLatin1(QCryptographicHash::hash(decoderRevision() + sourceHash_, QCryptographicHash::Sha256).toHex());
     const QDir directory(audioCacheDirectory());
@@ -262,7 +327,10 @@ std::shared_ptr<const AudioStorage> AudioCache::publish(QTemporaryFile& file, co
     if (length <= 0 || length > maxFrame || file.size() != length * stereoBytes ||
         data.peaks.size() != static_cast<std::size_t>((length + AudioData::peakStride - 1) / AudioData::peakStride)) fail("Invalid prepared audio length");
     if (!file.flush()) fail("Cannot finish audio cache: " + file.errorString());
-    if (fileHash(source_) != sourceHash_) fail("Audio source changed during preparation; import it again");
+    if (fileHash(source_) != sourceHash_) {
+        updateIndex(stamp(source_), {}); // An indexed hash may predate a same-stamp rewrite.
+        fail("Audio source changed during preparation; import it again");
+    }
     const auto checksum = fileHash(file.fileName());
     bool same = false;
     if (QFileInfo(pcm_).size() == file.size()) {

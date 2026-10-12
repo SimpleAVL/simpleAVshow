@@ -131,9 +131,10 @@ struct PaintSpy : QObject {
 };
 // A long, empty show: the playhead can travel without holds or clips.
 Project longShow() { auto p = newProject(); p.show.clips.clear(); p.show.markers.clear(); p.show.duration = frames(600); return p; }
-// Imports a resampled (cached) source and returns the new cache key.
+// Imports a resampled source with a unique last frame and returns its new cache key.
 QString importCacheKey(const QString& path, Frame count, std::shared_ptr<const AudioData>* retained = nullptr) {
-    writeBytes(path, waveBytes(16, 1, 2, 44100, false, count));
+    auto bytes = waveBytes(16, 1, 2, 44100, false, count); bytes.replace(bytes.size() - 4, 4, QUuid::createUuid().toRfc4122().first(4));
+    writeBytes(path, bytes);
     QDir caches(detail::audioCacheDirectory()); const auto before = caches.entryList({"*.pcm"}, QDir::Files);
     auto asset = loadMedia(path); if (retained) *retained = asset.audio;
     auto created = caches.entryList({"*.pcm"}, QDir::Files);
@@ -1108,11 +1109,11 @@ private slots:
         // A truncated artifact is also rebuilt rather than reused.
         QVERIFY(cacheFile.open(QIODevice::ReadWrite)); QVERIFY(cacheFile.resize(32)); cacheFile.close();
         QCOMPARE(loadMedia(source).audio->length(), frames(1)); QCOMPARE(QFileInfo(pcm).size(), frames(1) * 8);
-        // Source identity uses all bytes, even when size and timestamp are unchanged.
+        // Source identity uses all bytes; a same-size rewrite with a new timestamp is rehashed.
         const auto sourceTime = QFileInfo(source).lastModified();
         auto changed = original; changed[changed.size() - 8] ^= 0x40; writeBytes(source, changed);
         QFile sourceFile(source); QVERIFY(sourceFile.open(QIODevice::ReadWrite));
-        QVERIFY(sourceFile.setFileTime(sourceTime, QFileDevice::FileModificationTime)); sourceFile.close();
+        QVERIFY(sourceFile.setFileTime(sourceTime.addSecs(-10), QFileDevice::FileModificationTime)); sourceFile.close();
         const auto count = caches.entryList({"*.pcm"}, QDir::Files).size();
         QVERIFY(loadMedia(source).audio); QCOMPARE(caches.entryList({"*.pcm"}, QDir::Files).size(), count + 1);
         QCOMPARE(caches.entryList({"preparing-*", "*.lock"}, QDir::Files).size(), 0);
@@ -1186,6 +1187,34 @@ private slots:
         QVERIFY(loadMedia(dir.filePath("d.wav")).audio);
         QCOMPARE(QFileInfo(caches.filePath(legacy + ".pcm")).lastModified(), pcmTime);
         QVERIFY(meta.open(QIODevice::ReadOnly)); QCOMPARE(meta.read(8), QByteArray("SAVMETA2")); meta.close();
+    }
+    void unchangedSourceStampSkipsRehashing() {
+        QTemporaryDir dir; QDir caches(detail::audioCacheDirectory()); const auto source = dir.filePath("indexed.wav");
+        importCacheKey(source, 4410);
+        const auto original = QDateTime::currentDateTimeUtc().addDays(-1); setModified(source, original);
+        auto first = loadMedia(source); const auto value = sampleAt(*first.audio, 2000); first.audio.reset();
+        QVERIFY(QFileInfo::exists(caches.filePath("source-index")));
+        auto rewrite = [&](const QDateTime& time) {
+            QFile file(source); QVERIFY(file.open(QIODevice::ReadWrite)); QVERIFY(file.seek(file.size() - 4410 * 4));
+            const auto bytes = file.read(4410 * 4); QVERIFY(file.seek(file.size() - 4410 * 4));
+            auto changed = bytes; for (auto& byte : changed) byte = static_cast<char>(~byte);
+            QCOMPARE(file.write(changed), changed.size()); file.close(); setModified(source, time);
+        };
+        // Tradeoff: a same-size rewrite that keeps the timestamp is not rehashed and reuses the old cache.
+        const auto count = caches.entryList({"*.pcm"}, QDir::Files).size();
+        rewrite(original);
+        auto stale = loadMedia(source); QCOMPARE(caches.entryList({"*.pcm"}, QDir::Files).size(), count);
+        QCOMPARE(sampleAt(*stale.audio, 2000), value); stale.audio.reset();
+        // Any timestamp (or size) change hashes the whole file again.
+        setModified(source, original.addSecs(1));
+        auto fresh = loadMedia(source); QCOMPARE(caches.entryList({"*.pcm"}, QDir::Files).size(), count + 1);
+        QVERIFY(sampleAt(*fresh.audio, 2000) != value);
+        // Files modified within the timestamp granularity are never indexed, so they are always rehashed.
+        const auto recent = dir.filePath("recent.wav"); importCacheKey(recent, 4420);
+        const auto recentTime = QFileInfo(recent).lastModified();
+        QFile file(recent); QVERIFY(file.open(QIODevice::ReadWrite));
+        QVERIFY(file.seek(file.size() - 2)); QCOMPARE(file.write("\x01\x02", 2), 2); file.close(); setModified(recent, recentTime);
+        QVERIFY(loadMedia(recent).audio); QCOMPARE(caches.entryList({"*.pcm"}, QDir::Files).size(), count + 3);
     }
     void diskAudioCacheHasBoundedMemoryAndPersists() {
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
