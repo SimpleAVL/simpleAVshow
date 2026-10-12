@@ -33,7 +33,7 @@ Status: `open`, `fixed`, `wontfix` (with reason), `deferred`.
 | E10 | Medium | fixed (untested on Windows; measure on the show PC) | **Coarse Windows timer resolution.** MIDI and disk workers sleep for 1 ms without `timeBeginPeriod(1)`, so jitter may reach ~15.6 ms. **Fix:** raise timer resolution while armed, then measure. |
 | E11 | Low | fixed | **NaN samples reach the driver.** `std::clamp(NaN)` returns NaN (`Transport.cpp:180-182`). **Fix:** replace non-finite samples with 0 and latch the clip indicator. |
 | E12 | Low | open | **Hard cuts click.** Holds, Stop All, seeks, and clip boundaries cut mid-waveform. **Fix:** a short (2–5 ms) per-voice fade. |
-| E13 | Low | open | **Audio caches grow forever and opening is slow.** The cache key includes FFmpeg versions; each open SHA-256s the entire source and cache. **Fix:** size-bounded LRU cleanup; cheaper validation before the full hash. |
+| E13 | Low | fixed (reuse still hashes the whole prepared .pcm to detect silent corruption) | **Audio caches grow forever and opening is slow.** The cache key includes FFmpeg versions; each open SHA-256s the entire source and cache. **Fix:** size-bounded LRU cleanup; cheaper validation before the full hash. |
 | E14 | Low | fixed | **Some mono files go hard left.** A mono source declaring a front-left layout is resampled to left only (`Media.cpp:105,139`). **Fix:** treat any one-channel input as centre mono. |
 | E15 | Low | open | **Per-sample envelope and trig work.** Each voice does a binary search plus `cos`/`sin` per sample. **Fix:** evaluate per block (or per 32 samples) with smoothing. |
 

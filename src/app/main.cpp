@@ -1,4 +1,5 @@
 #include "app/MainWindow.h"
+#include "media/AudioSources.h"
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QTimer>
@@ -34,7 +35,7 @@ int main(int argc, char** argv) {
     parser.addOption({"preview-time", "Seek before capturing a screenshot (seconds)", "seconds"});
     parser.addPositionalArgument("project", "Project or package to open (.savshow, .savpack)"); parser.process(app);
     // Deleting a crashed instance's extraction can take a while for large media.
-    QThreadPool::globalInstance()->start([] { sav::removeStalePackageDirectories(); });
+    QThreadPool::globalInstance()->start([] { sav::removeStalePackageDirectories(); sav::detail::trimAudioCache(); });
     sav::MainWindow window;
     if (parser.isSet("demo")) { window.controller().replace(sav::demoProject()); window.controller().dirty = true; }
     if (!parser.positionalArguments().isEmpty()) window.openPath(parser.positionalArguments().front());
