@@ -67,7 +67,8 @@ private:
     std::shared_ptr<const Show> armed_;
     std::thread midiThread_;
     std::atomic<bool> midiStop_{true};
-    QElapsedTimer midiWatch_;
+    QElapsedTimer midiWatch_, stall_;
+    std::uint64_t heartbeat_ = 0;
     std::set<std::string> videoErrors_;
     QImage lastPicture_;
     Frame lastComposed_ = -1;

@@ -14,11 +14,15 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
     arm(0);
     timer_.setInterval(16);
     connect(&timer_, &QTimer::timeout, this, [this] {
-        if (configured_ && !device.running()) {
+        // A stream that stops calling back without reporting an error has stalled just the same.
+        if (device.callbacks() != heartbeat_ || !device.running()) { heartbeat_ = device.callbacks(); stall_.restart(); }
+        const bool stalled = configured_ && device.running() && stall_.hasExpired(750);
+        if (configured_ && (!device.running() || stalled)) {
+            const QString reason = stalled ? QString("stopped responding") : device.lastError().isEmpty() ? QString("stopped") : "failed: " + device.lastError();
             configured_ = false; device.close();
             // Once the device is closed, it is safe to render a zero-sized control block.
             transport.command({Action::StopAll}); transport.render(nullptr, 0, 0);
-            report("Audio output stopped. Press Play to reconnect, or choose another device in Outputs.");
+            report("Audio output " + reason + ". Press Play to reconnect, or choose another device in Outputs.");
             playbackProblem = status;
         }
         if (transport.eventOverflow() && transport.state() != State::Stopped) {
@@ -29,7 +33,7 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
         }
         if (midiWatch_.hasExpired(1000)) { midiWatch_.restart(); watchMidi(); }
         emit tick();
-    }); timer_.start(); midiWatch_.start();
+    }); timer_.start(); midiWatch_.start(); stall_.start();
     autosave_.setInterval(60000);
     connect(&autosave_, &QTimer::timeout, this, [this] {
         // Extracted package media is temporary, and generated media has no file to reference yet.
@@ -91,6 +95,7 @@ void Controller::arm(Frame position) {
     if (configured_) {
         QString error;
         if (!device.open(api_, deviceId_, channels_, buffer_, error)) { configured_ = false; report("Audio output unavailable: " + error); }
+        stall_.restart();
     }
     startMidiThread();
 }
@@ -161,7 +166,7 @@ bool Controller::configureAudio(RtAudio::Api api, unsigned id, QString name, uns
 bool Controller::openAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer) {
     api_ = api; deviceId_ = id; channels_ = channels; buffer_ = buffer; audioName = name;
     QString error;
-    configured_ = device.open(api, id, channels, buffer, error);
+    configured_ = device.open(api, id, channels, buffer, error); stall_.restart();
     if (configured_) {
         playbackProblem.clear();
         QSettings settings; settings.setValue("audio/api", static_cast<int>(api)); settings.setValue("audio/device", name);

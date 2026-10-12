@@ -290,6 +290,15 @@ private slots:
         QVERIFY(c.edit([&](Project& p) { p.assets.insert(relinked.id, relinked); }));
         QVERIFY(c.missingMedia().isEmpty()); QVERIFY(c.project.show.clips[0].audio);
     }
+    void realDeviceHeartbeatAdvances() {
+        if (qEnvironmentVariable("SAV_TEST_AUDIO_DEVICE") != "1") QSKIP("Set SAV_TEST_AUDIO_DEVICE=1 to open the default output (plays silence)");
+        Transport transport; transport.configure(std::make_shared<Show>()); AudioDevice device(transport);
+        const auto selected = playbackDevice(device.devices(RtAudio::UNSPECIFIED), {}); QVERIFY(selected);
+        QString error; QVERIFY2(device.open(RtAudio::UNSPECIFIED, selected->id, 2, 512, error), qPrintable(error));
+        const auto before = device.callbacks(); QTest::qWait(300);
+        QVERIFY(device.running()); QVERIFY(device.callbacks() > before); QVERIFY(device.lastError().isEmpty());
+        device.close(); QVERIFY(!device.running());
+    }
     void quittingDuringShowModeRequiresConfirmation() {
         MainWindow window; window.show(); window.controller().setShowMode(true);
         bool asked = false;

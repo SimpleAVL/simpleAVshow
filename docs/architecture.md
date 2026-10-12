@@ -14,7 +14,7 @@ The armed Show is immutable and references prepared audio sources. UI edits vali
 
 Voice state and active-clip storage are allocated while disarmed. Stable sorted indices schedule clip starts and markers; per-sample work visits active audio clips and the markers at the current boundary instead of scanning the entire show. Seeking rebuilds the active set and locates the marker cursor without allocating. Clip completion retires voices; held async voices continue under the same rules as resident sources.
 
-Audio legs mix into one interleaved device buffer. Tracks map L/R legs to physical channels; −1 disconnects a leg. Pan is constant-power for mono and balance attenuation for stereo. A track with exactly one connected leg receives the source summed to mono at full level and ignores pan. Overload clamps at the device boundary and latches an indicator; non-finite samples are silenced and latch it too. Tracks align sample-exactly because there is one callback/clock. Playback cost depends on simultaneous voices and device channels rather than total timeline length; practical polyphony still requires hardware rehearsal.
+Audio legs mix into one interleaved device buffer. Tracks map L/R legs to physical channels; −1 disconnects a leg. Pan is constant-power for mono and balance attenuation for stereo. A track with exactly one connected leg receives the source summed to mono at full level and ignores pan. An RtAudio error callback marks the stream failed, and the controller treats a running stream whose callback count stalls for 750 ms as stopped; both stop playback with the driver's reason. Overload clamps at the device boundary and latches an indicator; non-finite samples are silenced and latch it too. Tracks align sample-exactly because there is one callback/clock. Playback cost depends on simultaneous voices and device channels rather than total timeline length; practical polyphony still requires hardware rehearsal.
 
 ## Media and picture
 
@@ -32,7 +32,7 @@ Software picture composition, GUI presentation, refresh, and device/display late
 
 A dedicated 1 ms polling worker sends RtMidi messages from an immutable snapshot. Seek/Stop All advance an epoch to invalidate stale queued events. The worker joins before reconfiguration. The bridge is a native MIDI port; no network protocol is assumed. Complete MIDI 1.0 messages, including bounded SysEx, are validated. The cue editor maps musical values to the existing byte representation: note names, named controllers, programs 1–128, and signed pitch bend centered at zero. Test sending joins the worker before sending directly, then restarts it; testing requires editability. An RtMidi error callback turns failed sends into a lost port instead of a printed warning. Once a second, the controller checks that the remembered destination is still listed: a vanished port is closed and reported, and a returning port reconnects by name during playback or holds. Resuming a hold or pause never blocks on MIDI or missing video; it warns and continues.
 
-Scheduling has OS/driver jitter and may precede audible buffer presentation. Measurement and compensation are future work.
+On Windows the app requests 1 ms timer resolution so these polling workers wake on time. Scheduling has OS/driver jitter and may precede audible buffer presentation. Measurement and compensation are future work.
 
 ## Projects
 

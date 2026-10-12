@@ -26,7 +26,13 @@ std::vector<DeviceDescription> AudioDevice::devices(RtAudio::Api api) {
 bool AudioDevice::open(RtAudio::Api api, unsigned device, unsigned channels, unsigned buffer, QString& error) {
     close();
     try {
-        audio_ = std::make_unique<RtAudio>(api);
+        failed_.store(false); { std::lock_guard lock(errorMutex_); error_.clear(); }
+        // Called from driver threads; warnings are informational, errors mean the stream is unusable.
+        audio_ = std::make_unique<RtAudio>(api, [this](RtAudioErrorType type, const std::string& text) {
+            if (type == RTAUDIO_NO_ERROR || type == RTAUDIO_WARNING) return;
+            { std::lock_guard lock(errorMutex_); error_ = QString::fromStdString(text); }
+            failed_.store(true);
+        });
         RtAudio::StreamParameters output; output.deviceId = device; output.nChannels = channels; output.firstChannel = 0;
         RtAudio::StreamOptions options; options.streamName = "SimpleAVShow"; options.flags = RTAUDIO_SCHEDULE_REALTIME;
         channels_ = channels; buffer_ = buffer; underruns_.store(0);
@@ -46,6 +52,7 @@ void AudioDevice::close() {
 }
 int AudioDevice::callback(void* output, void*, unsigned frames, double, RtAudioStreamStatus status, void* context) {
     auto& device = *static_cast<AudioDevice*>(context);
+    device.callbacks_.fetch_add(1, std::memory_order_relaxed);
     if (status) device.underruns_.fetch_add(1, std::memory_order_relaxed);
     device.transport_.render(static_cast<float*>(output), frames, device.channels_);
     return 0;

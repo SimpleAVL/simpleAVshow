@@ -7,8 +7,17 @@
 #include <QPalette>
 #include <QFont>
 #include <QThreadPool>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <timeapi.h>
+#endif
 
 int main(int argc, char** argv) {
+#ifdef Q_OS_WIN
+    // The MIDI and disk workers sleep 1 ms between polls; the default 15.6 ms tick would delay cues and read-ahead.
+    timeBeginPeriod(1);
+    struct TimerPeriod { ~TimerPeriod() { timeEndPeriod(1); } } timerPeriod;
+#endif
     QApplication app(argc, argv);
     app.setStyle("Fusion"); app.setFont(QFont("Arial", 10));
     QPalette palette;
