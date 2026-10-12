@@ -28,6 +28,7 @@
 #include <QPushButton>
 #include <QScreen>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSlider>
@@ -62,7 +63,7 @@ QDoubleSpinBox* realSpin(double min, double max, double step, QWidget* parent = 
 }
 QSpinBox* intSpin(int min, int max) { auto* box = new QSpinBox; box->setRange(min, max); box->setKeyboardTracking(false); return box; }
 QPushButton* button(QString text, QLayout* layout = nullptr) {
-    auto* b = new QPushButton(text); b->setCursor(Qt::PointingHandCursor); b->setFocusPolicy(Qt::NoFocus);
+    auto* b = new QPushButton(text); b->setCursor(Qt::PointingHandCursor); b->setFocusPolicy(Qt::TabFocus); // Reachable by Tab; clicks never steal focus from Space handling.
     if (layout) layout->addWidget(b); return b;
 }
 QLabel* section(QString text) { auto* l = new QLabel(text); l->setObjectName("section"); return l; }
@@ -80,7 +81,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("SimpleAVShow"); resize(1440, 960); setMinimumSize(1100, 720);
     setStyleSheet(R"(
       QMainWindow, QDialog { background: #111720; color: #dee7f3; }
-      QWidget { color: #dee7f3; font-family: 'Inter', 'Segoe UI', 'Arial'; font-size: 12px; }
+      QWidget { color: #dee7f3; font-family: 'Segoe UI', 'Helvetica Neue', 'Arial'; font-size: 12px; }
       QLabel#section { color: #8499b5; font-size: 10px; font-weight: 600; letter-spacing: 1px; margin: 7px 0; }
       QPushButton, QToolButton { background: #263448; border: 1px solid #34455d; border-radius: 5px; padding: 7px 12px; }
       QPushButton:hover, QToolButton:hover { background: #354963; }
@@ -144,7 +145,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     project->addAction("Delete selected track…", this, [this] {
         if (!c_.canEdit()) return;
         const int index = timeline_->selectedTrack;
-        if (QMessageBox::question(this, "Delete track", "Delete this track and all its clips?") != QMessageBox::Yes) return;
+        const auto clips = std::count_if(c_.project.show.clips.begin(), c_.project.show.clips.end(), [=](const Clip& clip) { return clip.track == index; });
+        if (QMessageBox::question(this, "Delete track", QString("Delete the track “%1” and its %2 clip%3?").arg(QString::fromStdString(c_.project.show.tracks[index].name))
+                .arg(clips).arg(clips == 1 ? "" : "s"), QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
         c_.edit([=](Project& p) { std::erase_if(p.show.clips, [=](const Clip& clip) { return clip.track == index; });
             p.show.tracks.erase(p.show.tracks.begin() + index); for (auto& clip : p.show.clips) if (clip.track > index) --clip.track; });
     });
@@ -343,6 +346,7 @@ void MainWindow::buildInspector() {
 Clip* MainWindow::selectedClip() { for (auto& clip : c_.project.show.clips) if (clip.id == timeline_->selectedClip.toStdString()) return &clip; return nullptr; }
 Marker* MainWindow::selectedMarker() { for (auto& marker : c_.project.show.markers) if (marker.id == timeline_->selectedMarker.toStdString()) return &marker; return nullptr; }
 void MainWindow::refresh() {
+    const int libraryScroll = library_->verticalScrollBar()->value(), cueScroll = cues_->verticalScrollBar()->value();
     library_->clear();
     for (const auto& a : c_.project.assets) {
         const QString type = a.image ? "IMAGE" : a.video ? "VIDEO" : "AUDIO";
@@ -357,6 +361,7 @@ void MainWindow::refresh() {
         auto* item = new QListWidgetItem((m->hold ? "Ⅱ  " : "◆  ") + QString::fromStdString(m->name) + "\n" + timecode(m->time, c_.project.fps) + (m->message.empty() ? "" : "\n" + midiSummary(m->message)), cues_);
         item->setData(Qt::UserRole, QString::fromStdString(m->id));
     }
+    library_->verticalScrollBar()->setValue(libraryScroll); cues_->verticalScrollBar()->setValue(cueScroll);
     projectLabel_->setText(c_.project.title + (c_.dirty ? "  •" : "") + QString("  ·  %1 × %2 / %3 fps").arg(c_.project.width).arg(c_.project.height).arg(c_.project.fps));
     setWindowTitle(c_.project.title + (c_.dirty ? " *" : "") + " — SimpleAVShow");
     showButton_->setChecked(c_.showMode); showButton_->setText(c_.showMode ? "Show mode · locked" : "Show mode");
@@ -447,6 +452,8 @@ void MainWindow::updateInspector() {
         trackAsync_->setChecked(track.async); trackGain_->setValue(track.gain); trackPan_->setValue(track.pan); trackLeft_->setValue(track.left + 1); trackRight_->setValue(track.right + 1);
     }
     refreshing_ = false; inspector_->setEnabled(c_.canEdit(false));
+    const QSignalBlocker block(cues_); cues_->clearSelection();
+    for (int i = 0; i < cues_->count(); ++i) if (cues_->item(i)->data(Qt::UserRole).toString() == timeline_->selectedMarker) { cues_->setCurrentRow(i); break; }
 }
 void MainWindow::updateCurve() {
     curveTable_->setRowCount(0); auto* clip = selectedClip(); if (!clip) return;
@@ -632,7 +639,10 @@ void MainWindow::addText() {
     if (c_.edit([=](Project& p) { p.show.duration = std::max(p.show.duration, clip.end() + frames(5)); p.show.clips.push_back(clip); })) timeline_->selectClip(QString::fromStdString(clip.id));
 }
 void MainWindow::addMarker() {
-    Marker marker; marker.id = newId().toStdString(); marker.name = "Hold " + std::to_string(c_.project.show.markers.size() + 1); marker.time = c_.position();
+    // Number after the highest existing "Hold N" so names stay unique after deletions.
+    int number = 0;
+    for (const auto& m : c_.project.show.markers) if (m.name.starts_with("Hold ")) number = std::max(number, QString::fromStdString(m.name.substr(5)).toInt());
+    Marker marker; marker.id = newId().toStdString(); marker.name = "Hold " + std::to_string(number + 1); marker.time = c_.position();
     if (c_.edit([=](Project& p) { p.show.markers.push_back(marker); })) timeline_->selectMarker(QString::fromStdString(marker.id));
 }
 void MainWindow::addTrack(bool visual, bool async) {

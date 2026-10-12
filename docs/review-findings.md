@@ -52,11 +52,11 @@ Status: `open`, `fixed`, `wontfix` (with reason), `deferred`.
 | U12 | Low | open | **Timeline editing basics are missing.** Copy/paste, duplicate, split at playhead, frame nudge with the arrow keys, draggable markers, Ctrl+wheel zoom anchored at the cursor, fit-to-window, next/previous cue keys, drag-and-drop from Finder/Explorer, and linked video+audio clips. |
 | U13 | Low | fixed | **Zoom jumps.** Zoom keeps the pixel offset instead of anchoring at the playhead or cursor; ruler labels crowd at low zoom. |
 | U14 | Low | open | **Mixed units.** The inspector uses decimal seconds; the clock uses timecode. |
-| U15 | Low | open | **Lists rebuild on every change.** Media and Cues lose their scroll position; the cue selected on the timeline is not highlighted. |
-| U16 | Low | open | **Delete track confirmation is vague.** The prompt does not name the track, and it deletes the current track even while a clip is selected. |
-| U17 | Low | open | **Accessibility gaps.** Buttons are `Qt::NoFocus`; the timeline has no keyboard or accessibility support; hints use 10 px text. The stylesheet requests an uninstalled "Inter" font while `main.cpp` sets Arial. |
-| U18 | Low | open | **MIDI editor: velocity 0.** A Note On with velocity 0 loads as "Play a note" but its summary says "Stop" (`MidiMessageEditor.cpp:37,125`). |
-| U19 | Low | open | **Duplicate cue names.** New cues are named "Hold N" from the current count, so names repeat after deletions. |
+| U15 | Low | fixed | **Lists rebuild on every change.** Media and Cues lose their scroll position; the cue selected on the timeline is not highlighted. |
+| U16 | Low | fixed | **Delete track confirmation is vague.** The prompt does not name the track, and it deletes the current track even while a clip is selected. |
+| U17 | Low | partly fixed (Tab-reachable buttons, no missing font; timeline keyboard/accessibility support open) | **Accessibility gaps.** Buttons are `Qt::NoFocus`; the timeline has no keyboard or accessibility support; hints use 10 px text. The stylesheet requests an uninstalled "Inter" font while `main.cpp` sets Arial. |
+| U18 | Low | fixed | **MIDI editor: velocity 0.** A Note On with velocity 0 loads as "Play a note" but its summary says "Stop" (`MidiMessageEditor.cpp:37,125`). |
+| U19 | Low | fixed | **Duplicate cue names.** New cues are named "Hold N" from the current count, so names repeat after deletions. |
 | U20 | Low | fixed | **Track rows are tall.** 76 px track rows show only four of the demo's six tracks at 960 px window height. |
 
 ## Persistence and packaging

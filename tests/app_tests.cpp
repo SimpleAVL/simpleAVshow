@@ -299,6 +299,18 @@ private slots:
         QVERIFY(device.running()); QVERIFY(device.callbacks() > before); QVERIFY(device.lastError().isEmpty());
         device.close(); QVERIFY(!device.running());
     }
+    void noteOffAsZeroVelocityKeepsItsBytesAndCueNamesStayUnique() {
+        MidiMessageEditor editor; std::vector<unsigned char> bytes; QString error;
+        editor.setMessage({0x91, 60, 0}); QVERIFY(editor.message(bytes, error));
+        QVERIFY(bytes == std::vector<unsigned char>({0x91, 60, 0})); QVERIFY(midiSummary(bytes).startsWith("Stop"));
+        MainWindow window; window.show(); auto& c = window.controller(); QPushButton* hold = nullptr;
+        for (auto* b : window.findChildren<QPushButton*>()) if (b->text() == "+ Hold / MIDI cue") hold = b;
+        QVERIFY(hold); QTest::mouseClick(hold, Qt::LeftButton); c.seek(frames(1)); QTest::mouseClick(hold, Qt::LeftButton);
+        QVERIFY(c.edit([](Project& p) { p.show.markers.erase(p.show.markers.begin()); }));
+        c.seek(frames(2)); QTest::mouseClick(hold, Qt::LeftButton);
+        QCOMPARE(c.project.show.markers[0].name, std::string("Hold 2")); QCOMPARE(c.project.show.markers[1].name, std::string("Hold 3"));
+        c.dirty = false;
+    }
     void quittingDuringShowModeRequiresConfirmation() {
         MainWindow window; window.show(); window.controller().setShowMode(true);
         bool asked = false;
