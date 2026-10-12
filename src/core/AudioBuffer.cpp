@@ -4,36 +4,36 @@ namespace sav {
 AudioBuffer::AudioBuffer(std::shared_ptr<const AudioData> data, Frame offset, bool loop, Frame initial)
     : data_(std::move(data)), offset_(offset), loop_(loop), requested_(initial / blockFrames * blockFrames) {}
 
-void AudioBuffer::release() noexcept {
-    if (current_ < 0) return;
-    slots_[current_].state.store(Ready, std::memory_order_release);
-    current_ = -1;
+void AudioBuffer::release(int& held, int other) noexcept {
+    if (held >= 0 && held != other) slots_[held].state.store(Ready, std::memory_order_release);
+    held = -1;
 }
 void AudioBuffer::request(Frame frame) noexcept {
     const Frame first = frame / blockFrames * blockFrames;
-    if (current_ >= 0 && slots_[current_].first != first) release();
+    if (current_ >= 0 && slots_[current_].first != first) release(current_, tail_);
     requested_.store(first, std::memory_order_release);
 }
 bool AudioBuffer::retarget(Frame frame) noexcept {
     const Frame first = frame / blockFrames * blockFrames;
-    release(); requested_.store(first, std::memory_order_release); failing_ = false;
+    release(tail_, current_); release(current_, tail_);
+    requested_.store(first, std::memory_order_release); failing_ = false;
     return std::any_of(slots_.begin(), slots_.end(), [first](const Slot& slot) { return slot.state.load(std::memory_order_acquire) == Ready && slot.first == first; });
 }
-bool AudioBuffer::sample(Frame frame, float& left, float& right) noexcept {
+bool AudioBuffer::read(int& held, int other, Frame frame, float& left, float& right) noexcept {
     const Frame first = frame / blockFrames * blockFrames;
-    requested_.store(first, std::memory_order_release);
-    if (current_ >= 0 && slots_[current_].first != first) release();
-    if (current_ < 0) {
+    if (held >= 0 && slots_[held].first != first) release(held, other);
+    if (held < 0 && other >= 0 && slots_[other].first == first) held = other;
+    if (held < 0) {
         for (std::size_t i = 0; i < slotCount; ++i) {
             int ready = Ready;
             if (!slots_[i].state.compare_exchange_strong(ready, Reading, std::memory_order_acquire)) continue;
-            if (slots_[i].first == first) { current_ = static_cast<int>(i); break; }
+            if (slots_[i].first == first) { held = static_cast<int>(i); break; }
             slots_[i].state.store(Ready, std::memory_order_release);
         }
     }
-    if (current_ < 0) return false;
+    if (held < 0) return false;
     const auto index = static_cast<std::size_t>(frame - first) * 2;
-    left = slots_[current_].samples[index]; right = slots_[current_].samples[index + 1];
+    left = slots_[held].samples[index]; right = slots_[held].samples[index + 1];
     return true;
 }
 
