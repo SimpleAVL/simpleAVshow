@@ -226,6 +226,17 @@ private slots:
         });
         window.controller().dirty = false; QVERIFY(window.close());
     }
+    void videoErrorsNeverStopPlayback() {
+        Controller c; auto project = newProject();
+        MediaAsset video; video.id = "broken"; video.name = "Broken.mov"; video.video = true; video.duration = 10; video.path = "/nonexistent/broken.mov";
+        project.assets.insert(video.id, video);
+        Clip clip; clip.id = "v"; clip.assetId = "broken"; clip.track = 0; clip.duration = frames(10); project.show.clips.push_back(clip);
+        c.replace(project); QVERIFY(c.transport.command({Action::Play})); c.transport.render(nullptr, 1, 0);
+        QTRY_VERIFY_WITH_TIMEOUT((c.compose(), c.status.contains("Video error in Broken.mov")), 5000);
+        c.transport.render(nullptr, 1, 0); QCOMPARE(c.transport.state(), State::Playing); QCOMPARE(c.playbackProblem, c.status);
+        c.report("Later message"); c.compose(); QCOMPARE(c.status, QString("Later message"));
+        c.stopAll();
+    }
     void onlyTimelineVideosCanBlockPlayback() {
         Controller c; auto project = newProject();
         MediaAsset unused; unused.id = "unused"; unused.name = "Unused"; unused.video = true; unused.duration = 1; unused.path = "/nonexistent/unused.mov";

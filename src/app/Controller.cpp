@@ -298,6 +298,7 @@ QImage Controller::compose() {
                     if (c.loop) time = seconds(c.offset) + std::fmod(seconds(local), std::max(.001, a.duration - seconds(c.offset)));
                     auto it = videos_.find(c.id);
                     if (it != videos_.end()) {
+                        it->second->setLoop(c.loop ? seconds(c.offset) : -1, a.duration);
                         source = it->second->imageAt(std::min(time, std::max(0., a.duration - 1. / a.fps)));
                         // A failed reader freezes its picture; audio and cues continue.
                         const QString error = it->second->error();

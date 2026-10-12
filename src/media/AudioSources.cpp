@@ -151,7 +151,8 @@ QString audioCacheDirectory() {
 
 AudioCache::AudioCache(const QString& source) : source_(source), sourceHash_(fileHash(source)) {
     // Content identity also survives moved media and fresh package extraction paths.
-    const auto revision = QByteArray("SAVPCM01:") + QByteArray::number(avformat_version()) + ':' +
+    // Bump the revision when decoding changes so stale caches are rebuilt (02: one-channel input is centre mono).
+    const auto revision = QByteArray("SAVPCM02:") + QByteArray::number(avformat_version()) + ':' +
         QByteArray::number(avcodec_version()) + ':' + QByteArray::number(swresample_version());
     const auto key = QString::fromLatin1(QCryptographicHash::hash(revision + sourceHash_, QCryptographicHash::Sha256).toHex());
     const QDir directory(audioCacheDirectory());
