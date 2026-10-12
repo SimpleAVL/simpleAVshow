@@ -29,6 +29,7 @@
 #include <QScreen>
 #include <QScrollArea>
 #include <QShortcut>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
 #include <QSplitter>
@@ -197,9 +198,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* snap = button("Snap", toolLayout); snap->setCheckable(true); snap->setChecked(true);
     toolLayout->addStretch(); toolLayout->addWidget(new QLabel("Zoom"));
     auto* zoom = new QSlider(Qt::Horizontal); zoom->setRange(4, 160); zoom->setValue(22); zoom->setFixedWidth(130); toolLayout->addWidget(zoom);
+    auto* fit = button("Fit", toolLayout); fit->setToolTip("Fit the whole show into the timeline (Ctrl+wheel zooms at the cursor)");
+    auto* follow = button("Follow", toolLayout); follow->setCheckable(true); follow->setChecked(true); follow->setToolTip("Keep the playhead in view while playing");
     lowerLayout->addWidget(tools);
     timeline_ = new Timeline(c_); lowerLayout->addWidget(timeline_, 1); split->addWidget(lower); split->setSizes({430, 420});
     connect(zoom, &QSlider::valueChanged, timeline_, &Timeline::setZoom);
+    // Blocking keeps a fitted zoom exact instead of re-applying the slider's rounded value.
+    connect(timeline_, &Timeline::zoomChanged, zoom, [zoom](double value) { QSignalBlocker block(zoom); zoom->setValue(qRound(value)); });
+    connect(fit, &QPushButton::clicked, timeline_, &Timeline::zoomToFit);
+    connect(follow, &QPushButton::toggled, this, [this](bool on) { timeline_->follow = on; });
     connect(snap, &QPushButton::clicked, this, [this](bool checked) { timeline_->snapping = checked; });
     connect(timeline_, &Timeline::selectionChanged, this, &MainWindow::updateInspector);
     connect(timeline_, &Timeline::assetDropped, this, &MainWindow::placeAsset);
