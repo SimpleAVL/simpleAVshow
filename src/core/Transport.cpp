@@ -7,6 +7,22 @@
 #include <unordered_map>
 
 namespace sav {
+namespace {
+// Envelope::at with a cached segment: key is the first keyframe after time. Playback moves
+// forward, so the cached or following segment usually matches without a binary search.
+double level(const Envelope& envelope, Frame time, double fallback, std::size_t& key) noexcept {
+    const auto& p = envelope.points;
+    if (p.empty()) return fallback;
+    if (time <= p.front().time) return p.front().value;
+    const auto holds = [&](std::size_t k) { return k > 0 && k <= p.size() && p[k - 1].time <= time && (k == p.size() || time < p[k].time); };
+    if (!holds(key) && !holds(++key)) key = static_cast<std::size_t>(std::upper_bound(p.begin(), p.end(), time,
+        [](Frame t, const Keyframe& k) { return t < k.time; }) - p.begin());
+    if (key == p.size()) return p.back().value;
+    const auto& a = p[key - 1]; const auto& b = p[key];
+    const double t = static_cast<double>(time - a.time) / (b.time - a.time);
+    return a.value + t * (b.value - a.value);
+}
+}
 Transport::~Transport() { stopAudioWorker(); }
 void Transport::stopAudioWorker() {
     audioStop_.store(true);
@@ -187,7 +203,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             if (track.async && voice.state == VoiceState::Running) ++voice.source;
             if (!voice.audible) continue;
             const Frame local = position_ - clip.start;
-            const double gain = track.gain * clip.volume.at(local, clip.gain);
+            const double gain = track.gain * level(clip.volume, local, clip.gain, voice.volumeKey);
             if (!output) continue;
             if ((track.left >= 0) != (track.right >= 0)) {
                 // One connected leg carries the whole source at full level; pan has no meaning there.
@@ -196,13 +212,16 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 if (static_cast<unsigned>(leg) < channels) output[static_cast<std::size_t>(f) * channels + leg] += static_cast<float>(mono * gain);
                 continue;
             }
-            const double pan = std::clamp(track.pan + clip.balance.at(local, clip.pan), -1., 1.);
-            const double leftGain = clip.audio->mono ? std::cos((pan + 1.) * 0.7853981633974483) : (pan > 0 ? 1. - pan : 1.);
-            const double rightGain = clip.audio->mono ? std::sin((pan + 1.) * 0.7853981633974483) : (pan < 0 ? 1. + pan : 1.);
+            const double pan = std::clamp(track.pan + level(clip.balance, local, clip.pan, voice.balanceKey), -1., 1.);
+            if (pan != voice.pan) {
+                voice.pan = pan;
+                voice.leftGain = clip.audio->mono ? std::cos((pan + 1.) * 0.7853981633974483) : (pan > 0 ? 1. - pan : 1.);
+                voice.rightGain = clip.audio->mono ? std::sin((pan + 1.) * 0.7853981633974483) : (pan < 0 ? 1. + pan : 1.);
+            }
             if (track.left >= 0 && static_cast<unsigned>(track.left) < channels)
-                output[static_cast<std::size_t>(f) * channels + track.left] += static_cast<float>(voice.left * gain * leftGain);
+                output[static_cast<std::size_t>(f) * channels + track.left] += static_cast<float>(voice.left * gain * voice.leftGain);
             if (track.right >= 0 && static_cast<unsigned>(track.right) < channels)
-                output[static_cast<std::size_t>(f) * channels + track.right] += static_cast<float>(voice.right * gain * rightGain);
+                output[static_cast<std::size_t>(f) * channels + track.right] += static_cast<float>(voice.right * gain * voice.rightGain);
         }
         if (output) for (unsigned c = 0; c < channels; ++c) {
             float& sample = output[static_cast<std::size_t>(f) * channels + c];

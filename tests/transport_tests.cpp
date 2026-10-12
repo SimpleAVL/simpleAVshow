@@ -304,6 +304,25 @@ int main() {
             near(out[0], 0, "NaN never reaches the device"); expect(t.clipped(), "NaN latches the overload indicator");
             near(out[2], .5, "following samples mix normally");
         }},
+        {"cached envelope segments and pan gains match per-sample evaluation", [] {
+            auto p = show(); p->duration = 4000; p->clips[0].duration = 4000; p->clips[0].loop = true;
+            auto source = audio({.5f}); source->mono = true; p->clips[0].audio = source;
+            p->clips[0].volume.points = {{100, 0}, {1100, 1}, {1101, .2}, {1150, .25}, {3000, .75}};
+            p->clips[0].balance.points = {{0, -1}, {2000, 1}, {2500, -.5}};
+            const auto expected = [&](Frame local) {
+                const double pan = std::clamp(p->clips[0].balance.at(local, 0), -1., 1.), gain = .5 * p->clips[0].volume.at(local, 1);
+                return std::pair{gain * std::cos((pan + 1.) * 0.7853981633974483), gain * std::sin((pan + 1.) * 0.7853981633974483)};
+            };
+            const auto check = [&](const std::vector<float>& out, Frame from, Frame count) {
+                for (Frame f = 0; f < count; ++f) {
+                    const auto [left, right] = expected(from + f);
+                    expect(std::abs(out[f * 2] - left) < 1e-4 && std::abs(out[f * 2 + 1] - right) < 1e-4, "automation matches Envelope::at");
+                }
+            };
+            Transport t; t.configure(p); play(t); std::vector<float> out(4000 * 2);
+            checkedRender(t, out.data(), 3990, 2); check(out, 0, 3990);
+            t.command({Action::Seek, 1090}); checkedRender(t, out.data(), 200, 2); check(out, 1090, 200);
+        }},
         {"envelope interpolation follows exact frame position", [] {
             Envelope e{{{10, .2}, {20, .8}}}; near(e.at(0, 1), .2, "before first key"); near(e.at(15, 1), .5, "linear middle"); near(e.at(30, 1), .8, "after last key");
         }}

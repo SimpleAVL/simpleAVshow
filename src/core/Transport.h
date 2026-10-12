@@ -35,7 +35,11 @@ public:
     std::uint64_t epoch() const noexcept { return epoch_.load(std::memory_order_acquire); }
 private:
     enum class VoiceState { Dormant, Running, Finished };
-    struct Voice { VoiceState state = VoiceState::Dormant; Frame source = 0; float left = 0, right = 0; bool audible = false; };
+    // Envelope keys cache each automation segment; pan gains are recomputed only when pan changes.
+    struct Voice {
+        VoiceState state = VoiceState::Dormant; Frame source = 0; float left = 0, right = 0; bool audible = false;
+        std::size_t volumeKey = 0, balanceKey = 0; double pan = 2, leftGain = 1, rightGain = 1;
+    };
     std::shared_ptr<const Show> show_;
     std::vector<Voice> voices_;
     std::vector<std::size_t> starts_, markers_, active_;
