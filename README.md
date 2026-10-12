@@ -6,9 +6,11 @@ A native timeline editor and playback engine for stage performances. Windows 11 
 
 This is a **development prototype**. CI builds and tests the app on macOS, Windows, and Linux, then launches the packaged app with a demo screenshot as a smoke test. Physical channel routing, MIDI equipment, and full rehearsal runs still need validation on the show hardware.
 
-Full builds and packages run on pushes to `main` or manual workflow runs. Pull requests targeting `main` run playback-engine tests on all three platforms and the Linux media/UI tests, without packaging. Other branch pushes do not trigger CI, and newer runs cancel superseded runs on the same branch or pull request.
+Full builds and packages run on pushes to `main` or manual workflow runs. Pull requests targeting `main` run playback-engine tests on all three platforms, a ThreadSanitizer build of those tests on Linux, and the Linux media/UI tests, without packaging. Other branch pushes do not trigger CI. A newer push to a pull request cancels its superseded run; runs on `main` are never cancelled.
 
-All app builds wait for the core tests on every platform. A core failure cancels the remaining core matrix jobs and skips the app builds. The final `CI` check fails if any required build/test job fails, is cancelled, or is unexpectedly skipped; macOS/Windows app jobs are intentionally skipped on pull requests.
+All app builds wait for the core tests on every platform. A core failure cancels the remaining core matrix jobs and skips the app builds. The final `CI` check fails if any required build/test job (including ThreadSanitizer) fails, is cancelled, or is unexpectedly skipped; macOS/Windows app jobs are intentionally skipped on pull requests.
+
+Workflow actions are pinned to commit SHAs, runners to explicit images, RtAudio to its 6.0.1 commit, and the linuxdeploy tools to tagged releases verified by SHA-256.
 
 ### Merge requirements
 
@@ -141,7 +143,7 @@ cmake --build build-core
 ctest --test-dir build-core --output-on-failure
 ```
 
-They cover hold boundaries, async looping/finish, pause/resume, seeks, MIDI timing, routing isolation, pan, clipping, Stop All, and project end, plus large timeline scheduling, disk-buffer handoffs, cache failures, and callback allocation/I/O checks. The Qt suite adds decoding/resampling, direct PCM WAV conversion/loops/seeks, changed-source detection, persistent cache reuse/content invalidation/corruption recovery/concurrent imports, an audio source expanding beyond 1 GiB with bounded resident PCM, embedded A/V offsets, video seeks, large project round-trips, save/reload/moved media, portable package export/open/save-as and archive validation, malformed projects, undo/redo, Show-mode UI checks, device selection without fallback, MIDI editor byte round trips, raw-message validation, and cue editing. FFmpeg CLI generates fixtures; media tests explicitly skip when it is unavailable. Clang/GCC builds support `-DSAV_SANITIZE=ON` for address/undefined-behavior checking.
+They cover hold boundaries, async looping/finish, pause/resume, seeks, MIDI timing, routing isolation, pan, clipping, Stop All, and project end, plus large timeline scheduling, disk-buffer handoffs, cache failures, and callback allocation/I/O checks. The Qt suite adds decoding/resampling, direct PCM WAV conversion/loops/seeks, changed-source detection, persistent cache reuse/content invalidation/corruption recovery/concurrent imports, an audio source expanding beyond 1 GiB with bounded resident PCM, embedded A/V offsets, video seeks, large project round-trips, save/reload/moved media, portable package export/open/save-as and archive validation, malformed projects, undo/redo, Show-mode UI checks, device selection without fallback, MIDI editor byte round trips, raw-message validation, and cue editing. FFmpeg CLI generates fixtures; media tests explicitly skip when it is unavailable. Clang/GCC builds support `-DSAV_SANITIZE=ON` for address/undefined-behavior checking, or `-DSAV_TSAN=ON` for ThreadSanitizer (the two cannot be combined).
 
 Visual QA:
 
