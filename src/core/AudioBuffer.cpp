@@ -14,6 +14,11 @@ void AudioBuffer::request(Frame frame) noexcept {
     if (current_ >= 0 && slots_[current_].first != first) release();
     requested_.store(first, std::memory_order_release);
 }
+bool AudioBuffer::retarget(Frame frame) noexcept {
+    const Frame first = frame / blockFrames * blockFrames;
+    release(); requested_.store(first, std::memory_order_release); failing_ = false;
+    return std::any_of(slots_.begin(), slots_.end(), [first](const Slot& slot) { return slot.state.load(std::memory_order_acquire) == Ready && slot.first == first; });
+}
 bool AudioBuffer::sample(Frame frame, float& left, float& right) noexcept {
     const Frame first = frame / blockFrames * blockFrames;
     requested_.store(first, std::memory_order_release);

@@ -244,6 +244,21 @@ int main() {
             near(out[(1000 - 513) * 2], PatternStorage::value(0), "replay starts at the source-in frame");
             expect(!storage->callbackReads.load(), "retargeting never reads disk on callback");
         }},
+        {"re-arming keeps resident read-ahead for unchanged disk clips", [] {
+            auto storage = std::make_shared<PatternStorage>(frames(60));
+            auto p = show(false); p->duration = frames(120); p->clips[0].duration = storage->length(); p->clips[0].audio = diskAudio(storage);
+            Transport t; t.configure(p); const auto reads = storage->reads.load(); expect(reads > 0, "first arm prebuffers");
+            auto edited = std::make_shared<Show>(*p); edited->markers.push_back({"m", "Cue", frames(90), true});
+            t.configure(edited); expect(storage->reads.load() == reads, "unchanged clip performs no new reads");
+            play(t); std::vector<float> out(64 * 2); checkedRender(t, out.data(), 64, 2);
+            for (int i = 0; i < 64; ++i) near(out[i * 2], PatternStorage::value(i), "reused read-ahead plays the entry");
+            expect(t.bufferWaits() == 0 && !storage->callbackReads.load(), "reuse never misses");
+            edited = std::make_shared<Show>(*edited); edited->clips[0].offset = 10; t.configure(edited);
+            expect(storage->reads.load() > reads, "changed offset prebuffers again");
+            play(t); checkedRender(t, out.data(), 64, 2); near(out[0], PatternStorage::value(10), "new offset plays");
+            const auto moved = storage->reads.load(); t.configure(edited, frames(30));
+            expect(storage->reads.load() > moved, "a non-resident entry prebuffers"); expect(t.bufferWaits() == 0, "re-arm resets wait count");
+        }},
         {"transient read failures retry, then recover without latching", [] {
             auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));
             auto p = show(false); p->duration = storage->length(); p->clips[0].duration = p->duration; p->clips[0].audio = diskAudio(storage);

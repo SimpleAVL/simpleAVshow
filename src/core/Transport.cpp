@@ -3,6 +3,8 @@
 #include <cmath>
 #include <numeric>
 #include <stdexcept>
+#include <string_view>
+#include <unordered_map>
 
 namespace sav {
 Transport::~Transport() { stopAudioWorker(); }
@@ -35,6 +37,10 @@ void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
     if (!show || show->duration <= 0 || show->duration > maxFrame) throw std::invalid_argument("Invalid show duration");
     stopAudioWorker();
     audioReadFailed_.store(false);
+    // Edits re-arm often: unchanged disk clips keep their read-ahead and only retarget their entry.
+    std::unordered_map<std::string_view, std::size_t> previous;
+    if (show_) for (std::size_t i = 0; i < buffers_.size(); ++i) if (buffers_[i] && !buffers_[i]->failed()) previous.emplace(show_->clips[i].id, i);
+    const auto retired = std::move(show_); auto reusable = std::move(buffers_);
     show_ = std::move(show);
     commands_.clear(); midi_.reset(std::max(std::size_t{1024}, show_->markers.size()));
     voices_.assign(show_->clips.size(), {});
@@ -46,8 +52,11 @@ void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
         if (!c.audio || c.track < 0 || static_cast<std::size_t>(c.track) >= show_->tracks.size() || show_->tracks[c.track].visual) continue;
         starts_.push_back(i);
         if (c.audio->storage) {
-            buffers_[i] = std::make_unique<AudioBuffer>(c.audio, c.offset, c.loop, entry(i, position_));
-            buffers_[i]->prebuffer(); // Before opening the device.
+            const Frame from = entry(i, position_); bool resident = false;
+            if (const auto found = previous.find(c.id); found != previous.end() && reusable[found->second] && reusable[found->second]->matches(c.audio.get(), c.offset, c.loop)) {
+                buffers_[i] = std::move(reusable[found->second]); resident = buffers_[i]->retarget(from);
+            } else buffers_[i] = std::make_unique<AudioBuffer>(c.audio, c.offset, c.loop, from);
+            if (!resident) buffers_[i]->prebuffer(); // Before opening the device.
             if (buffers_[i]->failed()) audioReadFailed_.store(true);
         }
     }

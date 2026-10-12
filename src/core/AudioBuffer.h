@@ -21,6 +21,10 @@ public:
     // Pre-roll while the callback is closed; any failure latches.
     void prebuffer();
     bool failed() const noexcept { return failed_.load(std::memory_order_acquire); }
+    // While the callback and worker are stopped: read ahead from a new entry, keeping resident
+    // blocks. Returns whether the entry block is already resident.
+    bool retarget(Frame frame) noexcept;
+    bool matches(const AudioData* data, Frame offset, bool loop) const noexcept { return data_.get() == data && offset_ == offset && loop_ == loop; }
 private:
     enum Ownership { Empty, Writing, Ready, Reading };
     struct Slot {
