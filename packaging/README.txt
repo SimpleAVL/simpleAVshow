@@ -17,6 +17,9 @@ Choose a MIDI destination once if your show sends MIDI cues; Play reconnects it.
 Missing remembered devices block playback. Use the track inspector routing
 presets for speakers, mono feeds, or silence. Guide and Click start silent.
 Use --demo to open the demonstration, or create a fresh project in the editor.
+File > Export package collects the show and all media into a portable .savpack.
+Open it on another computer, then Save to keep an editable project/media folder.
+Choose audio/MIDI outputs and the program display on the receiving computer.
 
 This is a development prototype. Automated transport, media, persistence, and
 UI tests pass, but ASIO routing, MIDI equipment, and full shows still require
@@ -30,6 +33,7 @@ Qt: https://code.qt.io/cgit/qt/qtbase.git/ (LGPLv3 / GPL options)
 FFmpeg: https://ffmpeg.org/download.html (LGPL/GPL, according to build options)
 RtAudio: https://github.com/thestk/rtaudio (MIT, additional backend notices)
 RtMidi: https://github.com/thestk/rtmidi (MIT)
+libarchive: https://www.libarchive.org (BSD, additional dependency notices)
 Linux libraries: distribution source packages corresponding to licenses/.
 The Windows manifest, ffmpeg-windows.json, and CI workflow record versions and
 build recipes. Windows uses BtbN's LGPL shared FFmpeg SDK:

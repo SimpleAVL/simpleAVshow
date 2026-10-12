@@ -29,6 +29,7 @@ private:
     QLabel *clock_ = nullptr, *state_ = nullptr, *health_ = nullptr, *hint_ = nullptr, *projectLabel_ = nullptr;
     QPushButton *play_ = nullptr, *showButton_ = nullptr, *outputsButton_ = nullptr, *openOutputButton_ = nullptr;
     QAction* outputsAction_ = nullptr;
+    QAction* exportPackageAction_ = nullptr;
     QStackedWidget* inspector_ = nullptr;
     QScrollArea* inspectorScroll_ = nullptr;
     QLineEdit *trackName_ = nullptr, *markerName_ = nullptr;
@@ -65,6 +66,8 @@ private:
     void outputSettings();
     void openOutput(int screen);
     void save(bool as = false);
+    void exportPackage();
+    void writePackage(const QString& path);
     bool checkDiscard();
     Clip* selectedClip();
     Marker* selectedMarker();

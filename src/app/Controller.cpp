@@ -1,10 +1,8 @@
 #include "app/Controller.h"
-#include <QDataStream>
 #include <QDir>
 #include <QFileInfo>
 #include <QMetaObject>
 #include <QPainter>
-#include <QSaveFile>
 #include <chrono>
 #include <set>
 
@@ -305,28 +303,11 @@ void Controller::save(QString target) {
     if (!canEdit()) return;
     try {
         Project candidate = project;
-        QDir mediaDir(QFileInfo(target).absolutePath() + "/" + QFileInfo(target).completeBaseName() + ".media");
-        for (auto& a : candidate.assets) if (a.path.isEmpty()) {
-            if (!QDir().mkpath(mediaDir.absolutePath())) throw std::runtime_error("Cannot create generated media directory");
-            a.path = mediaDir.filePath(newId() + (a.image ? ".png" : ".wav"));
-            if (a.image) {
-                QSaveFile image(a.path);
-                if (!image.open(QIODevice::WriteOnly) || !a.still.save(&image, "PNG") || !image.commit()) throw std::runtime_error("Cannot save generated image");
-            } else if (a.audio) {
-                QSaveFile wav(a.path);
-                if (!wav.open(QIODevice::WriteOnly)) throw std::runtime_error("Cannot save generated audio");
-                QDataStream out(&wav); out.setByteOrder(QDataStream::LittleEndian);
-                const quint16 channels = a.audio->mono ? 1 : 2;
-                const quint32 bytes = static_cast<quint32>(a.audio->length() * channels * 2);
-                out.writeRawData("RIFF", 4); out << quint32(bytes + 36); out.writeRawData("WAVEfmt ", 8);
-                out << quint32(16) << quint16(1) << channels << quint32(sampleRate) << quint32(sampleRate * channels * 2) << quint16(channels * 2) << quint16(16);
-                out.writeRawData("data", 4); out << bytes;
-                for (std::size_t i = 0; i < a.audio->samples.size(); i += a.audio->mono ? 2 : 1)
-                    out << static_cast<qint16>(std::clamp(a.audio->samples[i], -1.f, 1.f) * 32767);
-                if (out.status() != QDataStream::Ok || !wav.commit()) throw std::runtime_error("Cannot finish generated audio file");
-            } else throw std::runtime_error("Asset has no source file");
-        }
-        writeProject(candidate, target); project.assets = std::move(candidate.assets); path = target; dirty = false;
+        const QString directory = QFileInfo(target).absolutePath() + "/" + QFileInfo(target).completeBaseName() + ".media";
+        const auto sourceDirectory = project.packageDirectory;
+        materializeProjectMedia(candidate, directory);
+        writeProject(candidate, target); project.assets = std::move(candidate.assets); project.packageDirectory.reset(); path = target; dirty = false;
+        if (sourceDirectory) arm(position());
         report("Saved " + QFileInfo(target).fileName()); emit changed();
     } catch (const std::exception& e) { report("Save failed: " + QString::fromUtf8(e.what())); }
 }

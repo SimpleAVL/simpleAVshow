@@ -22,10 +22,58 @@
 #include <QLineEdit>
 #include <QSettings>
 #include <QCheckBox>
+#include <QFileDialog>
+#include <archive.h>
+#include <archive_entry.h>
 #include <limits>
 
 using namespace sav;
 namespace {
+struct ZipEntry { QString name; QByteArray data; bool symlink = false; };
+QByteArray zipBytes(const std::vector<ZipEntry>& entries, bool zip64 = false, bool compressed = false) {
+    qsizetype capacity = 4096;
+    for (const auto& e : entries) capacity += e.data.size() + e.name.size() * 4 + 1024;
+    QByteArray bytes(capacity, '\0'); size_t used = 0;
+    std::unique_ptr<archive, decltype(&archive_write_free)> writer(archive_write_new(), archive_write_free);
+    auto check = [&](int code) { if (code != ARCHIVE_OK) throw std::runtime_error(archive_error_string(writer.get())); };
+    check(archive_write_set_format_zip(writer.get()));
+    if (!compressed) check(archive_write_zip_set_compression_store(writer.get()));
+    if (zip64) check(archive_write_set_options(writer.get(), "zip:zip64"));
+    check(archive_write_open_memory(writer.get(), bytes.data(), static_cast<size_t>(bytes.size()), &used));
+    for (const auto& value : entries) {
+        std::unique_ptr<archive_entry, decltype(&archive_entry_free)> entry(archive_entry_new(), archive_entry_free);
+        archive_entry_set_pathname(entry.get(), value.name.toUtf8().constData());
+        archive_entry_set_filetype(entry.get(), value.symlink ? AE_IFLNK : AE_IFREG);
+        archive_entry_set_perm(entry.get(), 0644);
+        if (value.symlink) archive_entry_set_symlink(entry.get(), "../../outside");
+        archive_entry_set_size(entry.get(), value.symlink ? 0 : value.data.size());
+        check(archive_write_header(writer.get(), entry.get()));
+        if (!value.symlink && archive_write_data(writer.get(), value.data.constData(), value.data.size()) != value.data.size())
+            throw std::runtime_error("Could not write ZIP fixture");
+        check(archive_write_finish_entry(writer.get()));
+    }
+    check(archive_write_close(writer.get())); bytes.resize(static_cast<qsizetype>(used)); return bytes;
+}
+QMap<QString, QByteArray> zipEntries(const QString& path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) throw std::runtime_error("Could not open ZIP fixture");
+    const auto bytes = file.readAll();
+    std::unique_ptr<archive, decltype(&archive_read_free)> reader(archive_read_new(), archive_read_free);
+    auto check = [&](int code) { if (code != ARCHIVE_OK) throw std::runtime_error(archive_error_string(reader.get())); };
+    check(archive_read_support_format_zip(reader.get()));
+    check(archive_read_open_memory(reader.get(), bytes.constData(), static_cast<size_t>(bytes.size())));
+    QMap<QString, QByteArray> entries; archive_entry* entry = nullptr;
+    for (;;) {
+        const auto result = archive_read_next_header(reader.get(), &entry);
+        if (result == ARCHIVE_EOF) break;
+        check(result);
+        QByteArray data(static_cast<qsizetype>(archive_entry_size(entry)), '\0');
+        const auto count = archive_read_data(reader.get(), data.data(), static_cast<size_t>(data.size()));
+        if (count != data.size()) throw std::runtime_error("Incomplete ZIP fixture");
+        entries.insert(QString::fromUtf8(archive_entry_pathname(entry)), data);
+    }
+    return entries;
+}
 float sampleAt(const AudioData& audio, Frame frame) {
     if (!audio.storage) return audio.samples[frame * 2];
     float stereo[2]; audio.storage->read(frame, stereo, 1); return stereo[0];
@@ -207,6 +255,175 @@ private slots:
         QVERIFY(QDir().rename(dir.path(), moved));
         auto restored = readProject(moved + "/opening.savshow"); QCOMPARE(restored.show.markers.size(), std::size_t{3});
         QVERIFY(QDir(moved).removeRecursively());
+    }
+    void packageCollectsMediaAndSurvivesMissingOriginals() {
+        QTemporaryDir originals, destination;
+        Controller c; c.replace(demoProject()); c.save(originals.filePath("opening.savshow"));
+        QVERIFY2(!c.path.isEmpty(), qPrintable(c.status));
+        // Unused library items, same-name files, Unicode paths, and duplicate source references.
+        for (const auto& folder : {QString::fromUtf8("Bühne 一"), QString("second")}) {
+            QVERIFY(QDir().mkpath(originals.filePath(folder)));
+            const auto source = originals.filePath(folder + "/picture.png");
+            QImage image(4, 4, QImage::Format_RGB32); image.fill(folder == "second" ? Qt::blue : Qt::red);
+            QVERIFY(image.save(source)); auto asset = loadMedia(source); c.project.assets.insert(asset.id, asset);
+            if (folder == "second") { asset.id = newId(); c.project.assets.insert(asset.id, asset); }
+        }
+        c.dirty = true;
+        const Project expected = c.project;
+        const auto originalPath = c.path;
+        const auto package = destination.filePath(QString::fromUtf8("Première 一.savpack"));
+        writeProjectPackage(c.project, package);
+        QCOMPARE(c.path, originalPath); QVERIFY(c.dirty);
+        for (const auto& asset : c.project.assets) QCOMPARE(asset.path, expected.assets[asset.id].path);
+        const auto entries = zipEntries(package);
+        QCOMPARE(entries.size(), c.project.assets.size()); // Manifest + unique media (one alias).
+        const auto root = QJsonDocument::fromJson(entries["project.savshow"]).object();
+        QCOMPARE(root["version"].toInt(), 1);
+        for (const auto& value : root["assets"].toArray()) {
+            const auto asset = value.toObject(); const auto source = asset["path"].toString();
+            QVERIFY(source.startsWith("media/")); QVERIFY(!source.contains("..")); QVERIFY(entries.contains(source));
+            QFile original(expected.assets[asset["id"].toString()].path); QVERIFY(original.open(QIODevice::ReadOnly));
+            QCOMPARE(entries[source], original.readAll());
+        }
+        QVERIFY(QDir(originals.path()).removeRecursively());
+        const auto moved = destination.filePath("moved.SAVPACK"); QVERIFY(QFile::rename(package, moved));
+        auto loaded = readProject(moved);
+        QCOMPARE(loaded.assets.size(), expected.assets.size()); QCOMPARE(loaded.show.clips.size(), expected.show.clips.size());
+        QCOMPARE(loaded.show.markers.size(), expected.show.markers.size()); QCOMPARE(loaded.title, expected.title);
+        QVERIFY(loaded.packageDirectory);
+        for (const auto& asset : loaded.assets) {
+            QVERIFY(QFileInfo::exists(asset.path)); QCOMPARE(asset.name, expected.assets[asset.id].name);
+            if (asset.audio) QCOMPARE(asset.audio->length(), expected.assets[asset.id].audio->length());
+        }
+        const auto temporary = loaded.packageDirectory->path();
+        { Project snapshot = loaded; loaded = newProject(); QVERIFY(QFileInfo::exists(temporary)); }
+        QVERIFY(!QFileInfo::exists(temporary));
+    }
+    void generatedPackageCanBeOpenedEditedAndSavedAsProject() {
+        QTemporaryDir dir;
+        Project generated = demoProject(); const auto package = dir.filePath("demo.savpack");
+        writeProjectPackage(generated, package);
+        for (const auto& asset : generated.assets) QVERIFY(asset.path.isEmpty());
+        MainWindow window; window.openPath(package); QTRY_VERIFY_WITH_TIMEOUT(!window.controller().busy, 15000);
+        auto& c = window.controller();
+        QCOMPARE(c.project.title, generated.title); QVERIFY(c.path.isEmpty()); QVERIFY(c.dirty);
+        QVERIFY(c.project.packageDirectory);
+        const auto temporary = c.project.packageDirectory->path();
+        QVERIFY(c.edit([](Project& p) { p.title = "An edited copy"; }));
+        c.save(dir.filePath("edited.savshow")); QVERIFY2(!c.dirty, qPrintable(c.status));
+        QVERIFY(!c.project.packageDirectory);
+        for (const auto& asset : c.project.assets) {
+            QVERIFY(asset.path.startsWith(dir.filePath("edited.media") + "/")); QVERIFY(QFileInfo::exists(asset.path));
+        }
+        c.undo(); QVERIFY(c.project.packageDirectory); QCOMPARE(c.project.title, generated.title);
+        c.redo(); QCOMPARE(c.project.title, QString("An edited copy")); QVERIFY(QFileInfo::exists(temporary));
+        // Destroy every extracted-source owner, then reopen the saved project and the original package.
+        c.replace(newProject()); QVERIFY(!QFileInfo::exists(temporary));
+        const auto restored = readProject(dir.filePath("edited.savshow")); QCOMPARE(restored.title, QString("An edited copy"));
+        const auto original = readProject(package); QCOMPARE(original.title, generated.title);
+    }
+    void packageExportFailurePreservesDestination() {
+        QTemporaryDir dir; Controller c; c.replace(demoProject()); c.save(dir.filePath("source.savshow"));
+        const auto target = dir.filePath("existing.savpack");
+        QFile file(target); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("previous package"); file.close();
+        const auto media = c.project.assets.first().path; QVERIFY(QFile::remove(media));
+        QVERIFY_THROWS_EXCEPTION(std::runtime_error, writeProjectPackage(c.project, target));
+        QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), QByteArray("previous package")); file.close();
+        QVERIFY(c.project.assets.first().path == media);
+        auto valid = demoProject();
+        const auto missingDirectory = dir.filePath("absent/show.savpack");
+        QVERIFY_THROWS_EXCEPTION(std::runtime_error, writeProjectPackage(valid, missingDirectory));
+        QVERIFY(!QFileInfo::exists(missingDirectory));
+    }
+    void unsafeAndCorruptPackagesAreRejected() {
+        QTemporaryDir dir; const auto path = dir.filePath("bad.savpack");
+        const QByteArray manifest = R"({"assets":[]})";
+        const std::vector<std::vector<ZipEntry>> fixtures = {
+            {{"../outside", "escape"}, {"project.savshow", manifest}},
+            {{"/absolute", "escape"}, {"project.savshow", manifest}},
+            {{"media/../outside", "escape"}, {"project.savshow", manifest}},
+            {{"media\\outside.png", "escape"}, {"project.savshow", manifest}},
+            {{"media/link.png", {}, true}, {"project.savshow", manifest}},
+            {{"project.savshow", manifest}, {"project.savshow", manifest}},
+            {{"media/a.png", "one"}, {"media/A.png", "two"}, {"project.savshow", manifest}},
+            {{"media/a.png", "no manifest"}},
+            {{"project.savshow", R"({"assets":[{"path":"../outside.png"}]})"}},
+            {{"project.savshow", R"({"assets":[{"path":"media/missing.png"}]})"}},
+            {{"project.savshow", "not JSON"}}
+        };
+        auto reject = [&](const QByteArray& bytes) {
+            QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); QCOMPARE(file.write(bytes), bytes.size()); file.close();
+            QVERIFY_THROWS_EXCEPTION(std::runtime_error, readProject(path));
+        };
+        for (const auto& fixture : fixtures) reject(zipBytes(fixture));
+        auto bytes = zipBytes({{"media/a.png", "unique corruption payload"}, {"project.savshow", manifest}});
+        const auto offset = bytes.indexOf("unique corruption payload"); QVERIFY(offset >= 0); bytes[offset] = 'X'; reject(bytes);
+        reject(bytes.left(bytes.size() / 2));
+        reject("not a ZIP");
+        QVERIFY(!QFileInfo::exists(dir.filePath("outside")));
+    }
+    void packageExportActionRespectsEditingLocks() {
+        MainWindow window;
+        auto* action = window.findChild<QAction*>("exportPackageAction"); QVERIFY(action); QVERIFY(action->isEnabled());
+        window.controller().setShowMode(true); QTRY_VERIFY(!action->isEnabled());
+        window.controller().setShowMode(false); QTRY_VERIFY(action->isEnabled());
+        window.controller().busy = true; QTRY_VERIFY(!action->isEnabled());
+        window.controller().busy = false; QTRY_VERIFY(action->isEnabled());
+    }
+    void exportPackageThroughFileMenu() {
+        QTemporaryDir dir; const auto package = dir.filePath("menu-export.savpack");
+        const bool nativeDisabled = QApplication::testAttribute(Qt::AA_DontUseNativeDialogs);
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, true);
+        MainWindow window; auto& c = window.controller(); c.replace(demoProject()); c.dirty = true;
+        bool selected = false;
+        QTimer::singleShot(0, &window, [&] {
+            auto* dialog = qobject_cast<QFileDialog*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            selected = true; dialog->selectFile(dir.filePath("menu-export")); QMetaObject::invokeMethod(dialog, "accept", Qt::QueuedConnection);
+        });
+        window.findChild<QAction*>("exportPackageAction")->trigger();
+        QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, nativeDisabled);
+        QVERIFY(selected); QVERIFY(QFileInfo::exists(package)); QVERIFY(!c.busy); QVERIFY(c.dirty); QVERIFY(c.path.isEmpty());
+        QCOMPARE(c.status, QString("Exported menu-export.savpack"));
+        for (const auto& asset : c.project.assets) QVERIFY(asset.path.isEmpty());
+        const auto loaded = readProject(package); QCOMPARE(loaded.assets.size(), c.project.assets.size());
+    }
+    void zip64AndCompressedPackagesCanBeOpened() {
+        QTemporaryDir dir;
+        writeProject(newProject(), dir.filePath("empty.savshow"));
+        QFile manifest(dir.filePath("empty.savshow")); QVERIFY(manifest.open(QIODevice::ReadOnly));
+        const auto json = manifest.readAll();
+        for (const bool compressed : {false, true}) {
+            const auto bytes = zipBytes({{"project.savshow", json}}, true, compressed);
+            const auto path = dir.filePath("zip64.savpack"); QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly));
+            QCOMPARE(file.write(bytes), bytes.size()); file.close();
+            const auto loaded = readProject(path); QCOMPARE(loaded.title, QString("Untitled show")); QVERIFY(loaded.assets.isEmpty());
+        }
+    }
+    void packagedVideoAndEmbeddedAudioSurviveSaveAs() {
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
+        QTemporaryDir originals, destination; const auto source = originals.filePath("video.mkv");
+        QProcess process; process.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=red:s=320x180:r=24:d=1", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=1", "-c:v", "ffv1", "-c:a", "pcm_s16le", source});
+        QVERIFY(process.waitForFinished(15000)); QCOMPARE(process.exitCode(), 0);
+        Project p = newProject(); p.width = 320; p.height = 240;
+        auto asset = loadMedia(source); QVERIFY(asset.video && asset.audio); p.assets.insert(asset.id, asset);
+        Clip picture; picture.id = newId().toStdString(); picture.assetId = asset.id.toStdString(); picture.track = 0; picture.duration = frames(1);
+        p.show.clips.push_back(picture); Clip audio = picture; audio.id = newId().toStdString(); audio.track = 2; p.show.clips.push_back(audio); bindAudio(p);
+        const auto package = destination.filePath("video.savpack"); writeProjectPackage(p, package);
+        QVERIFY(QDir(originals.path()).removeRecursively());
+        Controller c; c.replace(readProject(package));
+        const auto temporary = c.project.packageDirectory->path();
+        QCOMPARE(c.project.assets.first().audio->length(), frames(1)); QVERIFY(c.project.assets.first().audio->storage);
+        c.seek(frames(.2));
+        QTRY_VERIFY_WITH_TIMEOUT(c.compose().pixelColor(160, 120).red() > 200, 3000);
+        c.save(destination.filePath("video.savshow")); QVERIFY2(!c.path.isEmpty(), qPrintable(c.status));
+        QVERIFY(!QFileInfo::exists(temporary));
+        c.seek(frames(.4));
+        QTRY_VERIFY_WITH_TIMEOUT(c.compose().pixelColor(160, 120).red() > 200, 3000);
+        const auto reloaded = readProject(c.path); QCOMPARE(reloaded.assets.first().audio->length(), frames(1));
+        float peak = 0;
+        for (Frame i = 0; i < frames(.05); ++i) peak = std::max(peak, std::abs(sampleAt(*reloaded.assets.first().audio, i)));
+        QVERIFY(peak > .1);
     }
     void malformedProjectsAreRejected() {
         QTemporaryDir dir; Controller c; c.replace(demoProject()); const QString path = dir.filePath("show.savshow"); c.save(path);

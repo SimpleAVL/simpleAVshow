@@ -41,6 +41,7 @@ Packages include runtime libraries and third-party notices; no SDK or Homebrew i
 - Clip automation for volume, pan, picture X/Y, scale, and opacity; linear keyframes and fade helpers.
 - Native MIDI output ports, including MIDI bridges, with automatic reconnection on Play. A guided cue editor offers note names, named controls, programs, pitch bend, message previews, and test sending. Raw channel/system messages and SysEx remain available; each cue can fire on arrival or resume.
 - Physical fullscreen program output, editing/seek lock in Show mode, atomic save, relative media paths, autosave sidecars, and 32-step undo/redo.
+- Portable `.savpack` export containing the show and every media library item; open packages on Windows, macOS, or Linux.
 
 NDI, multiple audio devices, MIDI input, Wings import, plugins, and advanced effects are outside v1.
 
@@ -49,7 +50,7 @@ NDI, multiple audio devices, MIDI input, Wings import, plugins, and advanced eff
 Install Xcode Command Line Tools and Homebrew, then:
 
 ```sh
-brew install cmake ninja qtbase ffmpeg rtaudio rtmidi pkgconf
+brew install cmake ninja qtbase ffmpeg rtaudio rtmidi libarchive pkgconf
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix)"
 cmake --build build
 ctest --test-dir build --output-on-failure
@@ -59,6 +60,8 @@ open build/simpleavshow.app --args --demo
 The demonstration contains generated ambience, click, text, a backdrop, three holds, and a fade after the first hold. Saving exports generated WAV/PNG assets into a sibling `.media` directory. Press Play to prepare your remembered audio output, or your default speakers on first use. Missing remembered devices block playback with an explanation; they do not fall back to other speakers.
 
 ## Windows 11
+
+To let an assistant prepare and test a Windows PC with minimal local setup, start with the [remote testing guide](docs/windows-remote-testing.md).
 
 Install Visual Studio 2022 with Desktop development with C++, CMake, and Git. In a Visual Studio developer PowerShell:
 
@@ -81,13 +84,13 @@ cmake --install build --config Release --prefix dist
 dist\bin\simpleavshow.exe
 ```
 
-CI uses prebuilt Qt 6.8.3 and a checksum-pinned FFmpeg 9.0 shared SDK from [BtbN](https://github.com/BtbN/FFmpeg-Builds). Only the app, RtAudio (with ASIO), and RtMidi are compiled; FFmpeg is not rebuilt. The pin is in [packaging/ffmpeg-windows.json](packaging/ffmpeg-windows.json). To use that SDK locally, run `python packaging/fetch_ffmpeg_windows.py ffmpeg-sdk`, then configure with `-DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON`, `-DCMAKE_PREFIX_PATH=<Qt SDK>`, and `-DSAV_FFMPEG_ROOT=<extracted FFmpeg SDK>`. Copy its `bin/*.dll` into `build/Release/` before running tests, and add its `bin` directory to PATH for the fixture generator.
+CI uses prebuilt Qt 6.8.3 and a checksum-pinned FFmpeg 9.0 shared SDK from [BtbN](https://github.com/BtbN/FFmpeg-Builds). Only the app, RtAudio (with ASIO), RtMidi, and libarchive are compiled; FFmpeg is not rebuilt. The pin is in [packaging/ffmpeg-windows.json](packaging/ffmpeg-windows.json). To use that SDK locally, run `python packaging/fetch_ffmpeg_windows.py ffmpeg-sdk`, then configure with `-DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON`, `-DCMAKE_PREFIX_PATH=<Qt SDK>`, and `-DSAV_FFMPEG_ROOT=<extracted FFmpeg SDK>`. Copy its `bin/*.dll` into `build/Release/` before running tests, and add its `bin` directory to PATH for the fixture generator.
 
 The default manifest builds Qt and FFmpeg from source for local development. Release packaging includes dependency DLLs, Qt plugins, and third-party notices. Developer ID/code signing and notarization are not configured.
 
 ## Linux
 
-Requires Qt ≥ 6.4, FFmpeg ≥ 5.1 development libraries, RtAudio ≥ 6, RtMidi, CMake, and a C++20 compiler. Ubuntu 24.04 packages an older RtAudio; install version 6 from source as shown in [.github/workflows/build.yml](.github/workflows/build.yml), or use the vcpkg manifest.
+Requires Qt ≥ 6.4, FFmpeg ≥ 5.1 development libraries, RtAudio ≥ 6, RtMidi, libarchive ≥ 3.6 development libraries, CMake, and a C++20 compiler. Ubuntu 24.04 packages an older RtAudio; install version 6 from source as shown in [.github/workflows/build.yml](.github/workflows/build.yml), or use the vcpkg manifest.
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -107,6 +110,12 @@ build/simpleavshow --demo
 7. Choose a physical program display, save, and enable Show mode. Space plays/pauses/resumes; Escape or Stop All silences internal audio. The project end also stops voices.
 
 Use Stop All and leave Show mode before editing, saving, testing MIDI, or manually changing audio/MIDI connections. Play may prepare remembered devices in Show mode while playback is stopped. Outputs can be opened during playback or a marker hold in edit mode; locked connection controls are visibly disabled with an explanation and a Stop All button to unlock them. The program display can be opened without stopping playback. Outputs buttons and the menu item are disabled in Show mode or during media preparation, with explanatory tooltips. Text fields keep normal Space behavior. Seeking never sends MIDI; landing exactly on a marker arms it for Play. Non-hold cues fire on crossing, including those configured for resume, because there is no hold to resume.
+
+To move a show to another computer, choose **File → Export package…**. The `.savpack` file includes the current timeline/settings and every media library item, including unused items. Export includes unsaved edits, preserves original imported media bytes, and stores duplicate references to the same source only once. Generated demo sources are exported as PNG/WAV. Export does not save or change the current project. Stop All and leave Show mode before exporting.
+
+Transfer the package and open it with **File → Open…** on Windows, macOS, or Linux. Opening extracts an editable copy into temporary storage and prepares audio caches; allow disk space for both the extracted media and the audio caches. Use **Save** to keep a normal `.savshow` with a sibling `.media` folder, or **Export package…** to share the edited copy. As with a new show, autosave starts after the first normal save. Configure audio/MIDI outputs and the program display on the receiving device; track channel routing travels with the show. Text uses system Arial, so its appearance can vary between devices.
+
+`.savpack` is a ZIP/Zip64 archive containing `project.savshow` and `media/` files with generated portable filenames. Media is stored without additional compression. It can also be extracted with a ZIP utility and opened using the contained `.savshow`.
 
 Autosave writes `<project>.savshow.autosave` every minute after changes to a saved show. Open that sidecar and Save As a `.savshow` to recover. Imported media remains external; move the project and media together.
 
@@ -131,7 +140,7 @@ cmake --build build-core
 ctest --test-dir build-core --output-on-failure
 ```
 
-They cover hold boundaries, async looping/finish, pause/resume, seeks, MIDI timing, routing isolation, pan, clipping, Stop All, and project end, plus large timeline scheduling, disk-buffer handoffs, cache failures, and callback allocation/I/O checks. The Qt suite adds decoding/resampling, an audio source expanding beyond 1 GiB with bounded resident PCM, cache lifetime/cleanup, embedded A/V offsets, video seeks, large project round-trips, save/reload/moved media, malformed projects, undo/redo, Show-mode UI checks, device selection without fallback, MIDI editor byte round trips, raw-message validation, and cue editing. FFmpeg CLI generates fixtures; media tests explicitly skip when it is unavailable. Clang/GCC builds support `-DSAV_SANITIZE=ON` for address/undefined-behavior checking.
+They cover hold boundaries, async looping/finish, pause/resume, seeks, MIDI timing, routing isolation, pan, clipping, Stop All, and project end, plus large timeline scheduling, disk-buffer handoffs, cache failures, and callback allocation/I/O checks. The Qt suite adds decoding/resampling, an audio source expanding beyond 1 GiB with bounded resident PCM, cache lifetime/cleanup, embedded A/V offsets, video seeks, large project round-trips, save/reload/moved media, portable package export/open/save-as and archive validation, malformed projects, undo/redo, Show-mode UI checks, device selection without fallback, MIDI editor byte round trips, raw-message validation, and cue editing. FFmpeg CLI generates fixtures; media tests explicitly skip when it is unavailable. Clang/GCC builds support `-DSAV_SANITIZE=ON` for address/undefined-behavior checking.
 
 Visual QA:
 

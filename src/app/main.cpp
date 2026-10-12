@@ -22,7 +22,7 @@ int main(int argc, char** argv) {
     parser.addOption({"demo", "Open the built-in demonstration"});
     parser.addOption({"screenshot", "Save an editor screenshot and exit (for visual QA)", "path"});
     parser.addOption({"preview-time", "Seek before capturing a screenshot (seconds)", "seconds"});
-    parser.addPositionalArgument("project", "Project to open (.savshow)"); parser.process(app);
+    parser.addPositionalArgument("project", "Project or package to open (.savshow, .savpack)"); parser.process(app);
     sav::MainWindow window;
     if (parser.isSet("demo")) { window.controller().replace(sav::demoProject()); window.controller().dirty = true; }
     if (!parser.positionalArguments().isEmpty()) window.openPath(parser.positionalArguments().front());

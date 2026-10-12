@@ -29,7 +29,7 @@ def main():
     shutil.copy2("packaging/README.txt", args.destination / "THIRD-PARTY.txt")
     shutil.copytree("packaging/licenses/qt", args.destination / "qt-license-texts", dirs_exist_ok=True)
     if args.platform == "macos":
-        roots = ["qtbase", "ffmpeg", "rtaudio", "rtmidi"]
+        roots = ["qtbase", "ffmpeg", "rtaudio", "rtmidi", "libarchive"]
         metadata = json.loads(subprocess.check_output(
             ["brew", "info", "--json=v2", "--installed"], text=True))
         installed_formulae = {formula["full_name"]: formula for formula in metadata["formulae"]}

@@ -26,6 +26,11 @@ add_test(NAME transport COMMAND transport_tests)
 if(SAV_BUILD_APP)
   set(CMAKE_AUTOMOC ON)
   find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets Concurrent)
+  # Homebrew's libarchive is keg-only; prefer it to the older macOS SDK library.
+  if(APPLE AND EXISTS "/opt/homebrew/opt/libarchive")
+    list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew/opt/libarchive")
+  endif()
+  find_package(LibArchive 3.6 REQUIRED)
   find_package(PkgConfig QUIET)
   if(PkgConfig_FOUND)
     pkg_check_modules(FFMPEG QUIET IMPORTED_TARGET libavformat libavcodec libavutil libswresample libswscale)
@@ -62,13 +67,13 @@ if(SAV_BUILD_APP)
     find_path(RTMIDI_HEADER_DIR RtMidi.h HINTS ${RTMIDI_INCLUDE_HINTS} PATH_SUFFIXES rtmidi REQUIRED)
   endif()
   add_library(sav_desktop
-    src/app/Project.cpp src/app/Controller.cpp
+    src/app/Project.cpp src/app/ProjectPackage.cpp src/app/Controller.cpp
     src/app/Timeline.cpp src/app/ProgramView.cpp src/app/MainWindow.cpp
     src/app/MidiMessageEditor.cpp
     src/media/Media.cpp src/media/AudioDevice.cpp src/media/MidiOutput.cpp
   )
   target_include_directories(sav_desktop PUBLIC src ${RTMIDI_HEADER_DIR} PRIVATE ${FFMPEG_INCLUDE_DIR})
-  target_link_libraries(sav_desktop PUBLIC sav_core Qt6::Widgets Qt6::Concurrent ${SAV_RTAUDIO} ${SAV_RTMIDI} PRIVATE ${SAV_FFMPEG})
+  target_link_libraries(sav_desktop PUBLIC sav_core Qt6::Widgets Qt6::Concurrent ${SAV_RTAUDIO} ${SAV_RTMIDI} PRIVATE ${SAV_FFMPEG} LibArchive::LibArchive)
   if(MSVC)
     target_compile_options(sav_desktop PUBLIC /utf-8)
     target_compile_definitions(sav_desktop PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -79,7 +84,7 @@ if(SAV_BUILD_APP)
   target_link_libraries(simpleavshow PRIVATE sav_desktop)
   find_package(Qt6 REQUIRED COMPONENTS Test)
   add_executable(app_tests tests/app_tests.cpp)
-  target_link_libraries(app_tests PRIVATE sav_desktop Qt6::Test)
+  target_link_libraries(app_tests PRIVATE sav_desktop Qt6::Test LibArchive::LibArchive)
   add_test(NAME app COMMAND app_tests)
   set_tests_properties(app PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
   set_target_properties(simpleavshow PROPERTIES MACOSX_BUNDLE_GUI_IDENTIFIER "org.simpleavshow.app" MACOSX_BUNDLE_BUNDLE_NAME "SimpleAVShow")

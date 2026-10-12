@@ -66,6 +66,12 @@ QPushButton* button(QString text, QLayout* layout = nullptr) {
 QLabel* section(QString text) { auto* l = new QLabel(text); l->setObjectName("section"); return l; }
 struct ProjectResult { Project project; QString error; };
 struct MediaResult { std::vector<MediaAsset> assets; QStringList errors; };
+class PackageProgress : public QProgressDialog {
+public:
+    using QProgressDialog::QProgressDialog;
+    // Keep the modal wait alive until the worker completes, including Escape/window close.
+    void reject() override {}
+};
 }
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
@@ -106,13 +112,17 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
       QCheckBox { spacing: 7px; }
     )");
     auto* file = menuBar()->addMenu("File");
+    file->setToolTipsVisible(true);
     file->addAction("New show", QKeySequence::New, this, [this] { if (c_.canEdit() && checkDiscard()) c_.replace(newProject()); });
     file->addAction("Open…", QKeySequence::Open, this, [this] {
         if (!c_.canEdit() || !checkDiscard()) return;
-        const auto path = QFileDialog::getOpenFileName(this, "Open show", {}, "SimpleAVShow (*.savshow *.savshow.autosave)"); if (!path.isEmpty()) openPath(path);
+        const auto path = QFileDialog::getOpenFileName(this, "Open show", {}, "SimpleAVShow (*.savshow *.savshow.autosave *.savpack);;Show packages (*.savpack)"); if (!path.isEmpty()) openPath(path);
     });
     file->addAction("Save", QKeySequence::Save, this, [this] { save(); });
     file->addAction("Save as…", QKeySequence::SaveAs, this, [this] { save(true); });
+    exportPackageAction_ = file->addAction("Export package…", this, &MainWindow::exportPackage);
+    exportPackageAction_->setObjectName("exportPackageAction");
+    exportPackageAction_->setToolTip("Copy this show and all media library items into a portable .savpack file");
     file->addSeparator(); file->addAction("Open demonstration", this, [this] { if (c_.canEdit() && checkDiscard()) { c_.replace(demoProject()); c_.dirty = true; refresh(); } });
     file->addSeparator(); file->addAction("Import media…", QKeySequence("Ctrl+I"), this, &MainWindow::importMedia);
     auto* edit = menuBar()->addMenu("Edit");
@@ -333,6 +343,7 @@ void MainWindow::refresh() {
     timeline_->refresh(); updateInspector(); updatePlayback(); statusBar()->showMessage(c_.status);
 }
 void MainWindow::updatePlayback() {
+    exportPackageAction_->setEnabled(c_.canEdit(false));
     updateRoutingPresets();
     const bool outputsAvailable = !c_.showMode && !c_.busy;
     const QString outputsTip = c_.showMode ? "Leave show mode to open Outputs" : c_.busy ? "Wait for media preparation to finish" :
@@ -654,14 +665,60 @@ void MainWindow::openPath(const QString& path) {
     connect(watcher, &QFutureWatcher<ProjectResult>::finished, this, [this, watcher, progress, path] {
         const auto result = watcher->result(); c_.busy = false; progress->deleteLater(); watcher->deleteLater();
         if (!result.error.isEmpty()) { QMessageBox::warning(this, "Could not open project", result.error); return; }
-        timeline_->selectedClip.clear(); timeline_->selectedMarker.clear(); timeline_->selectedTrack = 0; c_.replace(result.project, path);
+        timeline_->selectedClip.clear(); timeline_->selectedMarker.clear(); timeline_->selectedTrack = 0;
+        c_.replace(result.project, isProjectPackage(path) ? QString() : path);
+        if (isProjectPackage(path)) {
+            c_.dirty = true;
+            c_.report("Opened package. Save this show to keep an editable copy, or use Export package to share it.");
+            refresh();
+        }
     });
     watcher->setFuture(QtConcurrent::run([path] { ProjectResult result; try { result.project = readProject(path); } catch (const std::exception& e) { result.error = QString::fromUtf8(e.what()); } return result; }));
 }
 void MainWindow::save(bool as) {
+    if (!c_.canEdit()) return;
     QString target = c_.path;
     if (as || target.isEmpty()) target = QFileDialog::getSaveFileName(this, "Save show", target, "SimpleAVShow (*.savshow)");
-    if (target.isEmpty()) return; if (!target.endsWith(".savshow")) target += ".savshow"; c_.save(target);
+    if (target.isEmpty()) return;
+    if (!target.endsWith(".savshow", Qt::CaseInsensitive)) target += ".savshow";
+    c_.save(target);
+}
+void MainWindow::exportPackage() {
+    if (!c_.canEdit()) return;
+    const QString suggested = c_.path.isEmpty() ? "show.savpack" : QFileInfo(c_.path).absoluteDir().filePath(QFileInfo(c_.path).completeBaseName() + ".savpack");
+    QFileDialog dialog(this, "Export show package", suggested, "SimpleAVShow package (*.savpack)");
+    dialog.setAcceptMode(QFileDialog::AcceptSave); dialog.setDefaultSuffix("savpack");
+    if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) return;
+    auto target = dialog.selectedFiles().front();
+    if (!isProjectPackage(target)) {
+        target += ".savpack";
+        if (QFileInfo::exists(target) && QMessageBox::question(this, "Replace package?", "A package with this name already exists. Replace it?", QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+    }
+    writePackage(target);
+}
+void MainWindow::writePackage(const QString& path) {
+    if (!c_.canEdit()) return;
+    c_.busy = true; updatePlayback();
+    PackageProgress progress("Collecting show and media into a package…", QString(), 0, 0, this);
+    progress.setWindowTitle("Exporting show package");
+    progress.setWindowModality(Qt::WindowModal); progress.setMinimumDuration(0);
+    progress.setAutoClose(false); progress.setAutoReset(false);
+    QFutureWatcher<QString> watcher;
+    connect(&watcher, &QFutureWatcher<QString>::finished, &progress, &QDialog::accept);
+    const Project snapshot = c_.project;
+    watcher.setFuture(QtConcurrent::run([snapshot, path] {
+        try { writeProjectPackage(snapshot, path); return QString(); }
+        catch (const std::exception& e) { return QString::fromUtf8(e.what()); }
+    }));
+    progress.exec();
+    const auto error = watcher.result(); c_.busy = false;
+    if (!error.isEmpty()) {
+        c_.report("Package failed: " + error);
+        QMessageBox::warning(this, "Could not write package", error);
+    } else {
+        c_.report("Exported " + QFileInfo(path).fileName());
+    }
+    refresh();
 }
 bool MainWindow::checkDiscard() {
     if (!c_.dirty) return true;

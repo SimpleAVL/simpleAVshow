@@ -9,6 +9,7 @@
 #include <QSaveFile>
 #include <QUuid>
 #include <QPainter>
+#include <QDataStream>
 #include <set>
 #include <limits>
 #include <stdexcept>
@@ -190,6 +191,7 @@ void writeProject(const Project& p, const QString& path) {
     if (file.write(bytes) != bytes.size() || !file.commit()) throw std::runtime_error(file.errorString().toStdString());
 }
 Project readProject(const QString& path) {
+    if (isProjectPackage(path)) return readProjectPackage(path);
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) throw std::runtime_error(file.errorString().toStdString());
     QJsonParseError parseError; const auto doc = QJsonDocument::fromJson(file.readAll(), &parseError);
@@ -235,5 +237,44 @@ Project readProject(const QString& path) {
         p.show.markers.push_back(std::move(m));
     }
     bindAudio(p); validate(p); return p;
+}
+void materializeProjectMedia(Project& p, const QString& directory) {
+    QDir dir(directory);
+    QMap<QString, QString> copied;
+    for (auto& a : p.assets) {
+        const bool extracted = p.packageDirectory && !a.path.isEmpty() &&
+            QFileInfo(a.path).absoluteFilePath().startsWith(p.packageDirectory->path() + "/");
+        if (!a.path.isEmpty() && !extracted) continue;
+        if (!QDir().mkpath(dir.absolutePath())) throw std::runtime_error("Cannot create media directory");
+        if (extracted) {
+            if (!copied.contains(a.path)) {
+                const QString target = dir.filePath(newId() + "." + QFileInfo(a.path).suffix());
+                if (!QFile::copy(a.path, target)) throw std::runtime_error("Cannot copy packaged media: " + a.path.toStdString());
+                copied.insert(a.path, target);
+            }
+            a.path = copied.value(a.path); continue;
+        }
+        const QString target = dir.filePath(newId() + (a.image ? ".png" : ".wav"));
+        QSaveFile file(target);
+        if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error(file.errorString().toStdString());
+        if (a.image) {
+            if (!a.still.save(&file, "PNG")) throw std::runtime_error("Cannot save generated image");
+        } else if (a.audio && !a.audio->storage) {
+            QDataStream out(&file); out.setByteOrder(QDataStream::LittleEndian);
+            const quint16 channels = a.audio->mono ? 1 : 2;
+            const auto size = static_cast<quint64>(a.audio->length()) * channels * 2;
+            if (size > std::numeric_limits<quint32>::max() - 36) throw std::runtime_error("Generated audio is too large for WAV export");
+            const auto bytes = static_cast<quint32>(size);
+            out.writeRawData("RIFF", 4); out << quint32(bytes + 36); out.writeRawData("WAVEfmt ", 8);
+            out << quint32(16) << quint16(1) << channels << quint32(sampleRate) << quint32(sampleRate * channels * 2) << quint16(channels * 2) << quint16(16);
+            out.writeRawData("data", 4); out << bytes;
+            for (std::size_t i = 0; i < a.audio->samples.size(); i += a.audio->mono ? 2 : 1)
+                out << static_cast<qint16>(std::clamp(a.audio->samples[i], -1.f, 1.f) * 32767);
+            if (out.status() != QDataStream::Ok) throw std::runtime_error("Cannot write generated audio");
+        } else throw std::runtime_error("Asset has no source file");
+        if (!file.commit()) throw std::runtime_error(file.errorString().toStdString());
+        a.path = target;
+    }
+    p.packageDirectory.reset();
 }
 }

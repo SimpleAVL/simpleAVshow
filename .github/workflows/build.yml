@@ -31,7 +31,7 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: '15.0'
     steps:
       - uses: actions/checkout@v4
-      - run: brew install qtbase ffmpeg rtaudio rtmidi pkgconf ninja
+      - run: brew install qtbase ffmpeg rtaudio rtmidi libarchive pkgconf ninja
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix)"
       - run: cmake --build build --parallel 4
       - run: ctest --test-dir build --output-on-failure
@@ -64,7 +64,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y qt6-base-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev librtmidi-dev libasound2-dev pkg-config ninja-build ffmpeg
+      - run: sudo apt-get update && sudo apt-get install -y qt6-base-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev librtmidi-dev libasound2-dev libarchive-dev pkg-config ninja-build ffmpeg
       - name: Build RtAudio 6 (Ubuntu's packaged RtAudio is older)
         run: |
           git clone --branch 6.0.1 --depth 1 https://github.com/thestk/rtaudio.git /tmp/rtaudio
@@ -142,7 +142,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$env:VCPKG_INSTALLATION_ROOT/bootstrap-vcpkg.bat" -disableMetrics
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build RtAudio/RtMidi and configure (prebuilt Qt and FFmpeg)
+      - name: Build RtAudio/RtMidi/libarchive and configure (prebuilt Qt and FFmpeg)
         shell: pwsh
         run: cmake -S . -B build -A x64 "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON "-DCMAKE_PREFIX_PATH=$env:QT_ROOT_DIR" "-DSAV_FFMPEG_ROOT=$env:FFMPEG_ROOT"
       - name: Cache built dependencies before compiling the app

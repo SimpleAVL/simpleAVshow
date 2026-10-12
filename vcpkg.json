@@ -19,6 +19,7 @@
     }
   },
   "dependencies": [
+    { "name": "libarchive", "default-features": false },
     { "name": "rtaudio", "features": ["asio"], "platform": "windows" },
     { "name": "rtaudio", "features": ["alsa"], "platform": "linux" },
     { "name": "rtaudio", "platform": "osx" },
