@@ -28,7 +28,7 @@ private:
     ProgramView* output_ = nullptr;
     QWidget* outputWindow_ = nullptr;
     QListWidget *library_ = nullptr, *cues_ = nullptr;
-    QLabel *clock_ = nullptr, *state_ = nullptr, *health_ = nullptr, *hint_ = nullptr, *projectLabel_ = nullptr;
+    QLabel *clock_ = nullptr, *state_ = nullptr, *next_ = nullptr, *health_ = nullptr, *hint_ = nullptr, *projectLabel_ = nullptr;
     QPushButton *play_ = nullptr, *showButton_ = nullptr, *outputsButton_ = nullptr, *openOutputButton_ = nullptr;
     QAction* outputsAction_ = nullptr;
     QAction* exportPackageAction_ = nullptr;
@@ -47,7 +47,8 @@ private:
     QTextEdit* clipText_ = nullptr;
     QTableWidget* curveTable_ = nullptr;
     QGroupBox *audioTransform_ = nullptr, *videoTransform_ = nullptr, *trackAudio_ = nullptr;
-    bool refreshing_ = false;
+    bool refreshing_ = false, outputLost_ = false;
+    QString outputScreen_;
     void buildInspector();
     void refresh();
     void updatePlayback();
@@ -67,6 +68,8 @@ private:
     void projectSettings();
     void outputSettings();
     void openOutput(int screen);
+    void screensChanged();
+    void requestShowMode(bool enabled);
     void save(bool as = false);
     void exportPackage();
     void writePackage(const QString& path);

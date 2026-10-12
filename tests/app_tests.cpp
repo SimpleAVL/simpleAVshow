@@ -233,6 +233,15 @@ private slots:
         QCOMPARE(c.autosavePath(), show + ".autosave");
         c.path.clear(); QVERIFY(c.autosavePath().endsWith("/Untitled.savshow.autosave"));
     }
+    void readoutShowsNextCueAndTimeLeft() {
+        MainWindow window; auto project = newProject(); project.show.duration = frames(90);
+        project.show.markers = {{"late", "Finale", frames(75), true}, {"early", "Act one", frames(12), true}};
+        window.controller().replace(project); window.show();
+        auto* next = window.findChild<QLabel*>("nextCue"); QVERIFY(next);
+        QTRY_VERIFY(next->text().contains("Act one · in 0:12")); QVERIFY(next->text().contains("1:30 left"));
+        window.controller().seek(frames(20)); QTRY_VERIFY(next->text().contains("Finale · in 0:55"));
+        window.controller().setShowMode(false); window.controller().dirty = false;
+    }
     void quittingDuringShowModeRequiresConfirmation() {
         MainWindow window; window.show(); window.controller().setShowMode(true);
         bool asked = false;
@@ -702,7 +711,15 @@ private slots:
         QVERIFY(find("+ Hold / MIDI cue")); QTest::mouseClick(find("+ Hold / MIDI cue"), Qt::LeftButton); QCOMPARE(window.controller().project.show.markers.size(), std::size_t{1});
         // A show requiring an unchosen MIDI destination must stay stopped, including in Show mode.
         QVERIFY(window.controller().edit([](Project& p) { p.show.markers[0].message = {0xc0, 0}; }));
+        // Preflight lists the missing destination; the operator may still enter Show mode.
+        QString preflight;
+        QTimer::singleShot(0, &window, [&] {
+            auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget()); if (!box) return;
+            preflight = box->informativeText();
+            for (auto* button : box->buttons()) if (button->text() == "Enter Show mode anyway") button->click();
+        });
         QVERIFY(find("Show mode")); QTest::mouseClick(find("Show mode"), Qt::LeftButton); QVERIFY(window.controller().showMode);
+        QVERIFY(preflight.contains("MIDI cues need a destination")); QVERIFY(preflight.contains("unsaved changes"));
         QTest::mouseClick(find("+ Text"), Qt::LeftButton); QCOMPARE(window.controller().project.show.clips.size(), std::size_t{1});
         // Play reports the missing MIDI destination before opening audio.
         QTest::keyClick(&window, Qt::Key_Space); QCOMPARE(window.controller().transport.state(), State::Stopped);

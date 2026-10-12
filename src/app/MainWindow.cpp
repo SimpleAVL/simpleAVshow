@@ -161,7 +161,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     outputsButton_ = button("Outputs", bar); outputsButton_->setObjectName("outputSettingsButton");
     connect(outputsButton_, &QPushButton::clicked, this, &MainWindow::outputSettings);
     showButton_ = button("Show mode", bar); showButton_->setCheckable(true);
-    connect(showButton_, &QPushButton::clicked, this, [this](bool checked) { c_.setShowMode(checked); });
+    connect(showButton_, &QPushButton::clicked, this, &MainWindow::requestShowMode);
     vertical->addWidget(top);
     auto* split = new QSplitter(Qt::Vertical); vertical->addWidget(split, 1);
     auto* upper = new QSplitter(Qt::Horizontal); split->addWidget(upper);
@@ -203,14 +203,20 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(timeline_, &Timeline::assetDropped, this, &MainWindow::placeAsset);
     auto* transportBar = new QWidget; transportBar->setStyleSheet("background: #1b2737;"); auto* controls = new QHBoxLayout(transportBar); controls->setContentsMargins(18, 12, 18, 12);
     play_ = button("▶  Play", controls); play_->setObjectName("primary"); play_->setMinimumWidth(145); connect(play_, &QPushButton::clicked, &c_, &Controller::toggle);
+    // Keep Stop All away from Play/Continue so a hurried press cannot hit it.
+    controls->addSpacing(28);
     auto* stop = button("■  Stop All", controls); stop->setObjectName("danger"); connect(stop, &QPushButton::clicked, &c_, &Controller::stopAll);
     clock_ = new QLabel; clock_->setStyleSheet("font-family: 'Menlo', 'Consolas'; font-size: 23px; letter-spacing: 2px; padding: 0 15px;"); controls->addWidget(clock_);
-    state_ = new QLabel; state_->setMinimumWidth(85); controls->addWidget(state_); controls->addStretch();
+    state_ = new QLabel; state_->setMinimumWidth(85); controls->addWidget(state_);
+    next_ = new QLabel; next_->setObjectName("nextCue"); next_->setStyleSheet("color: #c9d6e8; font-size: 13px; padding-left: 12px;"); controls->addWidget(next_); controls->addStretch();
     health_ = new QLabel; health_->setStyleSheet("color: #92a8c6;"); controls->addWidget(health_); vertical->addWidget(transportBar);
     setCentralWidget(root); statusBar()->setSizeGripEnabled(false);
     connect(&c_, &Controller::changed, this, &MainWindow::refresh);
     connect(&c_, &Controller::tick, this, &MainWindow::updatePlayback);
     connect(&c_, &Controller::message, this, [this](QString message) { statusBar()->showMessage(message); });
+    connect(qApp, &QGuiApplication::screenRemoved, this, &MainWindow::screensChanged, Qt::QueuedConnection);
+    connect(qApp, &QGuiApplication::screenAdded, this, &MainWindow::screensChanged, Qt::QueuedConnection);
+    outputScreen_ = QSettings().value("display/screen").toString();
     qApp->installEventFilter(this); refresh();
 }
 
@@ -354,7 +360,19 @@ void MainWindow::updatePlayback() {
     const State state = c_.transport.state(); const bool playing = state == State::Playing;
     clock_->setText(timecode(c_.position(), c_.project.fps));
     const QString label = state == State::Playing ? "PLAYING" : state == State::Held ? "HOLDING" : state == State::Paused ? "PAUSED" : state == State::Ended ? "ENDED" : "STOPPED";
-    state_->setText(label); state_->setStyleSheet(state == State::Held ? "color: #e5c47d; font-weight: 600;" : "color: #a0b6d5;");
+    state_->setText(label);
+    state_->setStyleSheet(QString("font-weight: 600; color: %1;").arg(state == State::Playing ? "#7fd19b" : state == State::Held ? "#e5c47d" : state == State::Paused ? "#8fb4f0" : "#7d8ea6"));
+    // Operator readout: the next cue and the time left in the show.
+    const Frame now = c_.position(); const Marker* upcoming = nullptr;
+    for (const auto& m : c_.project.show.markers)
+        if ((m.time > now || (m.time == now && state != State::Held)) && (!upcoming || m.time < upcoming->time)) upcoming = &m;
+    const auto clockText = [](Frame frames) {
+        const auto total = static_cast<qint64>(std::ceil(seconds(std::max<Frame>(0, frames))));
+        return total >= 3600 ? QString("%1:%2:%3").arg(total / 3600).arg(total / 60 % 60, 2, 10, QChar('0')).arg(total % 60, 2, 10, QChar('0'))
+                             : QString("%1:%2").arg(total / 60).arg(total % 60, 2, 10, QChar('0'));
+    };
+    next_->setText((upcoming ? QString("NEXT  %1 %2 · in %3").arg(upcoming->hold ? "Ⅱ" : "◆", QString::fromStdString(upcoming->name), clockText(upcoming->time - now)) : QString("No further cues")) +
+        "   ·   " + clockText(c_.project.show.duration - now) + " left");
     play_->setText(playing ? "Ⅱ  Pause" : state == State::Held ? "▶  Continue" : "▶  Play");
     QString async = c_.transport.asyncVoices() ? QString(" · %1 async playing").arg(c_.transport.asyncVoices()) : "";
     health_->setText((c_.device.running() ? QString("%1 ch · 48 kHz").arg(c_.device.channels()) : "Audio · connects on Play") + async +
@@ -369,9 +387,13 @@ void MainWindow::updatePlayback() {
     if (state == State::Held) {
         const int index = c_.transport.heldMarker();
         hint_->setText("HOLD — " + (index >= 0 && static_cast<std::size_t>(index) < c_.project.show.markers.size() ? QString::fromStdString(c_.project.show.markers[index].name) : "") + "  ·  Press Space to continue" + async);
-    } else if (!c_.playbackProblem.isEmpty()) hint_->setText(c_.playbackProblem + (c_.showMode ? " Leave Show mode to change Outputs." : ""));
+    } else if (!c_.playbackProblem.isEmpty()) hint_->setText("⚠  " + c_.playbackProblem + (c_.showMode ? " Leave Show mode to change Outputs." : ""));
     else if (c_.project.show.clips.empty() && c_.project.show.markers.empty()) hint_->setText("Start with + Import media or + Text. Press Play to use your speakers automatically.");
     else hint_->setText(c_.showMode ? "SHOW MODE  ·  Space: play / pause  ·  Escape: Stop All" : "Space: play / pause  ·  Escape: Stop All  ·  Ruler: seek  ·  Edges: trim");
+    const bool problem = state != State::Held && !c_.playbackProblem.isEmpty();
+    hint_->setStyleSheet(state == State::Held ? "color: #e5c47d; font-weight: 600;" :
+        problem ? "color: #ffd7d2; background: #5a2523; border-radius: 4px; padding: 6px 8px;" : "color: #8fa8c9;");
+    health_->setStyleSheet(c_.transport.clipped() || c_.device.underruns() || c_.transport.bufferWaits() || c_.transport.readRetries() || c_.lateFrames ? "color: #f0a66e;" : "color: #92a8c6;");
     inspector_->setEnabled(c_.canEdit(false));
     const auto picture = c_.compose(); preview_->setPicture(picture); if (output_) output_->setPicture(picture);
 }
@@ -617,6 +639,7 @@ void MainWindow::outputSettings() {
     auto* displays = new QComboBox; const auto screens = QGuiApplication::screens();
     for (int i = 0; i < screens.size(); ++i) displays->addItem(QString("%1 · %2 × %3%4").arg(screens[i]->name()).arg(screens[i]->size().width()).arg(screens[i]->size().height()).arg(screens[i] == screen() ? " (editor)" : ""), i);
     displayForm->addRow("Show picture on", displays); auto* displayOpen = button("Open fullscreen program output"); displayOpen->setObjectName("openProgramDisplay"); displayForm->addRow(displayOpen);
+    if (const int remembered = displays->findText(QSettings().value("display/screen").toString(), Qt::MatchStartsWith); remembered >= 0) displays->setCurrentIndex(remembered);
     connect(displayOpen, &QPushButton::clicked, &dialog, [&] { openOutput(displays->currentData().toInt()); });
     auto* displayClose = button("Close program output"); displayForm->addRow(displayClose); connect(displayClose, &QPushButton::clicked, &dialog, [this] { if (outputWindow_) outputWindow_->hide(); });
     auto* feedback = new QLabel; feedback->setWordWrap(true); feedback->setStyleSheet("color: #e5c47d;"); outer->addWidget(feedback);
@@ -655,9 +678,47 @@ void MainWindow::openOutput(int index) {
     if (!outputWindow_) {
         outputWindow_ = new QWidget(this, Qt::Window | Qt::FramelessWindowHint); outputWindow_->setWindowTitle("SimpleAVShow — Program"); outputWindow_->setStyleSheet("background: black;");
         auto* layout = new QVBoxLayout(outputWindow_); layout->setContentsMargins(0, 0, 0, 0); output_ = new ProgramView; layout->addWidget(output_);
+        outputWindow_->setCursor(Qt::BlankCursor);
+        auto* close = new QShortcut(QKeySequence::Close, outputWindow_); connect(close, &QShortcut::activated, outputWindow_, &QWidget::hide);
     }
+    if (screens[index] == screen() && QMessageBox::question(this, "Cover the editor?",
+            "This display shows the editor. The program output will cover it until you press " + QKeySequence(QKeySequence::Close).toString(QKeySequence::NativeText) + " on the output.",
+            QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Ok) return;
     output_->setPicture(c_.compose()); outputWindow_->hide(); outputWindow_->winId(); outputWindow_->windowHandle()->setScreen(screens[index]);
     outputWindow_->setGeometry(screens[index]->geometry()); outputWindow_->showFullScreen(); activateWindow();
+    outputScreen_ = screens[index]->name(); QSettings().setValue("display/screen", outputScreen_);
+}
+void MainWindow::screensChanged() {
+    // A display that drops out must not leave a frameless fullscreen window over the editor; it returns with the display.
+    if (outputWindow_ && outputWindow_->isVisible() && !QGuiApplication::screens().contains(outputWindow_->screen())) {
+        outputWindow_->hide(); outputLost_ = true;
+        c_.report("Program display “" + outputScreen_ + "” disconnected. The output reopens when it returns."); c_.playbackProblem = c_.status;
+    } else if (outputLost_) {
+        const auto screens = QGuiApplication::screens();
+        for (int i = 0; i < screens.size(); ++i) if (screens[i]->name() == outputScreen_ && screens[i] != screen()) {
+            outputLost_ = false; openOutput(i);
+            c_.report("Program display “" + outputScreen_ + "” reconnected."); if (c_.playbackProblem.contains("Program display")) c_.playbackProblem.clear();
+            break;
+        }
+    }
+}
+void MainWindow::requestShowMode(bool enabled) {
+    const State state = c_.transport.state();
+    if (enabled) {
+        auto problems = c_.preflight();
+        const bool picture = std::any_of(c_.project.show.clips.begin(), c_.project.show.clips.end(), [this](const Clip& clip) { return c_.project.show.tracks[clip.track].visual; });
+        if (picture && !(outputWindow_ && outputWindow_->isVisible())) problems << "The program output is not open. Open it from Audience display.";
+        if (!problems.isEmpty()) {
+            QMessageBox box(QMessageBox::Warning, "Check before the show", "Show mode can start, but these need attention:", QMessageBox::Cancel, this);
+            box.setInformativeText("• " + problems.join("\n• "));
+            auto* start = box.addButton("Enter Show mode anyway", QMessageBox::AcceptRole); box.setDefaultButton(QMessageBox::Cancel); box.exec();
+            if (box.clickedButton() != start) { showButton_->setChecked(false); return; }
+        }
+    } else if (state == State::Playing || state == State::Held || c_.transport.asyncVoices()) {
+        if (QMessageBox::question(this, "Leave Show mode?", "The show is running. Leaving Show mode unlocks editing and timeline seeking.",
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) { showButton_->setChecked(true); return; }
+    }
+    c_.setShowMode(enabled);
 }
 void MainWindow::openPath(const QString& path) {
     if (!c_.canEdit()) return;
@@ -773,8 +834,9 @@ bool MainWindow::eventFilter(QObject* object, QEvent* event) {
     if (event->type() != QEvent::KeyPress || !isVisible()) return QMainWindow::eventFilter(object, event);
     auto* key = static_cast<QKeyEvent*>(event); auto* widget = qobject_cast<QWidget*>(object);
     if (!widget || (widget->window() != this && widget->window() != outputWindow_)) return QMainWindow::eventFilter(object, event);
-    if (key->key() == Qt::Key_Escape && !key->isAutoRepeat()) { c_.stopAll(); return true; }
     const bool editing = qobject_cast<QLineEdit*>(widget) || qobject_cast<QTextEdit*>(widget) || qobject_cast<QAbstractSpinBox*>(widget) || qobject_cast<QComboBox*>(widget);
+    // In Show mode Escape is always Stop All; while editing it cancels the edit instead.
+    if (key->key() == Qt::Key_Escape && !key->isAutoRepeat() && (c_.showMode || !editing)) { c_.stopAll(); return true; }
     if (key->key() == Qt::Key_Space && !editing && key->modifiers() == Qt::NoModifier) { if (!key->isAutoRepeat()) c_.toggle(); return true; }
     if ((key->key() == Qt::Key_Delete || key->key() == Qt::Key_Backspace) && !editing && !qobject_cast<QTableWidget*>(widget)) { if (!key->isAutoRepeat()) deleteSelection(); return true; }
     return QMainWindow::eventFilter(object, event);

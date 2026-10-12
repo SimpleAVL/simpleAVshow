@@ -39,6 +39,8 @@ public:
     bool testMidi(const std::vector<unsigned char>& message);
     bool needsMidi() const;
     QString missingVideo() const;
+    // Problems worth fixing before a performance; empty when the show is ready.
+    QStringList preflight();
     QString midiDestination() const { return midiName_; }
     void setShowMode(bool enabled);
     QImage compose();

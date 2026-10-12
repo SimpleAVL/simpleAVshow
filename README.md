@@ -42,7 +42,8 @@ Packages include runtime libraries and third-party notices; no SDK or Homebrew i
 - Automatic audio preparation on Play, remembered devices, configurable channel count, and per-track routing presets, gain, pan, and mute. Main, ambience, guide, and click tracks are created by default; guide/click outputs start disconnected.
 - Clip automation for volume, pan, picture X/Y, scale, and opacity; linear keyframes and fade helpers.
 - Native MIDI output ports, including MIDI bridges, with automatic reconnection on Play. A guided cue editor offers note names, named controls, programs, pitch bend, message previews, and test sending. Raw channel/system messages and SysEx remain available; each cue can fire on arrival or resume.
-- Physical fullscreen program output, editing/seek lock in Show mode, atomic save, relative media paths, autosave sidecars, and 32-step undo/redo.
+- Physical fullscreen program output that hides the cursor, remembers its display, and closes when that display disconnects (reopening when it returns). Show mode runs a preflight check (unsaved changes, missing video, audio/MIDI destinations, program output) and asks before leaving or quitting while the show runs. The transport bar shows the next cue, time to it, and time left.
+- Editing/seek lock in Show mode, atomic save, relative media paths, autosave sidecars, and 32-step undo/redo.
 - Portable `.savpack` export containing the show and every media library item; open packages on Windows, macOS, or Linux.
 
 NDI, multiple audio devices, MIDI input, Wings import, plugins, and advanced effects are outside v1.

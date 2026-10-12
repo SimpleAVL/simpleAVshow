@@ -180,6 +180,26 @@ bool Controller::openMidi(int port) {
     if (ok) { midiName_ = midi.name(); QSettings().setValue("midi/port", midiName_); playbackProblem.clear(); }
     report(ok ? (port < 0 ? "MIDI output disconnected" : "MIDI output: " + midi.name()) : error); return ok;
 }
+QStringList Controller::preflight() {
+    QStringList problems;
+    if (dirty) problems << "The show has unsaved changes.";
+    if (const auto missing = missingVideo(); !missing.isEmpty()) problems << "Video source is missing: " + missing;
+    if (needsMidi() && !midi.connected()) {
+        const QString remembered = QSettings().value("midi/port").toString();
+        if (remembered.isEmpty()) problems << "MIDI cues need a destination. Choose one in Outputs.";
+        else if (!midi.ports().contains(remembered)) problems << "MIDI destination “" + remembered + "” is missing.";
+    }
+    // Probe audio drivers only while nothing is playing.
+    if (!device.running() && transport.state() != State::Playing && transport.state() != State::Held && !transport.asyncVoices()) {
+        QSettings settings; const QString remembered = settings.value("audio/device").toString();
+        const auto api = remembered.isEmpty() ? RtAudio::UNSPECIFIED : static_cast<RtAudio::Api>(settings.value("audio/api", 0).toInt());
+        try {
+            if (!playbackDevice(device.devices(api), remembered))
+                problems << (remembered.isEmpty() ? "No audio output is available." : "Audio output “" + remembered + "” is missing.");
+        } catch (const std::exception& e) { problems << "Cannot check audio outputs: " + QString::fromUtf8(e.what()); }
+    } else if (device.running() && !routesValid()) problems << "A track is routed to more outputs than the audio interface provides.";
+    return problems;
+}
 QString Controller::missingVideo() const {
     for (const auto& clip : project.show.clips) {
         const auto asset = project.assets.constFind(QString::fromStdString(clip.assetId));
