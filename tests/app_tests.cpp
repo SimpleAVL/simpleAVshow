@@ -756,6 +756,66 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!(image = reader.imageAt(.2)).isNull(), 3000);
         QVERIFY(image.pixelColor(100, 100).red() > 200); QVERIFY(reader.error().isEmpty());
     }
+    void videoSkipsCorruptPackets() {
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg CLI is unavailable for fixture generation");
+        QTemporaryDir dir; const QString file = dir.filePath("corrupt.mkv");
+        QProcess process; process.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=red:s=160x90:r=24:d=1", "-f", "lavfi", "-i", "color=blue:s=160x90:r=24:d=3", "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-c:v", "png", file});
+        QVERIFY(process.waitForFinished(15000)); QCOMPARE(process.exitCode(), 0);
+        QFile source(file); QVERIFY(source.open(QIODevice::ReadOnly)); const auto original = source.readAll(); source.close();
+        // Damage the zlib streams of chosen frames; the container stays intact.
+        auto damage = [&](const QString& path, int first, int end) {
+            auto bytes = original; qsizetype at = 0; int damaged = 0;
+            for (int frame = 0; (at = bytes.indexOf("IDAT", at)) >= 0; ++frame, at += 4)
+                if (frame >= first && frame < end) { for (int i = 8; i < 16; ++i) bytes[at + i] = static_cast<char>(bytes[at + i] ^ 0x5a); ++damaged; }
+            writeBytes(path, bytes); return damaged;
+        };
+        QCOMPARE(damage(dir.filePath("middle.mkv"), 20, 30), 10); // Spans the colour change.
+        VideoReader reader(dir.filePath("middle.mkv")); QImage image;
+        for (int frame = 0; frame < 46; ++frame)
+            QTRY_VERIFY_WITH_TIMEOUT(!(image = reader.imageAt(frame / 24.)).isNull(), 3000);
+        QVERIFY(image.pixelColor(80, 45).blue() > 200); QVERIFY(image.pixelColor(80, 45).red() < 30);
+        QVERIFY(reader.error().isEmpty()); QVERIFY(reader.skipped() >= 10);
+        // More than 50 consecutive failures are fatal, but the picture freezes on the last good frame.
+        QCOMPARE(damage(dir.filePath("tail.mkv"), 30, 96), 66);
+        VideoReader broken(dir.filePath("tail.mkv"));
+        for (int frame = 0; frame < 29; ++frame)
+            QTRY_VERIFY_WITH_TIMEOUT(!(image = broken.imageAt(frame / 24.)).isNull(), 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(!broken.error().isEmpty(), 3000); QVERIFY(broken.skipped() > 50);
+        const QImage frozen = broken.imageAt(3.5); QVERIFY(!frozen.isNull()); QCOMPARE(frozen, image);
+        VideoReader missing(dir.filePath("missing.mkv"));
+        QTRY_VERIFY_WITH_TIMEOUT(!missing.error().isEmpty(), 3000); QVERIFY(missing.imageAt(0).isNull());
+    }
+    void loopingVideoPrerollsTheLoopHead() {
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg CLI is unavailable for fixture generation");
+        QTemporaryDir dir; const QString file = dir.filePath("loop.mkv");
+        QProcess process; process.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=red:s=160x90:r=24:d=1", "-f", "lavfi", "-i", "color=blue:s=160x90:r=24:d=1", "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-c:v", "ffv1", file});
+        QVERIFY(process.waitForFinished(15000)); QCOMPARE(process.exitCode(), 0);
+        const auto asset = loadMedia(file); const double loopStart = .5;
+        VideoReader reader(file); reader.setLoop(loopStart, asset.duration); QImage image;
+        for (int cycle = 0; cycle < 2; ++cycle) {
+            // Play the tail of the loop as Controller::compose would, then wrap.
+            for (int frame = 36; frame < 48; ++frame)
+                QTRY_VERIFY_WITH_TIMEOUT(!(image = reader.imageAt(frame / 24.)).isNull(), 3000);
+            QVERIFY(image.pixelColor(80, 45).blue() > 200);
+            QTest::qWait(300);
+            image = reader.imageAt(loopStart + std::fmod(48 / 24. - loopStart, asset.duration - loopStart));
+            QVERIFY(!image.isNull()); QVERIFY(image.pixelColor(80, 45).red() > 200);
+            for (int frame = 13; frame < 30; ++frame)
+                QTRY_VERIFY_WITH_TIMEOUT(!(image = reader.imageAt(frame / 24.)).isNull(), 3000);
+            QVERIFY(image.pixelColor(80, 45).blue() > 200);
+        }
+        QVERIFY(reader.error().isEmpty()); QCOMPARE(reader.skipped(), 0u);
+    }
+    void monoFrontLeftDecodesAsCentre() {
+        // WAVE_FORMAT_EXTENSIBLE mono with a front-left mask bypasses direct PCM and decodes through FFmpeg.
+        QTemporaryDir dir; const auto path = dir.filePath("front-left.wav");
+        auto bytes = waveBytes(16, 1, 1, sampleRate, true); qToLittleEndian<quint32>(1, bytes.data() + 50); writeBytes(path, bytes);
+        const auto asset = loadMedia(path); QVERIFY(asset.audio); QVERIFY(asset.audio->mono); QCOMPARE(asset.audio->length(), 17003);
+        float samples[200]; asset.audio->storage->read(1000, samples, 100);
+        for (int i = 0; i < 100; ++i) {
+            QVERIFY(std::abs(samples[i * 2] - waveValue(1000 + i, 0)) < 1e-4f); QCOMPARE(samples[i * 2 + 1], samples[i * 2]);
+        }
+    }
     void compatiblePcmUsesSourceFile_data() {
         QTest::addColumn<int>("bits"); QTest::addColumn<int>("type");
         QTest::addColumn<int>("channels"); QTest::addColumn<bool>("extensible");
