@@ -39,8 +39,8 @@ public:
     virtual void read(Frame first, float* stereo, std::size_t count) const = 0;
 };
 struct AudioData {
-    // Generated/test sources may stay resident. Imported sources use disk PCM.
-    // Both representations are stereo, interleaved, 48 kHz.
+    // Generated/test sources may stay resident. Imported sources use direct
+    // PCM files or prepared disk caches. Reads return interleaved 48 kHz stereo.
     std::vector<float> samples;
     std::shared_ptr<const AudioStorage> storage;
     static constexpr Frame peakStride = 480;

@@ -252,7 +252,11 @@ void materializeProjectMedia(Project& p, const QString& directory) {
                 if (!QFile::copy(a.path, target)) throw std::runtime_error("Cannot copy packaged media: " + a.path.toStdString());
                 copied.insert(a.path, target);
             }
-            a.path = copied.value(a.path); continue;
+            a.path = copied.value(a.path);
+            // Direct PCM storage must follow the saved copy before package
+            // extraction is released. Converted sources reuse their disk cache.
+            if (a.audio) a.audio = loadMedia(a.path).audio;
+            continue;
         }
         const QString target = dir.filePath(newId() + (a.image ? ".png" : ".wav"));
         QSaveFile file(target);
@@ -276,5 +280,6 @@ void materializeProjectMedia(Project& p, const QString& directory) {
         a.path = target;
     }
     p.packageDirectory.reset();
+    bindAudio(p);
 }
 }

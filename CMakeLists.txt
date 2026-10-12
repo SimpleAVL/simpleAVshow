@@ -70,7 +70,7 @@ if(SAV_BUILD_APP)
     src/app/Project.cpp src/app/ProjectPackage.cpp src/app/Controller.cpp
     src/app/Timeline.cpp src/app/ProgramView.cpp src/app/MainWindow.cpp
     src/app/MidiMessageEditor.cpp
-    src/media/Media.cpp src/media/AudioDevice.cpp src/media/MidiOutput.cpp
+    src/media/Media.cpp src/media/AudioSources.cpp src/media/AudioDevice.cpp src/media/MidiOutput.cpp
   )
   target_include_directories(sav_desktop PUBLIC src ${RTMIDI_HEADER_DIR} PRIVATE ${FFMPEG_INCLUDE_DIR})
   target_link_libraries(sav_desktop PUBLIC sav_core Qt6::Widgets Qt6::Concurrent ${SAV_RTAUDIO} ${SAV_RTMIDI} PRIVATE ${SAV_FFMPEG} LibArchive::LibArchive)
