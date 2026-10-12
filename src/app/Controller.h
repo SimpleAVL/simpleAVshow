@@ -46,6 +46,10 @@ public:
     void setShowMode(bool enabled);
     QImage compose();
     void save(QString target);
+    // Saving an opened package or generated media copies files; MainWindow runs that part on a worker.
+    bool savingCopiesMedia() const;
+    static QString mediaDirectory(const QString& target);
+    void commitSave(Project candidate, QString target);
     void report(QString message);
     // Sidecar for crash recovery: next to the show, or in app data while untitled.
     QString autosavePath() const;

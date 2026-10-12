@@ -365,13 +365,20 @@ QImage Controller::compose() {
     }
     lastComposed_ = frame; lastPicture_ = picture; return picture;
 }
+QString Controller::mediaDirectory(const QString& target) {
+    return QFileInfo(target).absolutePath() + "/" + QFileInfo(target).completeBaseName() + ".media";
+}
+bool Controller::savingCopiesMedia() const {
+    return project.packageDirectory || std::any_of(project.assets.cbegin(), project.assets.cend(), [](const MediaAsset& a) { return a.path.isEmpty(); });
+}
 void Controller::save(QString target) {
     if (!canEdit()) return;
+    try { Project candidate = project; materializeProjectMedia(candidate, mediaDirectory(target)); commitSave(std::move(candidate), target); }
+    catch (const std::exception& e) { report("Save failed: " + QString::fromUtf8(e.what())); }
+}
+void Controller::commitSave(Project candidate, QString target) {
     try {
-        Project candidate = project;
-        const QString directory = QFileInfo(target).absolutePath() + "/" + QFileInfo(target).completeBaseName() + ".media";
         const auto sourceDirectory = project.packageDirectory;
-        materializeProjectMedia(candidate, directory);
         const QString previous = path;
         writeProject(candidate, target); project.assets = std::move(candidate.assets); bindAudio(project); project.packageDirectory.reset(); path = target; dirty = false;
         // Undo must not restore temporary package paths or unsaved generated media.
@@ -391,4 +398,5 @@ void Controller::save(QString target) {
         report("Saved " + QFileInfo(target).fileName()); emit changed();
     } catch (const std::exception& e) { report("Save failed: " + QString::fromUtf8(e.what())); }
 }
+
 }

@@ -513,6 +513,17 @@ private slots:
         const auto restored = readProject(dir.filePath("edited.savshow")); QCOMPARE(restored.title, QString("An edited copy"));
         const auto original = readProject(package); QCOMPARE(original.title, generated.title);
     }
+    void savingAnOpenedPackageCopiesMediaOffTheGuiThread() {
+        QTemporaryDir dir; const auto package = dir.filePath("demo.savpack"); writeProjectPackage(demoProject(), package);
+        MainWindow window; window.openPath(package); QTRY_VERIFY_WITH_TIMEOUT(!window.controller().busy, 15000);
+        auto& c = window.controller(); QVERIFY(c.savingCopiesMedia());
+        c.path = dir.filePath("copy.savshow"); QAction* save = nullptr;
+        for (auto* action : window.findChildren<QAction*>()) if (action->text() == "Save") save = action;
+        QVERIFY(save); save->trigger();
+        QVERIFY2(!c.dirty, qPrintable(c.status)); QVERIFY(!c.busy); QVERIFY(!c.savingCopiesMedia());
+        for (const auto& asset : c.project.assets) { QVERIFY(asset.path.startsWith(dir.filePath("copy.media") + "/")); QVERIFY(QFileInfo::exists(asset.path)); }
+        QCOMPARE(readProject(c.path).assets.size(), c.project.assets.size());
+    }
     void packagedPcmSurvivesSaveAsAfterExtractionIsReleased() {
         QTemporaryDir dir; const auto package = dir.filePath("demo.savpack");
         writeProjectPackage(demoProject(), package);

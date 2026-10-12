@@ -876,7 +876,25 @@ void MainWindow::save(bool as) {
     if (as || target.isEmpty()) target = QFileDialog::getSaveFileName(this, "Save show", target, "SimpleAVShow (*.savshow)");
     if (target.isEmpty()) return;
     if (!target.endsWith(".savshow", Qt::CaseInsensitive)) target += ".savshow";
-    c_.save(target);
+    if (!c_.savingCopiesMedia()) { c_.save(target); return; }
+    // Copying package media can take minutes; keep the GUI responsive and the project locked meanwhile.
+    c_.busy = true; updatePlayback();
+    QProgressDialog progress("Copying media next to the show…", QString(), 0, 0, this);
+    progress.setWindowTitle("Saving show"); progress.setWindowModality(Qt::WindowModal); progress.setMinimumDuration(0);
+    progress.setAutoClose(false); progress.setAutoReset(false);
+    QFutureWatcher<ProjectResult> watcher;
+    connect(&watcher, &QFutureWatcher<ProjectResult>::finished, &progress, &QDialog::accept);
+    const QString directory = Controller::mediaDirectory(target);
+    watcher.setFuture(QtConcurrent::run([candidate = c_.project, directory]() mutable {
+        ProjectResult result;
+        try { materializeProjectMedia(candidate, directory); result.project = std::move(candidate); }
+        catch (const std::exception& e) { result.error = QString::fromUtf8(e.what()); }
+        return result;
+    }));
+    progress.exec();
+    auto result = watcher.result(); c_.busy = false;
+    if (!result.error.isEmpty()) { c_.report("Save failed: " + result.error); QMessageBox::warning(this, "Could not save", result.error); refresh(); return; }
+    c_.commitSave(std::move(result.project), target);
 }
 void MainWindow::exportPackage() {
     if (!c_.canEdit()) return;

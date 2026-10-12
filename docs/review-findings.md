@@ -63,7 +63,7 @@ Status: `open`, `fixed`, `wontfix` (with reason), `deferred`.
 
 | ID | Sev | Status | Finding |
 |----|-----|--------|---------|
-| P1 | Medium | open | **Saving an opened package freezes the GUI.** `materializeProjectMedia` copies all extracted media and re-hashes audio on the GUI thread with no progress (`Project.cpp:252-258`). **Fix:** run it on a worker with progress; try rename before copy. |
+| P1 | Medium | fixed (worker + progress; rename-instead-of-copy not done) | **Saving an opened package freezes the GUI.** `materializeProjectMedia` copies all extracted media and re-hashes audio on the GUI thread with no progress (`Project.cpp:252-258`). **Fix:** run it on a worker with progress; try rename before copy. |
 | P2 | Medium | fixed | **Package extraction has no disk budget.** Compressed entries (zip bombs) and unreferenced `media/*` entries are accepted, and free space is not checked. Extraction folders in `%TEMP%` leak after a crash. **Fix:** accept only stored `media/<uuid>.<ext>` entries that the manifest references; check sizes against free space; sweep stale `simpleavshow-package-*` folders at startup. |
 | P3 | Medium | fixed | **Windows leaks extracted video folders.** `Controller::replace` releases the old project's `QTemporaryDir` before `arm(0)` closes video readers, so Windows cannot delete open files. **Fix:** close readers before releasing the old project. |
 | P4 | Low | fixed | **Windows device names pass the package filename check** (`media/CON`, `media/NUL.wav`; `ProjectPackage.cpp:85`). Fixed by the UUID-only rule in P2. |
