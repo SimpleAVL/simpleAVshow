@@ -40,13 +40,14 @@ public:
     void read(Frame first, float* out, std::size_t count) const override {
         if (checkingCallback) callbackReads.store(true);
         reads.fetch_add(1);
+        if (changed.load()) throw AudioSourceChanged("Test source changed");
         if (fail.load()) throw std::runtime_error("Test cache failure");
         std::this_thread::sleep_for(std::chrono::milliseconds(delay.load()));
         for (std::size_t i = 0; i < count; ++i) out[i * 2] = out[i * 2 + 1] = value(first + static_cast<Frame>(i));
     }
     mutable std::atomic<bool> callbackReads{false};
     mutable std::atomic<unsigned> reads{0};
-    std::atomic<bool> fail{false};
+    std::atomic<bool> fail{false}, changed{false};
     std::atomic<int> delay{0};
 private:
     Frame length_;
@@ -229,6 +230,64 @@ int main() {
             Transport t; t.configure(p); expect(t.audioReadFailed(), "pre-roll reports storage failure");
             play(t); float out[2]; checkedRender(t, out, 1, 2); near(out[0], 0, "failure does not emit garbage");
             expect(t.position() == 0 && !storage->callbackReads.load(), "failure never advances or accesses disk on callback");
+        }},
+        {"disk clip replays without a miss after seeking back before it", [] {
+            auto storage = std::make_shared<PatternStorage>(frames(60));
+            auto p = show(false); p->duration = frames(120); p->clips[0].start = 1000; p->clips[0].duration = storage->length(); p->clips[0].audio = diskAudio(storage);
+            Transport t; t.configure(p); play(t); std::vector<float> out(512 * 2);
+            for (int block = 0; block < 100; ++block) { checkedRender(t, out.data(), 512, 2); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+            const auto waits = t.bufferWaits();
+            t.command({Action::Seek, 0}); checkedRender(t, out.data(), 1, 2);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            checkedRender(t, out.data(), 512, 2); checkedRender(t, out.data(), 512, 2);
+            expect(t.bufferWaits() == waits, "seek back re-reads the clip entry before it is needed");
+            near(out[(1000 - 513) * 2], PatternStorage::value(0), "replay starts at the source-in frame");
+            expect(!storage->callbackReads.load(), "retargeting never reads disk on callback");
+        }},
+        {"transient read failures retry, then recover without latching", [] {
+            auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto p = show(false); p->duration = storage->length(); p->clips[0].duration = p->duration; p->clips[0].audio = diskAudio(storage);
+            Transport t; t.configure(p); play(t); float out[2]; checkedRender(t, out, 1, 2);
+            storage->fail.store(true);
+            const Frame destination = frames(20 * 3600);
+            t.command({Action::Seek, destination});
+            for (int i = 0; i < 100; ++i) { checkedRender(t, out, 1, 2); std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+            expect(t.position() == destination && t.readRetries() > 0 && !t.audioReadFailed(), "a locked file waits and retries");
+            storage->fail.store(false);
+            for (int i = 0; i < 1000 && t.position() == destination; ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); checkedRender(t, out, 1, 2); }
+            expect(t.position() == destination + 1 && !t.audioReadFailed(), "playback resumes once the file is readable");
+            near(out[0], PatternStorage::value(destination), "recovery resumes at the exact frame");
+        }},
+        {"persistent read failures latch after the retry window; changed sources latch at once", [] {
+            for (const bool sourceChanged : {false, true}) {
+                auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));
+                auto p = show(false); p->duration = storage->length(); p->clips[0].duration = p->duration; p->clips[0].audio = diskAudio(storage);
+                Transport t; t.configure(p); play(t); float out[2]; checkedRender(t, out, 1, 2);
+                (sourceChanged ? storage->changed : storage->fail).store(true);
+                t.command({Action::Seek, frames(20 * 3600)}); checkedRender(t, out, 1, 2);
+                const auto started = std::chrono::steady_clock::now();
+                while (!t.audioReadFailed() && std::chrono::steady_clock::now() - started < std::chrono::seconds(4))
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                const auto elapsed = std::chrono::steady_clock::now() - started;
+                expect(t.audioReadFailed(), "unrecoverable reads are reported");
+                expect(sourceChanged ? elapsed < std::chrono::milliseconds(500) : elapsed >= AudioBuffer::retryWindow - std::chrono::milliseconds(100),
+                    sourceChanged ? "changed source fails without retrying" : "transient failures retry for the full window");
+            }
+        }},
+        {"a single connected leg carries the whole source", [] {
+            auto p = show(false); p->tracks[0].left = 1; p->tracks[0].right = -1; p->tracks[0].pan = .7;
+            auto stereo = std::make_shared<AudioData>(); stereo->samples = {.2f, .4f}; p->clips[0].audio = stereo; p->clips[0].loop = true;
+            Transport t; t.configure(p); play(t); float out[2]; checkedRender(t, out, 1, 2);
+            near(out[0], 0, "disconnected leg stays silent"); near(out[1], .3, "stereo sums to mono at full level, ignoring pan");
+            auto mono = audio({.5f}); mono->mono = true; p->clips[0].audio = mono; p->tracks[0].left = -1; p->tracks[0].right = 0;
+            t.configure(p); play(t); checkedRender(t, out, 1, 2); near(out[0], .5, "mono source keeps full level on one leg");
+        }},
+        {"non-finite samples are silenced and flagged", [] {
+            auto p = show(false); p->clips[0].audio = audio({std::nanf(""), .25f});
+            auto companion = p->clips[0]; companion.audio = audio({.25f}); companion.loop = true; p->clips.push_back(companion);
+            Transport t; t.configure(p); play(t); float out[4]; checkedRender(t, out, 2, 2);
+            near(out[0], 0, "NaN never reaches the device"); expect(t.clipped(), "NaN latches the overload indicator");
+            near(out[2], .5, "following samples mix normally");
         }},
         {"envelope interpolation follows exact frame position", [] {
             Envelope e{{{10, .2}, {20, .8}}}; near(e.at(0, 1), .2, "before first key"); near(e.at(15, 1), .5, "linear middle"); near(e.at(30, 1), .8, "after last key");

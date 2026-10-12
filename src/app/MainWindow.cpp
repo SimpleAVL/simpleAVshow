@@ -234,10 +234,10 @@ void MainWindow::buildInspector() {
         const int output = route->currentData().toInt();
         if (output == -1) { trackLeft_->setValue(1); trackRight_->setValue(2); trackPan_->setValue(0); }
         else if (output == -3) { trackLeft_->setValue(0); trackRight_->setValue(0); }
-        else if (output > 0) { trackLeft_->setValue(output); trackRight_->setValue(0); trackPan_->setValue(-1); }
+        else if (output > 0) { trackLeft_->setValue(output); trackRight_->setValue(0); trackPan_->setValue(0); }
         route->setCurrentIndex(0);
     });
-    trackPan_->setToolTip("−1 = left, 0 = center, +1 = right. Mono presets use −1 for full level on the connected leg.");
+    trackPan_->setToolTip("−1 = left, 0 = center, +1 = right. With one connected output, stereo sources are summed to mono at full level and pan has no effect.");
     audio->addRow("Volume (1 = full)", trackGain_); audio->addRow("Pan", trackPan_); audio->addRow("Left → output", trackLeft_); audio->addRow("Right → output", trackRight_);
     auto* routeHint = new QLabel("Choose a preset, then Apply track. Guide and Click start silent so they do not reach the audience. Use separate interface outputs for them."); routeHint->setWordWrap(true); routeHint->setStyleSheet("color: #88a0be; font-size: 10px;"); audio->addRow(routeHint);
     trackLayout->addWidget(trackAudio_); auto* applyTrackButton = button("Apply track", trackLayout); connect(applyTrackButton, &QPushButton::clicked, this, &MainWindow::applyTrack); trackLayout->addStretch(); inspector_->addWidget(trackPage);
@@ -361,6 +361,7 @@ void MainWindow::updatePlayback() {
         (c_.needsMidi() ? (c_.midi.connected() ? " · MIDI connected" : c_.midiDestination().isEmpty() ? " · MIDI needs a device" : " · MIDI reconnects on Play") : "") +
         (c_.transport.clipped() ? " · CLIPPING" : "") + (c_.device.underruns() ? QString(" · %1 underruns").arg(c_.device.underruns()) : "") +
         (c_.transport.bufferWaits() ? QString(" · %1 audio waits").arg(c_.transport.bufferWaits()) : "") +
+        (c_.transport.readRetries() ? QString(" · %1 disk retries").arg(c_.transport.readRetries()) : "") +
         (c_.lateFrames ? QString(" · %1 video waits").arg(c_.lateFrames) : ""));
     midiDestination_->setText(c_.midi.connected() ? "Destination: " + c_.midi.name() : c_.midiDestination().isEmpty() ? "Choose a MIDI device once; Play reconnects it automatically." : "On Play: reconnect to " + c_.midiDestination());
     health_->setToolTip(c_.device.running() ? "Audio: " + c_.audioName + "\nMIDI: " + (c_.midi.connected() ? c_.midi.name() : c_.needsMidi() ? "Choose a destination in Outputs" : "Not needed for this show") : "Play connects your remembered audio interface, or your default speakers on first use.");

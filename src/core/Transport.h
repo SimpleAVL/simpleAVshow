@@ -30,6 +30,7 @@ public:
     bool clipped() const noexcept { return clipped_.load(); }
     bool eventOverflow() const noexcept { return overflow_.load(); }
     unsigned bufferWaits() const noexcept { return bufferWaits_.load(); }
+    unsigned readRetries() const noexcept { return readRetries_.load(); }
     bool audioReadFailed() const noexcept { return audioReadFailed_.load(); }
     std::uint64_t epoch() const noexcept { return epoch_.load(std::memory_order_acquire); }
 private:
@@ -42,7 +43,7 @@ private:
     std::vector<std::unique_ptr<AudioBuffer>> buffers_;
     std::thread audioWorker_;
     std::atomic<bool> audioStop_{true}, audioReadFailed_{false};
-    std::atomic<unsigned> bufferWaits_{0};
+    std::atomic<unsigned> bufferWaits_{0}, readRetries_{0};
     Queue<Command, 128> commands_;
     DynamicQueue<MidiEvent> midi_;
     Frame position_ = 0;
@@ -59,5 +60,7 @@ private:
     void publish(float peak) noexcept;
     void stopAudioWorker();
     void locate(Frame position) noexcept;
+    Frame entry(std::size_t clip, Frame position) const noexcept;
+    void prime() noexcept;
 };
 }

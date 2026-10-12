@@ -23,7 +23,7 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
             stopAll(); report("MIDI event queue overflow. Playback is stopped; inspect the project.");
         }
         if (transport.audioReadFailed() && transport.state() != State::Stopped) {
-            stopAll(); report("Audio source changed or could not be read. Playback is stopped; restore missing media and reopen the project to reload audio or rebuild damaged caches."); playbackProblem = status;
+            stopAll(); report("Audio source changed or could not be read. Playback is stopped; restore missing media and press Play to retry, or reopen the project to rebuild changed caches."); playbackProblem = status;
         }
         emit tick();
     }); timer_.start();
@@ -109,10 +109,12 @@ bool Controller::routesValid() const {
 }
 void Controller::toggle() {
     if (busy) return;
-    const bool playing = transport.state() == State::Playing;
+    const State state = transport.state(); const bool playing = state == State::Playing;
     if (!playing) {
         playbackProblem.clear();
-        if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and reopen the project to reload audio or rebuild damaged caches."); playbackProblem = status; return; }
+        // Re-arming retries sources that were briefly unavailable; changed sources still need reopening.
+        if (transport.audioReadFailed() && state != State::Held && !transport.asyncVoices()) arm(position());
+        if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and press Play to retry, or reopen the project to rebuild changed or damaged caches."); playbackProblem = status; return; }
         for (const auto& asset : project.assets) if (asset.video && !QFileInfo::exists(asset.path)) {
             report("Video source is missing: " + asset.path); playbackProblem = status; return;
         }

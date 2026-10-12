@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,9 @@ struct Envelope {
         return a.value + t * (right->value - a.value);
     }
 };
+// A source no longer matches what was prepared. Retrying cannot help; other
+// read failures (locked or briefly unavailable files) are retried.
+struct AudioSourceChanged : std::runtime_error { using std::runtime_error::runtime_error; };
 class AudioStorage {
 public:
     virtual ~AudioStorage() = default;

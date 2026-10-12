@@ -26,6 +26,7 @@ constexpr qint64 stereoBytes = 2 * sizeof(float);
 constexpr qint64 metadataHeader = 8 + 8 + 1 + 32 + 32;
 constexpr char cacheMagic[] = "SAVPCM01";
 [[noreturn]] void fail(const QString& message) { throw std::runtime_error(message.toStdString()); }
+[[noreturn]] void changed(const QString& message) { throw AudioSourceChanged(message.toStdString()); }
 
 QByteArray fileHash(const QString& path) {
     QFile file(path);
@@ -56,9 +57,9 @@ public:
         const QFileInfo info(path_);
         QFile file(path_);
         const auto bytes = static_cast<qint64>(count) * stereoBytes;
-        if (info.size() != length_ * stereoBytes || info.lastModified() != modified_ ||
-            !file.open(QIODevice::ReadOnly) || !file.seek(first * stereoBytes) ||
-            file.read(reinterpret_cast<char*>(stereo), bytes) != bytes)
+        if (info.exists() && (info.size() != length_ * stereoBytes || info.lastModified() != modified_))
+            changed("Prepared audio cache changed: " + path_);
+        if (!file.open(QIODevice::ReadOnly) || !file.seek(first * stereoBytes) || file.read(reinterpret_cast<char*>(stereo), bytes) != bytes)
             fail("Cannot read prepared audio cache: " + path_);
     }
 private:
@@ -71,7 +72,7 @@ class WaveStorage final : public AudioStorage {
 public:
     WaveStorage(QString path, qint64 offset, Frame length, int channels, int bits, bool floating)
         : path_(std::move(path)), offset_(offset), length_(length), channels_(channels), bits_(bits), floating_(floating),
-          size_(QFileInfo(path_).size()), modified_(QFileInfo(path_).lastModified()) {}
+          size_(QFileInfo(path_).size()) {}
     Frame length() const noexcept override { return length_; }
     void prepare(AudioData& data) {
         data.peaks.resize(static_cast<std::size_t>((length_ + AudioData::peakStride - 1) / AudioData::peakStride));
@@ -98,7 +99,7 @@ public:
             const auto size = std::min(AudioBuffer::blockFrames, end - frame) * stride;
             const QByteArrayView block(bytes.constData() + (frame - blockFirst) * stride, static_cast<qsizetype>(size));
             if (QCryptographicHash::hash(block, QCryptographicHash::Sha256) != blockHashes_[static_cast<std::size_t>(frame / AudioBuffer::blockFrames)])
-                fail("PCM audio source changed; reopen the project: " + path_);
+                changed("PCM audio source changed; reopen the project: " + path_);
         }
         decode(reinterpret_cast<const uchar*>(bytes.constData()) + (first - blockFirst) * stride, stereo, count);
     }
@@ -107,9 +108,10 @@ private:
         const QFileInfo info(path_);
         const qint64 stride = channels_ * (bits_ / 8);
         QFile file(path_);
-        if (info.size() != size_ || info.lastModified() != modified_ ||
-            !file.open(QIODevice::ReadOnly) || !file.seek(offset_ + first * stride))
-            fail("PCM audio source changed or is unavailable: " + path_);
+        // Block hashes verify content, so a touched modification time alone is harmless.
+        if (info.exists() && info.size() != size_) changed("PCM audio source changed; reopen the project: " + path_);
+        if (!file.open(QIODevice::ReadOnly) || !file.seek(offset_ + first * stride))
+            fail("PCM audio source is unavailable: " + path_);
         const auto bytes = file.read(static_cast<qint64>(count) * stride);
         if (bytes.size() != static_cast<qint64>(count) * stride) fail("Cannot read PCM audio source: " + path_);
         return bytes;
@@ -138,7 +140,6 @@ private:
     int channels_, bits_;
     bool floating_;
     qint64 size_;
-    QDateTime modified_;
     std::vector<QByteArray> blockHashes_;
 };
 }

@@ -240,7 +240,7 @@ private slots:
         QVERIFY(QMetaObject::invokeMethod(preset, "activated", Q_ARG(int, preset->currentIndex())));
         QTest::mouseClick(apply, Qt::LeftButton);
         const auto& guide = window.controller().project.show.tracks[4];
-        QCOMPARE(guide.left, 2); QCOMPARE(guide.right, -1); QCOMPARE(guide.pan, -1.);
+        QCOMPARE(guide.left, 2); QCOMPARE(guide.right, -1); QCOMPARE(guide.pan, 0.);
         window.controller().undo(); QCOMPARE(window.controller().project.show.tracks[4].left, -1);
         QCOMPARE(window.controller().project.show.tracks[4].right, -1);
         window.findChild<QSpinBox*>("trackLeftOutput")->setValue(128);

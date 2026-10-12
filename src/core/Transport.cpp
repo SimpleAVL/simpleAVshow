@@ -1,5 +1,6 @@
 #include "core/Transport.h"
 #include <chrono>
+#include <cmath>
 #include <numeric>
 #include <stdexcept>
 
@@ -16,6 +17,19 @@ void Transport::locate(Frame position) noexcept {
         [this](Frame t, std::size_t i) { return t < show_->clips[i].start; }) - starts_.begin());
     nextMarker_ = static_cast<std::size_t>(std::lower_bound(markers_.begin(), markers_.end(), position,
         [this](std::size_t i, Frame t) { return show_->markers[i].time < t; }) - markers_.begin());
+    prime();
+}
+Frame Transport::entry(std::size_t i, Frame position) const noexcept {
+    const auto& c = show_->clips[i];
+    Frame source = c.offset + (c.contains(position) ? position - c.start : 0);
+    if (source >= c.audio->length()) source = c.loop ? c.offset + (source - c.offset) % std::max(Frame{1}, c.audio->length() - c.offset) : c.offset;
+    return source;
+}
+// Point every disk source at the frame it will play next, so clips that already
+// played read ahead again after a seek or Stop All instead of missing on entry.
+void Transport::prime() noexcept {
+    for (const auto i : starts_) if (buffers_[i])
+        buffers_[i]->request(voices_[i].state == VoiceState::Running ? voices_[i].source : entry(i, position_));
 }
 void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
     if (!show || show->duration <= 0 || show->duration > maxFrame) throw std::invalid_argument("Invalid show duration");
@@ -32,10 +46,8 @@ void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
         if (!c.audio || c.track < 0 || static_cast<std::size_t>(c.track) >= show_->tracks.size() || show_->tracks[c.track].visual) continue;
         starts_.push_back(i);
         if (c.audio->storage) {
-            Frame initial = c.offset + (c.contains(position_) ? position_ - c.start : 0);
-            if (initial >= c.audio->length()) initial = c.loop ? c.offset + (initial - c.offset) % std::max(Frame{1}, c.audio->length() - c.offset) : c.offset;
-            buffers_[i] = std::make_unique<AudioBuffer>(c.audio, c.offset, c.loop, initial);
-            buffers_[i]->service(); // Pre-roll before opening the device.
+            buffers_[i] = std::make_unique<AudioBuffer>(c.audio, c.offset, c.loop, entry(i, position_));
+            buffers_[i]->prebuffer(); // Before opening the device.
             if (buffers_[i]->failed()) audioReadFailed_.store(true);
         }
     }
@@ -45,13 +57,13 @@ void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
     locate(position_);
     state_ = State::Stopped; heldMarker_ = -1;
     epoch_.fetch_add(1);
-    clipped_.store(false); overflow_.store(false); bufferWaits_.store(0);
+    clipped_.store(false); overflow_.store(false); bufferWaits_.store(0); readRetries_.store(0);
     if (std::any_of(buffers_.begin(), buffers_.end(), [](const auto& buffer) { return bool(buffer); })) {
         audioStop_.store(false);
         audioWorker_ = std::thread([this] {
             while (!audioStop_.load()) {
                 for (auto& buffer : buffers_) if (buffer) {
-                    buffer->service();
+                    if (!buffer->service()) readRetries_.fetch_add(1, std::memory_order_relaxed);
                     if (buffer->failed()) audioReadFailed_.store(true);
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -92,7 +104,7 @@ void Transport::apply(Command command) noexcept {
     }
     case Action::StopAll:
         std::fill(voices_.begin(), voices_.end(), Voice{}); state_ = State::Stopped; heldMarker_ = -1;
-        epoch_.fetch_add(1); clipped_.store(false);
+        epoch_.fetch_add(1); clipped_.store(false); prime();
         break;
     }
 }
@@ -167,16 +179,25 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             if (!voice.audible) continue;
             const Frame local = position_ - clip.start;
             const double gain = track.gain * clip.volume.at(local, clip.gain);
+            if (!output) continue;
+            if ((track.left >= 0) != (track.right >= 0)) {
+                // One connected leg carries the whole source at full level; pan has no meaning there.
+                const int leg = std::max(track.left, track.right);
+                const double mono = clip.audio->mono ? voice.left : (voice.left + voice.right) * .5;
+                if (static_cast<unsigned>(leg) < channels) output[static_cast<std::size_t>(f) * channels + leg] += static_cast<float>(mono * gain);
+                continue;
+            }
             const double pan = std::clamp(track.pan + clip.balance.at(local, clip.pan), -1., 1.);
             const double leftGain = clip.audio->mono ? std::cos((pan + 1.) * 0.7853981633974483) : (pan > 0 ? 1. - pan : 1.);
             const double rightGain = clip.audio->mono ? std::sin((pan + 1.) * 0.7853981633974483) : (pan < 0 ? 1. + pan : 1.);
-            if (output && track.left >= 0 && static_cast<unsigned>(track.left) < channels)
+            if (track.left >= 0 && static_cast<unsigned>(track.left) < channels)
                 output[static_cast<std::size_t>(f) * channels + track.left] += static_cast<float>(voice.left * gain * leftGain);
-            if (output && track.right >= 0 && static_cast<unsigned>(track.right) < channels)
+            if (track.right >= 0 && static_cast<unsigned>(track.right) < channels)
                 output[static_cast<std::size_t>(f) * channels + track.right] += static_cast<float>(voice.right * gain * rightGain);
         }
         if (output) for (unsigned c = 0; c < channels; ++c) {
             float& sample = output[static_cast<std::size_t>(f) * channels + c];
+            if (!std::isfinite(sample)) { sample = 0; clipped_.store(true, std::memory_order_relaxed); } // Drivers may turn NaN into full-scale noise.
             peak = std::max(peak, std::abs(sample));
             if (std::abs(sample) > 1.f) clipped_.store(true, std::memory_order_relaxed);
             sample = std::clamp(sample, -1.f, 1.f);
