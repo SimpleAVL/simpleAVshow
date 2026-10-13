@@ -11,7 +11,7 @@ Bug reports and feature requests go to [GitHub Issues](https://github.com/staubi
 | `src/core` | Qt-independent transport, mixing, and real-time queues. Runs in the audio callback. |
 | `src/media` | FFmpeg decoding, audio caches, RtAudio/RtMidi devices. |
 | `src/app` | Qt Widgets editor, project model, persistence, packages. |
-| `tests` | `transport_tests` (no native dependencies) and `app_tests` (Qt Test). |
+| `tests` | `transport_tests` (no native dependencies) plus `app_tests` and `mcp_tests` (Qt Test). |
 | `docs` | The user manual. CI copies this whole folder into every package, so keep it user-facing. |
 | `development` | Developer documentation: [architecture](development/architecture.md), [CI and releases](development/ci-and-releases.md), [screenshot maintenance](development/screenshots.md). |
 | `packaging` | Packaging scripts, the release README and notes, third-party license texts. |
@@ -19,7 +19,7 @@ Bug reports and feature requests go to [GitHub Issues](https://github.com/staubi
 
 ## Building
 
-The app needs Qt ≥ 6.4 (Widgets, Concurrent, Test), FFmpeg ≥ 5.1, RtAudio ≥ 6, RtMidi, libarchive ≥ 3.6, CMake ≥ 3.24, and a C++20 compiler. Launch any build with `--demo` to open the demonstration show.
+The app needs Qt ≥ 6.4 (Widgets, Concurrent, Network, Test), FFmpeg ≥ 5.1, RtAudio ≥ 6, RtMidi, libarchive ≥ 3.6, CMake ≥ 3.24, and a C++20 compiler. Launch any build with `--demo` to open the demonstration show.
 
 ### macOS
 
@@ -80,6 +80,8 @@ ctest --test-dir build-core --output-on-failure
 They cover hold boundaries, async looping/finish, pause/resume, seeks, MIDI timing, routing isolation, pan, clipping, Stop All, project end, large timeline scheduling, disk-buffer handoffs, cache failures, and callback allocation/I/O checks.
 
 The Qt suite (`app_tests`, built with the app) adds media decoding and caching, direct WAV streaming, video seeks, project and package round-trips, malformed input, undo/redo, Show-mode UI, device selection, and the MIDI cue editor. The FFmpeg CLI generates its fixtures; media tests skip when it is not on PATH.
+
+The MCP suite (`mcp_tests`) exercises the local HTTP endpoint, authentication, protocol discovery, shared edits, revision conflicts, atomic rollback/undo, linked trimming, asynchronous media preparation, and the operator controls. It runs offscreen alongside the app tests and needs no external agent or service.
 
 Clang/GCC builds support `-DSAV_SANITIZE=ON` (AddressSanitizer + UBSan) or `-DSAV_TSAN=ON` (ThreadSanitizer); the two cannot be combined. CI runs the transport tests under ThreadSanitizer.
 

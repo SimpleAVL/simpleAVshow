@@ -226,10 +226,9 @@ MediaAsset loadAsset(const MediaAsset& entry) {
     }
 }
 }
-void writeProject(const Project& p, const QString& path) {
-    validate(p);
+QJsonObject projectJson(const Project& p, const QString& directory) {
     QJsonArray tracks, clips, markers, assets;
-    const QDir dir = QFileInfo(path).absoluteDir();
+    const QDir dir(directory);
     for (const auto& t : p.show.tracks) tracks.append(QJsonObject{
         {"id", QString::fromStdString(t.id)}, {"name", QString::fromStdString(t.name)}, {"visual", t.visual}, {"async", t.async},
         {"muted", t.muted}, {"gain", t.gain}, {"pan", t.pan}, {"left", t.left}, {"right", t.right}});
@@ -249,11 +248,17 @@ void writeProject(const Project& p, const QString& path) {
             {"time", static_cast<double>(m.time)}, {"hold", m.hold}, {"timing", m.timing == MidiTiming::Arrival ? "arrival" : "resume"}, {"message", bytes}});
     }
     for (const auto& a : p.assets) {
-        if (a.path.isEmpty()) throw std::runtime_error("Use Export demo first to save generated media");
-        assets.append(QJsonObject{{"id", a.id}, {"name", a.name}, {"path", dir.relativeFilePath(a.path)}});
+        assets.append(QJsonObject{{"id", a.id}, {"name", a.name}, {"path", directory.isEmpty() ? a.path : dir.relativeFilePath(a.path)}});
     }
     QJsonObject root{{"format", "simpleavshow"}, {"version", 1}, {"title", p.title}, {"width", p.width}, {"height", p.height}, {"fps", p.fps},
         {"duration", static_cast<double>(p.show.duration)}, {"tracks", tracks}, {"clips", clips}, {"markers", markers}, {"assets", assets}};
+    return root;
+}
+void writeProject(const Project& p, const QString& path) {
+    validate(p);
+    for (const auto& a : p.assets)
+        if (a.path.isEmpty()) throw std::runtime_error("Use Export demo first to save generated media");
+    const auto root = projectJson(p, QFileInfo(path).absolutePath());
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error(file.errorString().toStdString());
     const auto bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
