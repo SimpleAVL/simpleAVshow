@@ -35,6 +35,12 @@ void materializeProjectMedia(Project& project, const QString& directory);
 void removeStalePackageDirectories();
 QString timecode(Frame position, double fps = 24);
 Envelope* envelope(Clip& clip, int property);
+// Sets a clip's timing; a left trim (start and offset moving together) shifts its automation.
+void retime(Clip& clip, Frame start, Frame duration, Frame offset);
+// Retimes a clip and applies the same start/duration/offset change to clips linked with it.
+void retimeLinked(Project& project, const std::string& id, Frame start, Frame duration, Frame offset);
+// The clip followed by its linked partners.
+std::vector<std::string> linkedClips(const Project& project, const std::string& id);
 const Envelope* envelope(const Clip& clip, int property);
 double propertyValue(const Clip& clip, int property);
 }

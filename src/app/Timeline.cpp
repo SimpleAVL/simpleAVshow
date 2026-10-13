@@ -136,6 +136,10 @@ void Timeline::paintEvent(QPaintEvent* event) {
         const auto& clip = show.clips[index]; QRectF rect = clipRect(clip);
         if (dragging_ && dragClip_ == static_cast<int>(index)) {
             Clip ghost = clip; ghost.start = dragStart_; ghost.duration = dragDuration_; ghost.track = dragTrack_; rect = clipRect(ghost);
+        } else if (dragging_ && dragClip_ >= 0 && !clip.link.empty() && clip.link == show.clips[dragClip_].link) {
+            // Linked partners follow the drag on their own tracks.
+            const auto& dragged = show.clips[dragClip_];
+            Clip ghost = clip; ghost.start += dragStart_ - dragged.start; ghost.duration += dragDuration_ - dragged.duration; rect = clipRect(ghost);
         }
         if (!rect.intersects(QRectF(header, ruler, viewport()->width() - header, viewport()->height() - ruler) & QRectF(area))) continue;
         const auto& track = show.tracks[clip.track]; const QColor color = trackColor(track);
@@ -145,7 +149,7 @@ void Timeline::paintEvent(QPaintEvent* event) {
         p.save(); p.setClipRect(rect.adjusted(2, 2, -2, -2));
         QString name = clip.text.empty() ? c_.project.assets.value(QString::fromStdString(clip.assetId)).name : QString::fromStdString(clip.text).section('\n', 0, 0);
         p.setPen(QColor("#e3eaf5")); QFont font = p.font(); font.setPointSize(10); font.setBold(true); p.setFont(font);
-        p.drawText(rect.adjusted(10, 3, -10, -3), Qt::AlignTop | Qt::AlignLeft, (clip.loop ? "↻  " : "") + name);
+        p.drawText(rect.adjusted(10, 3, -10, -3), Qt::AlignTop | Qt::AlignLeft, (clip.loop ? "↻  " : "") + name + (clip.link.empty() ? "" : "  · linked"));
         if (clip.audio) {
             p.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 150), 1));
             const int base = static_cast<int>(std::max(static_cast<double>(header), rect.left() + 6));
@@ -282,22 +286,10 @@ void Timeline::mouseReleaseEvent(QMouseEvent*) {
     }
     if (dragging_ && dragClip_ >= 0) {
         const int index = dragClip_; const Frame start = dragStart_, duration = dragDuration_, offset = dragOffset_; const int track = dragTrack_;
-        const int mode = dragMode_; dragging_ = false; dragClip_ = -1;
+        dragging_ = false; dragClip_ = -1;
         c_.edit([=](Project& p) {
-            auto& clip = p.show.clips[index];
-            // Left trimming shifts clip-relative automation with the source content.
-            if (mode == 1) {
-                const Frame shift = start - clip.start;
-                for (int property = 0; property < 6; ++property) {
-                    auto* e = envelope(clip, property);
-                    if (e->points.empty()) continue;
-                    const double atTrim = e->at(shift, propertyValue(clip, property));
-                    for (auto& point : e->points) point.time -= shift;
-                    std::erase_if(e->points, [](const Keyframe& point) { return point.time < 0; });
-                    if (e->points.empty() || e->points.front().time > 0) e->points.insert(e->points.begin(), {0, atTrim});
-                }
-            }
-            clip.start = start; clip.duration = duration; clip.offset = offset; clip.track = track;
+            const auto id = p.show.clips[index].id; p.show.clips[index].track = track;
+            retimeLinked(p, id, start, duration, offset);
         }); emit selectionChanged();
     }
     dragging_ = false; dragClip_ = -1; dragMarker_ = -1; viewport()->update();

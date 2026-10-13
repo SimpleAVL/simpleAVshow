@@ -22,6 +22,32 @@ QString timecode(Frame position, double fps) {
     return QString("%1:%2:%3:%4").arg(whole / 3600, 2, 10, QChar('0')).arg(whole / 60 % 60, 2, 10, QChar('0'))
         .arg(whole % 60, 2, 10, QChar('0')).arg(frame, 2, 10, QChar('0'));
 }
+void retime(Clip& clip, Frame start, Frame duration, Frame offset) {
+    // Left trims shift clip-relative automation with the source content.
+    const Frame shift = start - clip.start;
+    if (offset - clip.offset == shift && shift != 0) for (int property = 0; property < 6; ++property) {
+        auto* e = envelope(clip, property);
+        if (e->points.empty()) continue;
+        const double atTrim = e->at(shift, propertyValue(clip, property));
+        for (auto& point : e->points) point.time -= shift;
+        std::erase_if(e->points, [](const Keyframe& point) { return point.time < 0; });
+        if (e->points.empty() || e->points.front().time > 0) e->points.insert(e->points.begin(), {0, atTrim});
+    }
+    clip.start = start; clip.duration = duration; clip.offset = offset;
+}
+void retimeLinked(Project& p, const std::string& id, Frame start, Frame duration, Frame offset) {
+    const auto it = std::find_if(p.show.clips.begin(), p.show.clips.end(), [&](const Clip& c) { return c.id == id; });
+    if (it == p.show.clips.end()) return;
+    const Frame dStart = start - it->start, dDuration = duration - it->duration, dOffset = offset - it->offset; const auto link = it->link;
+    retime(*it, start, duration, offset);
+    if (!link.empty()) for (auto& c : p.show.clips) if (c.link == link && c.id != id) retime(c, c.start + dStart, c.duration + dDuration, c.offset + dOffset);
+}
+std::vector<std::string> linkedClips(const Project& p, const std::string& id) {
+    std::vector<std::string> ids{id}; std::string link;
+    for (const auto& c : p.show.clips) if (c.id == id) link = c.link;
+    if (!link.empty()) for (const auto& c : p.show.clips) if (c.link == link && c.id != id) ids.push_back(c.id);
+    return ids;
+}
 Envelope* envelope(Clip& clip, int property) {
     switch (property) { case 0: return &clip.volume; case 1: return &clip.balance; case 2: return &clip.positionX;
         case 3: return &clip.positionY; case 4: return &clip.size; default: return &clip.alpha; }
@@ -207,12 +233,16 @@ void writeProject(const Project& p, const QString& path) {
     for (const auto& t : p.show.tracks) tracks.append(QJsonObject{
         {"id", QString::fromStdString(t.id)}, {"name", QString::fromStdString(t.name)}, {"visual", t.visual}, {"async", t.async},
         {"muted", t.muted}, {"gain", t.gain}, {"pan", t.pan}, {"left", t.left}, {"right", t.right}});
-    for (const auto& c : p.show.clips) clips.append(QJsonObject{
-        {"id", QString::fromStdString(c.id)}, {"asset", QString::fromStdString(c.assetId)}, {"text", QString::fromStdString(c.text)}, {"track", c.track},
-        {"start", static_cast<double>(c.start)}, {"duration", static_cast<double>(c.duration)}, {"offset", static_cast<double>(c.offset)},
-        {"loop", c.loop}, {"gain", c.gain}, {"pan", c.pan}, {"x", c.x}, {"y", c.y}, {"scale", c.scale}, {"opacity", c.opacity},
-        {"volume", curveJson(c.volume)}, {"balance", curveJson(c.balance)}, {"positionX", curveJson(c.positionX)},
-        {"positionY", curveJson(c.positionY)}, {"size", curveJson(c.size)}, {"alpha", curveJson(c.alpha)}});
+    for (const auto& c : p.show.clips) {
+        QJsonObject clip{
+            {"id", QString::fromStdString(c.id)}, {"asset", QString::fromStdString(c.assetId)}, {"text", QString::fromStdString(c.text)}, {"track", c.track},
+            {"start", static_cast<double>(c.start)}, {"duration", static_cast<double>(c.duration)}, {"offset", static_cast<double>(c.offset)},
+            {"loop", c.loop}, {"gain", c.gain}, {"pan", c.pan}, {"x", c.x}, {"y", c.y}, {"scale", c.scale}, {"opacity", c.opacity},
+            {"volume", curveJson(c.volume)}, {"balance", curveJson(c.balance)}, {"positionX", curveJson(c.positionX)},
+            {"positionY", curveJson(c.positionY)}, {"size", curveJson(c.size)}, {"alpha", curveJson(c.alpha)}};
+        if (!c.link.empty()) clip.insert("link", QString::fromStdString(c.link));
+        clips.append(clip);
+    }
     for (const auto& m : p.show.markers) {
         QJsonArray bytes; for (auto b : m.message) bytes.append(b);
         markers.append(QJsonObject{{"id", QString::fromStdString(m.id)}, {"name", QString::fromStdString(m.name)},
@@ -252,6 +282,7 @@ Project parseProject(const QByteArray& json, const QString& directory) {
     for (auto value : root["clips"].toArray()) {
         const auto o = readObject(value); Clip c;
         c.id = readString(o, "id").toStdString(); c.assetId = readString(o, "asset").toStdString(); c.text = readString(o, "text").toStdString(); c.track = readInt(o, "track", -1);
+        c.link = readString(o, "link").toStdString();
         c.start = readFrame(o, "start"); c.duration = readFrame(o, "duration"); c.offset = readFrame(o, "offset"); c.loop = readBool(o, "loop");
         c.gain = readNumber(o, "gain", 1); c.pan = readNumber(o, "pan", 0); c.x = readNumber(o, "x", 0); c.y = readNumber(o, "y", 0);
         c.scale = readNumber(o, "scale", 1); c.opacity = readNumber(o, "opacity", 1);

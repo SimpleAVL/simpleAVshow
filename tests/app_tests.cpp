@@ -388,6 +388,35 @@ private slots:
         type("2.25"); QCOMPARE(c.project.show.clips[0].start, frames(2.25));
         c.dirty = false;
     }
+    void linkedPictureAndSoundMoveTrimSplitAndDeleteTogether() {
+        MainWindow window; window.show(); auto& c = window.controller();
+        const auto act = [&](const QString& text) { for (auto* a : window.findChildren<QAction*>()) if (a->text() == text) { a->trigger(); return true; } return false; };
+        QTemporaryDir dir; writeBytes(dir.filePath("tone.wav"), waveBytes(16, 1, 2, 48000, false, frames(8)));
+        QImage still(64, 36, QImage::Format_RGB32); still.fill(Qt::blue); QVERIFY(still.save(dir.filePath("still.png")));
+        auto sound = loadMedia(dir.filePath("tone.wav")); auto image = loadMedia(dir.filePath("still.png"));
+        QVERIFY(c.edit([&](Project& p) {
+            p.assets.insert(sound.id, sound); p.assets.insert(image.id, image);
+            Clip picture; picture.id = "pic"; picture.assetId = image.id.toStdString(); picture.track = 0; picture.start = frames(2); picture.duration = frames(4); picture.link = "L";
+            Clip audio = picture; audio.id = "snd"; audio.assetId = sound.id.toStdString(); audio.track = 2;
+            p.show.clips = {picture, audio};
+        }));
+        const auto clip = [&](const char* id) { for (const auto& x : c.project.show.clips) if (x.id == id) return x; return Clip{}; };
+        auto* timeline = window.findChild<Timeline*>(); timeline->selectClip("pic");
+        QVERIFY(act("Nudge right one second")); QCOMPARE(clip("snd").start, frames(3)); QCOMPARE(clip("pic").start, frames(3));
+        auto* start = window.findChild<QDoubleSpinBox*>("clipStart"); start->setValue(4); QVERIFY(QMetaObject::invokeMethod(start, "editingFinished"));
+        QCOMPARE(clip("snd").start, frames(4));
+        c.seek(frames(5)); QVERIFY(act("Split clip at playhead"));
+        QCOMPARE(c.project.show.clips.size(), std::size_t{4});
+        const auto tails = std::count_if(c.project.show.clips.begin(), c.project.show.clips.end(), [&](const Clip& x) { return x.start == frames(5); });
+        QCOMPARE(tails, 2); QCOMPARE(c.project.show.clips[2].link, c.project.show.clips[3].link); QVERIFY(c.project.show.clips[2].link != "L");
+        // The link survives saving.
+        writeProject(c.project, dir.filePath("linked.savshow")); QCOMPARE(readProject(dir.filePath("linked.savshow")).show.clips[0].link, std::string("L"));
+        timeline->selectClip("pic"); window.findChild<Timeline*>()->setFocus(); QVERIFY(act("Delete selected clip / cue"));
+        QCOMPARE(c.project.show.clips.size(), std::size_t{2});
+        timeline->selectClip(QString::fromStdString(c.project.show.clips[0].id)); QVERIFY(act("Unlink clip"));
+        QVERIFY(c.project.show.clips[0].link.empty()); QVERIFY(c.project.show.clips[1].link.empty());
+        c.dirty = false;
+    }
     void quittingDuringShowModeRequiresConfirmation() {
         MainWindow window; window.show(); window.controller().setShowMode(true);
         bool asked = false;

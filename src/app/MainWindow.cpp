@@ -176,16 +176,21 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     });
     edit->addAction("Paste clip at playhead", QKeySequence::Paste, this, [this] {
         if (!clipboard_ || !c_.canEdit()) return;
-        Clip clip = *clipboard_; clip.id = newId().toStdString(); clip.track = timeline_->selectedTrack; clip.start = c_.position();
+        Clip clip = *clipboard_; clip.id = newId().toStdString(); clip.link.clear(); clip.track = timeline_->selectedTrack; clip.start = c_.position();
         if (c_.project.show.tracks[clip.track].visual != c_.project.show.tracks[clipboard_->track].visual) { c_.report("Choose a compatible picture or audio track before pasting"); return; }
         if (c_.edit([=](Project& p) { p.show.clips.push_back(clip); })) timeline_->selectClip(QString::fromStdString(clip.id));
     });
     edit->addAction("Duplicate clip", QKeySequence("Ctrl+D"), this, [this] {
         const auto* clip = selectedClip(); if (!clip || !c_.canEdit()) return;
-        Clip copy = *clip; copy.id = newId().toStdString(); copy.start = clip->end();
+        Clip copy = *clip; copy.id = newId().toStdString(); copy.link.clear(); copy.start = clip->end();
         if (c_.edit([=](Project& p) { p.show.clips.push_back(copy); })) timeline_->selectClip(QString::fromStdString(copy.id));
     });
     edit->addAction("Split clip at playhead", QKeySequence("Ctrl+B"), this, &MainWindow::splitClip);
+    edit->addAction("Unlink clip", this, [this] {
+        const auto* clip = selectedClip(); if (!clip || clip->link.empty() || !c_.canEdit()) { if (clip && clip->link.empty()) c_.report("This clip is not linked"); return; }
+        const auto link = clip->link;
+        if (c_.edit([=](Project& p) { for (auto& c : p.show.clips) if (c.link == link) c.link.clear(); })) c_.report("Picture and sound now move independently");
+    });
     for (const auto& [label, keys, step] : std::initializer_list<std::tuple<const char*, const char*, int>>{
             {"Nudge left one frame", "Alt+Left", -1}, {"Nudge right one frame", "Alt+Right", 1},
             {"Nudge left one second", "Alt+Shift+Left", -1000}, {"Nudge right one second", "Alt+Shift+Right", 1000}})
@@ -563,7 +568,13 @@ void MainWindow::applyClip() {
     }
     if (edited.start == clip->start && edited.duration == clip->duration && edited.offset == clip->offset && edited.loop == clip->loop && edited.gain == clip->gain &&
         edited.pan == clip->pan && edited.x == clip->x && edited.y == clip->y && edited.scale == clip->scale && edited.opacity == clip->opacity && edited.text == clip->text) return;
-    c_.edit([=](Project& p) { for (auto& c : p.show.clips) if (c.id == edited.id) c = edited; });
+    c_.edit([=](Project& p) {
+        const auto it = std::find_if(p.show.clips.begin(), p.show.clips.end(), [&](const Clip& c) { return c.id == edited.id; });
+        if (it == p.show.clips.end()) return;
+        const Frame start = edited.start, duration = edited.duration, offset = edited.offset;
+        Clip properties = edited; properties.start = it->start; properties.duration = it->duration; properties.offset = it->offset; *it = properties;
+        retimeLinked(p, edited.id, start, duration, offset);
+    });
 }
 void MainWindow::applyMarker(bool requireMidi) {
     inspectorDirty_ = false;
@@ -637,23 +648,32 @@ void MainWindow::importPaths(const QStringList& paths) {
 }
 void MainWindow::splitClip() {
     const auto* clip = selectedClip(); if (!clip || !c_.canEdit()) return;
-    const Frame cut = c_.position() - clip->start;
-    if (cut <= 0 || cut >= clip->duration) { c_.report("Place the playhead inside the selected clip to split it"); return; }
-    if (clip->loop) { c_.report("Looping clips cannot be split; their loop starts at the clip's source in"); return; }
-    const auto id = clip->id; const auto second = newId().toStdString();
-    const bool done = c_.edit([=](Project& p) {
-        auto it = std::find_if(p.show.clips.begin(), p.show.clips.end(), [&](const Clip& c) { return c.id == id; });
-        Clip tail = *it; tail.id = second; tail.start = it->start + cut; tail.duration = it->duration - cut; tail.offset = it->offset + cut;
-        // Clip-relative automation continues across the cut with the value at the cut.
-        for (int property = 0; property < 6; ++property) {
-            auto* head = envelope(*it, property); auto* rest = envelope(tail, property);
-            if (head->points.empty()) continue;
-            const double at = head->at(cut, propertyValue(*it, property));
-            rest->points.clear(); rest->points.push_back({0, at});
-            for (const auto& point : head->points) if (point.time > cut) rest->points.push_back({point.time - cut, point.value});
-            std::erase_if(head->points, [=](const Keyframe& point) { return point.time >= cut; }); head->points.push_back({cut, at});
+    const Frame time = c_.position();
+    if (time <= clip->start || time >= clip->end()) { c_.report("Place the playhead inside the selected clip to split it"); return; }
+    const auto ids = linkedClips(c_.project, clip->id);
+    for (const auto& c : c_.project.show.clips) if (c.loop && std::find(ids.begin(), ids.end(), c.id) != ids.end()) {
+        c_.report("Looping clips cannot be split; their loop starts at the clip's source in"); return;
+    }
+    const auto link = clip->link.empty() ? std::string() : newId().toStdString(); std::string second;
+    const bool done = c_.edit([&](Project& p) {
+        std::vector<Clip> tails;
+        for (auto& c : p.show.clips) {
+            if (std::find(ids.begin(), ids.end(), c.id) == ids.end() || time <= c.start || time >= c.end()) continue;
+            const Frame cut = time - c.start;
+            Clip tail = c; tail.id = newId().toStdString(); tail.link = link; tail.start = time; tail.duration = c.duration - cut; tail.offset = c.offset + cut;
+            if (c.id == ids.front()) second = tail.id;
+            // Clip-relative automation continues across the cut with the value at the cut.
+            for (int property = 0; property < 6; ++property) {
+                auto* head = envelope(c, property); auto* rest = envelope(tail, property);
+                if (head->points.empty()) continue;
+                const double at = head->at(cut, propertyValue(c, property));
+                rest->points.clear(); rest->points.push_back({0, at});
+                for (const auto& point : head->points) if (point.time > cut) rest->points.push_back({point.time - cut, point.value});
+                std::erase_if(head->points, [=](const Keyframe& point) { return point.time >= cut; }); head->points.push_back({cut, at});
+            }
+            c.duration = cut; tails.push_back(std::move(tail));
         }
-        it->duration = cut; p.show.clips.push_back(tail);
+        p.show.clips.insert(p.show.clips.end(), tails.begin(), tails.end());
     });
     if (done) timeline_->selectClip(QString::fromStdString(second));
 }
@@ -662,7 +682,8 @@ void MainWindow::nudge(int step) {
     const Frame delta = std::abs(step) == 1 ? std::max<Frame>(1, frames(1. / c_.project.fps)) * step : frames(step / 1000.);
     if (const auto* clip = selectedClip()) {
         const auto id = clip->id; const Frame start = std::clamp(clip->start + delta, Frame{0}, c_.project.show.duration - clip->duration);
-        c_.edit([=](Project& p) { for (auto& c : p.show.clips) if (c.id == id) c.start = start; });
+        const Frame duration = clip->duration, offset = clip->offset;
+        c_.edit([=](Project& p) { retimeLinked(p, id, start, duration, offset); });
     } else if (const auto* marker = selectedMarker()) {
         const auto id = marker->id; const Frame time = std::clamp(marker->time + delta, Frame{0}, c_.project.show.duration);
         c_.edit([=](Project& p) { for (auto& m : p.show.markers) if (m.id == id) m.time = time; });
@@ -741,7 +762,11 @@ void MainWindow::placeAsset(QString id, int track, Frame time) {
     if (c_.edit([=](Project& p) { p.show.duration = std::max(p.show.duration, clip.end() + frames(5)); p.show.clips.push_back(clip);
         if (visual && asset.video && asset.audio) {
             auto audioTrack = std::find_if(p.show.tracks.begin(), p.show.tracks.end(), [](const Track& t) { return !t.visual && !t.async; });
-            if (audioTrack != p.show.tracks.end()) { Clip sound = clip; sound.id = newId().toStdString(); sound.track = static_cast<int>(audioTrack - p.show.tracks.begin()); p.show.clips.push_back(sound); }
+            if (audioTrack != p.show.tracks.end()) {
+                // The picture and its sound stay in sync: they move, trim, split, and delete together.
+                Clip sound = clip; sound.id = newId().toStdString(); sound.track = static_cast<int>(audioTrack - p.show.tracks.begin());
+                sound.link = p.show.clips.back().link = newId().toStdString(); p.show.clips.push_back(sound);
+            }
         }
     })) timeline_->selectClip(QString::fromStdString(clip.id));
 }
@@ -766,7 +791,10 @@ void MainWindow::addTrack(bool visual, bool async) {
     if (c_.edit([=](Project& p) { p.show.tracks.push_back(track); })) { timeline_->selectedTrack = static_cast<int>(c_.project.show.tracks.size()) - 1; timeline_->selectedClip.clear(); timeline_->selectedMarker.clear(); updateInspector(); }
 }
 void MainWindow::deleteSelection() {
-    if (auto* clip = selectedClip()) { const auto id = clip->id; c_.edit([=](Project& p) { std::erase_if(p.show.clips, [=](const Clip& c) { return c.id == id; }); }); }
+    if (auto* clip = selectedClip()) {
+        const auto ids = linkedClips(c_.project, clip->id);
+        c_.edit([=](Project& p) { std::erase_if(p.show.clips, [&](const Clip& c) { return std::find(ids.begin(), ids.end(), c.id) != ids.end(); }); });
+    }
     else if (auto* marker = selectedMarker()) { const auto id = marker->id; c_.edit([=](Project& p) { std::erase_if(p.show.markers, [=](const Marker& m) { return m.id == id; }); }); }
 }
 

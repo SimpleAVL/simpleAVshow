@@ -66,6 +66,8 @@ struct Track {
 };
 struct Clip {
     std::string id, assetId, text;
+    // Clips sharing a non-empty link (a video and its audio) move, trim, split, and delete together.
+    std::string link;
     int track = 0;
     Frame start = 0, duration = sampleRate * 10, offset = 0;
     bool loop = false;
