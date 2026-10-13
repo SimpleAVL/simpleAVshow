@@ -179,7 +179,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* help = menuBar()->addMenu("Help");
     help->addAction("Keyboard and playback rules", this, [this] {
         QMessageBox::information(this, "Operating SimpleAVShow",
-            "Space: play / pause / resume a hold (outside text fields).\nEscape: Stop All, including async audio.\nDelete: delete the selected clip or marker.\n\n"
+            "Space: play / pause / resume a hold (outside text fields).\nEscape: Stop All, including async audio (press twice in Show mode).\nDelete: delete the selected clip or marker.\n\n"
             "Import media, then drag it from Media onto a compatible track.\nDrag a clip to move; drag its edges to trim. Click the ruler to seek.\nUse the inspector to edit routing, cues, transformations, and automation.\n\n"
             "Holds and manual pauses leave running async audio playing.\nA seek inside an active async clip preserves its source position.\nA seek outside that clip stops it. Seeking never sends MIDI.\n\n"
             "Guide and Click outputs start disconnected. Route them in the track inspector.\nShow mode locks editing and timeline seeks. Use Stop All before editing.\n"
@@ -434,7 +434,7 @@ void MainWindow::updatePlayback() {
         hint_->setText("HOLD — " + (index >= 0 && static_cast<std::size_t>(index) < c_.project.show.markers.size() ? QString::fromStdString(c_.project.show.markers[index].name) : "") + "  ·  Press Space to continue" + async);
     } else if (!c_.playbackProblem.isEmpty()) hint_->setText("⚠  " + c_.playbackProblem + (c_.showMode ? " Leave Show mode to change Outputs." : ""));
     else if (c_.project.show.clips.empty() && c_.project.show.markers.empty()) hint_->setText("Start with + Import media or + Text. Press Play to use your speakers automatically.");
-    else hint_->setText(c_.showMode ? "SHOW MODE  ·  Space: play / pause  ·  Escape: Stop All" : "Space: play / pause  ·  Escape: Stop All  ·  Ruler: seek  ·  Edges: trim");
+    else hint_->setText(c_.showMode ? "SHOW MODE  ·  Space: play / pause  ·  Escape twice: Stop All" : "Space: play / pause  ·  Escape: Stop All  ·  Ruler: seek  ·  Edges: trim");
     const bool problem = state != State::Held && !c_.playbackProblem.isEmpty();
     hint_->setStyleSheet(state == State::Held ? "color: #e5c47d; font-weight: 600;" :
         problem ? "color: #ffd7d2; background: #5a2523; border-radius: 4px; padding: 6px 8px;" : "color: #8fa8c9;");
@@ -1059,8 +1059,14 @@ bool MainWindow::eventFilter(QObject* object, QEvent* event) {
     auto* key = static_cast<QKeyEvent*>(event); auto* widget = qobject_cast<QWidget*>(object);
     if (!widget || (widget->window() != this && widget->window() != outputWindow_)) return QMainWindow::eventFilter(object, event);
     const bool editing = qobject_cast<QLineEdit*>(widget) || qobject_cast<QTextEdit*>(widget) || qobject_cast<QAbstractSpinBox*>(widget) || qobject_cast<QComboBox*>(widget);
-    // In Show mode Escape is always Stop All; while editing it cancels the edit instead.
-    if (key->key() == Qt::Key_Escape && !key->isAutoRepeat() && (c_.showMode || !editing)) { c_.stopAll(); return true; }
+    // Outside Show mode Escape is Stop All unless it cancels a field edit. In Show mode a stray press
+    // must not end the performance: two presses within 600 ms stop everything (the button still takes one click).
+    if (key->key() == Qt::Key_Escape && !key->isAutoRepeat() && (c_.showMode || !editing)) {
+        if (!c_.showMode) { c_.stopAll(); return true; }
+        if (escape_.isValid() && !escape_.hasExpired(600)) { escape_.invalidate(); c_.stopAll(); }
+        else { escape_.start(); c_.report("Press Escape again to Stop All."); }
+        return true;
+    }
     if (key->key() == Qt::Key_Space && !editing && key->modifiers() == Qt::NoModifier) { if (!key->isAutoRepeat()) c_.toggle(); return true; }
     if ((key->key() == Qt::Key_Delete || key->key() == Qt::Key_Backspace) && !editing && !qobject_cast<QTableWidget*>(widget)) { if (!key->isAutoRepeat()) deleteSelection(); return true; }
     return QMainWindow::eventFilter(object, event);

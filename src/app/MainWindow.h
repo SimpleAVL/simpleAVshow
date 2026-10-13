@@ -3,6 +3,7 @@
 #include "app/Timeline.h"
 #include "app/ProgramView.h"
 #include <QMainWindow>
+#include <QElapsedTimer>
 #include <optional>
 #include <set>
 
@@ -55,6 +56,7 @@ private:
     // Fields changed since the inspector last showed the model; automatic commits apply only these.
     std::set<QWidget*> touched_;
     std::optional<Clip> clipboard_;
+    QElapsedTimer escape_;
     bool use(QWidget* field) const { return !automatic_ || touched_.contains(field); }
     std::string inspectedClip_, inspectedMarker_;
     int inspectedTrack_ = -1;

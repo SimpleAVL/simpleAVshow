@@ -362,6 +362,18 @@ private slots:
         QCOMPARE(c.project.show.markers[0].time, frames(4));
         c.dirty = false;
     }
+    void showModeEscapeNeedsTwoPresses() {
+        MainWindow window; window.show(); auto& c = window.controller();
+        const auto play = [&] { QVERIFY(c.transport.command({Action::Play})); c.transport.render(nullptr, 1, 0); QCOMPARE(c.transport.state(), State::Playing); };
+        play(); QTest::keyClick(&window, Qt::Key_Escape); QCOMPARE(c.transport.state(), State::Stopped); // One press outside Show mode.
+        c.setShowMode(true); play();
+        QTest::keyClick(&window, Qt::Key_Escape); c.transport.render(nullptr, 1, 0); QCOMPARE(c.transport.state(), State::Playing);
+        QVERIFY(c.status.contains("Escape again"));
+        QTest::keyClick(&window, Qt::Key_Escape); c.transport.render(nullptr, 1, 0); QCOMPARE(c.transport.state(), State::Stopped);
+        play(); QTest::keyClick(&window, Qt::Key_Escape); QTest::qWait(700); QTest::keyClick(&window, Qt::Key_Escape);
+        c.transport.render(nullptr, 1, 0); QCOMPARE(c.transport.state(), State::Playing); // Presses too far apart.
+        c.stopAll(); c.setShowMode(false); c.dirty = false;
+    }
     void quittingDuringShowModeRequiresConfirmation() {
         MainWindow window; window.show(); window.controller().setShowMode(true);
         bool asked = false;

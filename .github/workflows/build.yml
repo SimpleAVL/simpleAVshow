@@ -125,8 +125,8 @@ jobs:
           path: artifacts/SimpleAVShow-linux-x86_64.AppImage
           if-no-files-found: error
   windows:
+    # Windows is the show platform: build and test it on pull requests too; package only on main.
     needs: core
-    if: github.event_name != 'pull_request'
     runs-on: windows-2022
     env:
       VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/vcpkg-cache,readwrite"
@@ -181,7 +181,9 @@ jobs:
           $env:PATH = "$env:FFMPEG_ROOT/bin;$env:PATH"
           ctest --test-dir build -C Release --output-on-failure
       - run: cmake --install build --config Release --prefix "$pwd/dist"
+        if: github.event_name != 'pull_request'
       - name: Package and smoke test
+        if: github.event_name != 'pull_request'
         shell: pwsh
         run: |
           python packaging/collect_licenses.py windows dist/licenses --vcpkg build/vcpkg_installed/x64-windows --qt $env:QT_ROOT_DIR --ffmpeg $env:FFMPEG_ROOT
@@ -204,6 +206,7 @@ jobs:
           if ($process.ExitCode -ne 0 -or !(Test-Path artifacts/editor.png)) { throw 'Packaged app smoke test failed' }
           Compress-Archive -Path dist/* -DestinationPath artifacts/SimpleAVShow-windows-x86_64.zip
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.event_name != 'pull_request'
         with:
           name: windows-x86_64-release
           path: artifacts/SimpleAVShow-windows-x86_64.zip
@@ -226,15 +229,15 @@ jobs:
           WINDOWS_RESULT: ${{ needs.windows.result }}
         run: |
           echo "core=$CORE_RESULT tsan=$TSAN_RESULT linux=$LINUX_RESULT macos=$MACOS_RESULT windows=$WINDOWS_RESULT"
-          if [[ "$CORE_RESULT" != success || "$TSAN_RESULT" != success || "$LINUX_RESULT" != success ]]; then
-            echo 'Core, ThreadSanitizer, and Linux builds/tests must pass.' >&2
+          if [[ "$CORE_RESULT" != success || "$TSAN_RESULT" != success || "$LINUX_RESULT" != success || "$WINDOWS_RESULT" != success ]]; then
+            echo 'Core, ThreadSanitizer, Linux, and Windows builds/tests must pass.' >&2
             exit 1
           fi
           expected=success
           if [[ "$EVENT_NAME" == pull_request ]]; then
             expected=skipped
           fi
-          if [[ "$MACOS_RESULT" != "$expected" || "$WINDOWS_RESULT" != "$expected" ]]; then
-            echo "macOS and Windows jobs must report $expected for $EVENT_NAME." >&2
+          if [[ "$MACOS_RESULT" != "$expected" ]]; then
+            echo "The macOS job must report $expected for $EVENT_NAME." >&2
             exit 1
           fi
