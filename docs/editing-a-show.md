@@ -68,7 +68,7 @@ Start, Length, Source in, and cue Time display **HH:MM:SS:FF**. At 24 fps, `00:0
 
 Numeric/name fields apply when you press Enter or leave the field. Checkboxes and routing presets apply immediately. The **Apply track**, **Apply clip**, and **Apply cue** buttons remain available. For multiline text, click **Apply clip** after editing. MIDI message choices require **Apply cue**; automation table changes require **Apply curve**.
 
-Moving a clip keeps its automation relative to the clip. A left trim shifts automation with the source content and preserves the interpolated value at the new beginning. Edits and device changes rebuild playback state; async source cursors do not persist through those operations.
+Moving a clip keeps its automation relative to the clip. A left trim shifts automation with the source content and preserves the value and segment shape at the new beginning. Edits and device changes rebuild playback state; async source cursors do not persist through those operations.
 
 ## Linked video and audio
 
@@ -105,18 +105,47 @@ Still images and video preserve their aspect ratio and fit inside the project fr
 
 Automation values follow **show time**, measured relative to clip Start. They do not follow the looping source's playback position. When a property has keyframes, its curve supplies that property's value; it does not multiply the base clip value. Track gain still multiplies clip volume.
 
+### On the timeline
+
+Every clip draws its Volume (audio) or Opacity (picture) curve; the selected clip draws the property chosen in the inspector, with a dashed line at its base value when it has no keyframes. While editing is allowed:
+
+| Mouse | Result |
+| --- | --- |
+| Drag a point | Moves it in time and value. Times stay between the neighbouring points and inside the clip, and follow **Snap**. Hold Shift to change only the value. |
+| Click the selected clip's line | Adds a point on the line and lets you drag it straight away. |
+| Double-click a point | Deletes it. |
+| Alt/Option-drag a segment | Bends it into a **Curve**; dragging up bows the line upwards. |
+| Right-click a point or line | Deletes the point or chooses the shape of the segment that follows it. |
+
+The cursor shows what a press would grab. Points on unselected clips can be dragged directly; that selects the clip. A drag elsewhere on the clip still moves or trims it. Each change is one undo step.
+
+### Segment shapes
+
+Each keyframe sets the shape of the segment that runs to the next keyframe:
+
+| Shape | Behaviour |
+| --- | --- |
+| **Linear** | Straight line. |
+| **Hold** | Keeps the keyframe's value, then jumps at the next keyframe. |
+| **Curve** | Positive bend changes quickly first and settles into the next point (a natural audio fade-out); negative bend starts slowly and accelerates. |
+| **S-curve** | Positive bend eases out of one point and into the next; negative bend does the opposite, moving quickly at both ends. |
+
+Bend runs from −1 to 1; 0 is a straight line. Choosing Curve or S-curve from the timeline menu starts at bend 0.5.
+
+### In the inspector
+
 1. Select the clip and scroll to **Automation · follows show time**.
 2. Choose **Volume**, **Pan**, **Position X**, **Position Y**, **Scale**, or **Opacity**.
 3. Seek to a useful position and click **+ At playhead** to add a row with the current interpolated value. The time is clamped to the selected clip's duration.
-4. Edit **Clip time (s)** and **Value**, using a decimal point for decimal table entries. Times here are seconds, not timecode.
+4. Edit **Time (s)**, **Value**, **Shape**, and **Bend**, using a decimal point for decimal table entries. Times here are seconds relative to clip Start, not timecode.
 5. Select a row and use **− Point** to remove it.
-6. Click **Apply curve**. Times are sorted; duplicate times, negative times, and values outside the property's range are rejected. Apply the table before changing the selection/property.
+6. Click **Apply curve**. Times are sorted; duplicate times, negative times, bends outside −1…1, and values outside the property's range are rejected. Apply the table before changing the selection/property.
 
 ![Complete automation table and fade helper controls](screenshots/11-automation-controls.png)
 
-Curves interpolate linearly. Before the first keyframe they use its value; after the last they keep the final value. An empty curve restores the base clip value. All curves freeze during pauses and holds, including curves on async audio whose source keeps playing.
+Before the first keyframe they use its value; after the last they keep the final value. An empty curve restores the base clip value. All curves freeze during pauses and holds, including curves on async audio whose source keeps playing.
 
-**Fade in** replaces the Volume curve on audio, or Opacity curve on picture, with a two-second ramp from zero to the base value, shortened if the clip is shorter. It applies immediately.
+**Fade in** replaces the Volume curve on audio, or Opacity curve on picture, with a two-second linear ramp from zero to the base value, shortened if the clip is shorter. It applies immediately.
 
 **After hold** finds the earliest following hold inside the selected clip, at or after the playhead. It preserves earlier points, places the current curve value at the hold, and fades to zero over four seconds, shortened at clip end. It applies immediately. While the hold lasts, the fade is frozen; continuing starts the fade. If no following hold is inside the clip, the status bar explains why no fade was created.
 

@@ -42,6 +42,7 @@ Buttons support keyboard focus. The timeline has a focus outline and announces s
 | Project duration | Positive seconds in Project settings; no fixed 24-hour cap. Must contain all clips/cues. |
 | Clip/cue time fields | Display HH:MM:SS:FF; also accept seconds, MM:SS, and MM:SS:FF. |
 | Automation time | Nonnegative seconds relative to clip Start; unique keyframe times. |
+| Automation shape | Linear, Hold, Curve, or S-curve per segment; bend −1…+1, 0 is straight. |
 | Track/clip volume | 0–4 linear gain; 1 is unity. Volume automation uses the same range. |
 | Track/clip pan | −1…+1; one-output mono routing ignores pan. |
 | Picture X/Y | −2…+2 project frame widths/heights from center. |

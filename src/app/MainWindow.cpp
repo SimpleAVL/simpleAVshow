@@ -298,6 +298,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this) {
     connect(snap, &QPushButton::clicked, this, [this](bool checked) { timeline_->snapping = checked; });
     connect(timeline_, &Timeline::selectionChanged, this, &MainWindow::updateInspector);
     connect(timeline_, &Timeline::assetDropped, this, &MainWindow::placeAsset);
+    connect(timeline_, &Timeline::curvePropertyRequested, this, [this](int property) { curveProperty_->setCurrentIndex(property); });
     auto* transportBar = new QWidget; transportBar->setStyleSheet("background: #1b2737;"); auto* controls = new QHBoxLayout(transportBar); controls->setContentsMargins(18, 12, 18, 12);
     play_ = button("▶  Play", controls); play_->setObjectName("primary"); play_->setMinimumWidth(145); connect(play_, &QPushButton::clicked, &c_, &Controller::toggle);
     // Keep Stop All away from Play/Continue so a hurried press cannot hit it.
@@ -358,20 +359,22 @@ void MainWindow::buildInspector() {
     auto* applyClipButton = button("Apply clip", clipLayout); connect(applyClipButton, &QPushButton::clicked, this, &MainWindow::applyClip);
     auto* automation = new QGroupBox("Automation · follows show time"); auto* automationLayout = new QVBoxLayout(automation);
     curveProperty_ = new QComboBox; curveProperty_->addItems({"Volume", "Pan", "Position X", "Position Y", "Scale", "Opacity"}); automationLayout->addWidget(curveProperty_);
-    curveTable_ = new QTableWidget(0, 2); curveTable_->setHorizontalHeaderLabels({"Clip time (s)", "Value"}); curveTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    curveTable_ = new QTableWidget(0, 4); curveTable_->setHorizontalHeaderLabels({"Time (s)", "Value", "Shape", "Bend"}); curveTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    curveTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     curveTable_->verticalHeader()->hide(); curveTable_->setMinimumHeight(150); automationLayout->addWidget(curveTable_);
     auto* pointButtons = new QHBoxLayout; auto* addPoint = button("+ At playhead", pointButtons); auto* removePoint = button("− Point", pointButtons); automationLayout->addLayout(pointButtons);
     auto* fadeButtons = new QHBoxLayout; auto* fadeIn = button("Fade in", fadeButtons); auto* fadeOut = button("After hold", fadeButtons); automationLayout->addLayout(fadeButtons);
     auto* applyCurveButton = button("Apply curve", automationLayout);
-    auto* curveHint = new QLabel("Times are relative to clip start.\nLinear interpolation; held while paused.\nAfter hold: fade out over 4 seconds."); curveHint->setWordWrap(true); curveHint->setStyleSheet("color: #88a0be; font-size: 11px;"); automationLayout->addWidget(curveHint);
+    auto* curveHint = new QLabel("Times are relative to clip start. Shape and bend (−1…1) apply to the segment after each point; held while paused.\n"
+        "On the timeline: drag points, click the line to add one, double-click a point to delete it, Alt-drag a segment to bend it, right-click for shapes.\n"
+        "After hold: fade out over 4 seconds."); curveHint->setWordWrap(true); curveHint->setStyleSheet("color: #88a0be; font-size: 11px;"); automationLayout->addWidget(curveHint);
     clipLayout->addWidget(automation); clipLayout->addStretch(); inspector_->addWidget(clipPage);
     connect(curveProperty_, &QComboBox::currentIndexChanged, this, [this] { if (!refreshing_) updateCurve(); });
     connect(addPoint, &QPushButton::clicked, this, [this] {
         auto* clip = selectedClip(); if (!clip || !c_.canEdit()) return;
         const Frame local = std::clamp(c_.position() - clip->start, Frame{0}, clip->duration);
         const double value = envelope(*clip, curveProperty_->currentIndex())->at(local, propertyValue(*clip, curveProperty_->currentIndex()));
-        const int row = curveTable_->rowCount(); curveTable_->insertRow(row);
-        curveTable_->setItem(row, 0, new QTableWidgetItem(QString::number(seconds(local), 'f', 3))); curveTable_->setItem(row, 1, new QTableWidgetItem(QString::number(value, 'f', 3)));
+        addCurveRow({local, value});
     });
     connect(removePoint, &QPushButton::clicked, this, [this] { if (c_.canEdit() && curveTable_->currentRow() >= 0) curveTable_->removeRow(curveTable_->currentRow()); });
     connect(applyCurveButton, &QPushButton::clicked, this, &MainWindow::applyCurve);
@@ -544,13 +547,18 @@ void MainWindow::updateInspector() {
     for (int i = 0; i < cues_->count(); ++i) if (cues_->item(i)->data(Qt::UserRole).toString() == timeline_->selectedMarker) { cues_->setCurrentRow(i); break; }
 }
 void MainWindow::updateCurve() {
-    curveTable_->setRowCount(0); auto* clip = selectedClip(); if (!clip) return;
+    curveTable_->setRowCount(0); timeline_->setCurveProperty(curveProperty_->currentIndex()); auto* clip = selectedClip(); if (!clip) return;
     const auto* e = envelope(*clip, curveProperty_->currentIndex());
-    for (const auto& point : e->points) {
-        const int row = curveTable_->rowCount(); curveTable_->insertRow(row);
-        curveTable_->setItem(row, 0, new QTableWidgetItem(QString::number(seconds(point.time), 'f', 3)));
-        curveTable_->setItem(row, 1, new QTableWidgetItem(QString::number(point.value, 'f', 3)));
-    }
+    for (const auto& point : e->points) addCurveRow(point);
+}
+void MainWindow::addCurveRow(const Keyframe& point) {
+    const int row = curveTable_->rowCount(); curveTable_->insertRow(row);
+    curveTable_->setItem(row, 0, new QTableWidgetItem(QString::number(seconds(point.time), 'f', 3)));
+    curveTable_->setItem(row, 1, new QTableWidgetItem(QString::number(point.value, 'f', 3)));
+    auto* shape = new QComboBox; shape->addItems({"Linear", "Hold", "Curve", "S-curve"}); shape->setCurrentIndex(static_cast<int>(point.shape));
+    shape->setToolTip("Shape of the segment from this point to the next");
+    curveTable_->setCellWidget(row, 2, shape);
+    curveTable_->setItem(row, 3, new QTableWidgetItem(QString::number(point.bend, 'f', 2)));
 }
 namespace {
 // Untouched fields keep their exact model value instead of the spin box's rounded display.
@@ -638,7 +646,11 @@ void MainWindow::applyCurve() {
         const double time = curveTable_->item(row, 0) ? curveTable_->item(row, 0)->text().toDouble(&timeOk) : -1;
         const double value = curveTable_->item(row, 1) ? curveTable_->item(row, 1)->text().toDouble(&valueOk) : 0;
         if (!timeOk || !valueOk || !std::isfinite(time) || time < 0 || time > maxSeconds || !std::isfinite(value)) { c_.report("Each keyframe needs a valid nonnegative time and numeric value"); return; }
-        curve.points.push_back({frames(time), value});
+        bool bendOk = true; const auto* bendItem = curveTable_->item(row, 3);
+        const double bend = bendItem && !bendItem->text().trimmed().isEmpty() ? bendItem->text().toDouble(&bendOk) : 0;
+        if (!bendOk || !std::isfinite(bend) || std::abs(bend) > 1) { c_.report("Bend must be a number from −1 to 1"); return; }
+        const auto* shape = qobject_cast<QComboBox*>(curveTable_->cellWidget(row, 2));
+        curve.points.push_back({frames(time), value, shape ? static_cast<CurveShape>(shape->currentIndex()) : CurveShape::Linear, bend});
     }
     std::sort(curve.points.begin(), curve.points.end(), [](const Keyframe& a, const Keyframe& b) { return a.time < b.time; });
     c_.edit([=](Project& p) { for (auto& c : p.show.clips) if (c.id == id) *envelope(c, property) = curve; });
@@ -688,10 +700,10 @@ void MainWindow::splitClip() {
             for (int property = 0; property < 6; ++property) {
                 auto* head = envelope(c, property); auto* rest = envelope(tail, property);
                 if (head->points.empty()) continue;
-                const double at = head->at(cut, propertyValue(c, property));
-                rest->points.clear(); rest->points.push_back({0, at});
-                for (const auto& point : head->points) if (point.time > cut) rest->points.push_back({point.time - cut, point.value});
-                std::erase_if(head->points, [=](const Keyframe& point) { return point.time >= cut; }); head->points.push_back({cut, at});
+                Keyframe at = cutPoint(*head, cut, propertyValue(c, property)); at.time = 0;
+                rest->points.clear(); rest->points.push_back(at);
+                for (auto point : head->points) if (point.time > cut) { point.time -= cut; rest->points.push_back(point); }
+                std::erase_if(head->points, [=](const Keyframe& point) { return point.time >= cut; }); head->points.push_back({cut, at.value});
             }
             c.duration = cut; tails.push_back(std::move(tail));
         }

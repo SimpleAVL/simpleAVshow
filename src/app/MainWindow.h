@@ -70,6 +70,7 @@ private:
     void updateRoutingPresets();
     void updateInspector();
     void updateCurve();
+    void addCurveRow(const Keyframe& point);
     void applyTrack();
     void applyClip();
     void applyMarker(bool requireMidi = true);

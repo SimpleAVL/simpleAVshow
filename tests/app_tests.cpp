@@ -1441,6 +1441,66 @@ private slots:
         send(QEvent::MouseButtonPress, 288, Qt::LeftButton); send(QEvent::MouseMove, 800, Qt::LeftButton); send(QEvent::MouseButtonRelease, 800, Qt::NoButton);
         QVERIFY(c.project.show.clips[0].duration > frames(10)); c.dirty = false;
     }
+    void automationShapesRoundTripTrimAndSplit() {
+        QTemporaryDir dir; Project p = demoProject(); materializeProjectMedia(p, dir.filePath("show.media"));
+        auto& clip = p.show.clips[0];
+        clip.alpha.points = {{0, 0, CurveShape::SCurve, .5}, {frames(2), 1, CurveShape::Hold}, {frames(10), .5, CurveShape::Curve, -.25}, {frames(20), 0}};
+        const auto path = dir.filePath("shapes.savshow"); writeProject(p, path);
+        QFile input(path); QVERIFY(input.open(QIODevice::ReadOnly)); const auto root = QJsonDocument::fromJson(input.readAll()).object(); input.close();
+        const auto saved = root["clips"].toArray()[0].toObject()["alpha"].toArray();
+        QCOMPARE(saved[0].toArray(), (QJsonArray{0., 0., "scurve", .5})); QCOMPARE(saved[3].toArray(), (QJsonArray{static_cast<double>(frames(20)), 0.}));
+        const auto loaded = readProject(path).show.clips[0].alpha.points;
+        QCOMPARE(loaded.size(), std::size_t{4}); QVERIFY(loaded[1].shape == CurveShape::Hold); QVERIFY(loaded[2].shape == CurveShape::Curve); QCOMPARE(loaded[2].bend, -.25);
+        auto invalid = p; invalid.show.clips[0].alpha.points[0].bend = 1.5; QVERIFY_THROWS_EXCEPTION(std::runtime_error, validate(invalid));
+        auto edited = [&](const QJsonValue& point) {
+            auto o = root; auto clips = o["clips"].toArray(); auto first = clips[0].toObject(); first["alpha"] = QJsonArray{point};
+            clips[0] = first; o["clips"] = clips; return openFailure(dir.filePath("bad.savshow"), QJsonDocument(o).toJson());
+        };
+        QCOMPARE(edited(QJsonArray{0., 0., "wobble", 0.}), QString("Invalid automation shape"));
+        QCOMPARE(edited(QJsonArray{0., 0., "hold"}), QString("Invalid automation data"));
+        // A left trim inside the hold keeps holding from the new start.
+        Clip trimmed = clip; retime(trimmed, trimmed.start + frames(4), trimmed.duration - frames(4), trimmed.offset + frames(4));
+        QCOMPARE(trimmed.alpha.points.front().time, Frame{0}); QCOMPARE(trimmed.alpha.points.front().value, 1.);
+        QVERIFY(trimmed.alpha.points.front().shape == CurveShape::Hold); QCOMPARE(trimmed.alpha.at(frames(5), 0), 1.);
+    }
+    void timelineEditsKeyframesWithTheMouse() {
+        Controller c; auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}}; project.show.duration = frames(60);
+        auto audio = std::make_shared<AudioData>(); audio->samples.assign(static_cast<std::size_t>(frames(20)) * 2, 0.f);
+        MediaAsset asset; asset.id = "tone"; asset.name = "Tone"; asset.audio = audio; project.assets.insert(asset.id, asset);
+        Clip clip; clip.id = "a"; clip.assetId = "tone"; clip.audio = audio; clip.duration = frames(10); clip.volume.points = {{0, 0}, {frames(2), 1}};
+        project.show.clips.push_back(clip);
+        c.replace(project); Timeline timeline(c); timeline.resize(900, 300); timeline.show(); QVERIFY(QTest::qWaitForWindowExposed(&timeline));
+        timeline.setZoom(50); timeline.selectClip("a"); auto* view = timeline.viewport();
+        auto send = [&](QEvent::Type type, QPointF at, Qt::MouseButtons buttons, Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+            QMouseEvent e(type, at, view->mapToGlobal(at), Qt::LeftButton, buttons, modifiers); QApplication::sendEvent(view, &e);
+        };
+        auto drag = [&](QPointF from, QPointF to, Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+            send(QEvent::MouseButtonPress, from, Qt::LeftButton, modifiers); send(QEvent::MouseMove, (from + to) / 2, Qt::LeftButton, modifiers);
+            send(QEvent::MouseMove, to, Qt::LeftButton, modifiers); send(QEvent::MouseButtonRelease, to, Qt::NoButton, modifiers);
+        };
+        // The clip spans y 63–109; its curve band runs from 81 (value 1) to 105 (value 0), at 50 px per second.
+        const auto& points = [&]() -> const std::vector<Keyframe>& { return c.project.show.clips[0].volume.points; };
+        drag({290, 81}, {340, 93});
+        QCOMPARE(points().size(), std::size_t{2}); QCOMPARE(points()[1].time, frames(3)); QCOMPARE(points()[1].value, .5);
+        QCOMPARE(c.project.show.clips[0].start, Frame{0}); // The clip itself stayed put.
+        // Clicking the line adds a point on it; the double-click that follows keeps it, a later one deletes it.
+        drag({215, 103}, {215, 103});
+        QCOMPARE(points().size(), std::size_t{3}); QCOMPARE(points()[1].time, frames(.5)); QVERIFY(std::abs(points()[1].value - .5 / 6) < 1e-9);
+        send(QEvent::MouseButtonDblClick, {215, 103}, Qt::LeftButton); send(QEvent::MouseButtonRelease, {215, 103}, Qt::NoButton);
+        QCOMPARE(points().size(), std::size_t{3});
+        QTest::qWait(QApplication::doubleClickInterval() + 50);
+        send(QEvent::MouseButtonDblClick, {215, 103}, Qt::LeftButton); send(QEvent::MouseButtonRelease, {215, 103}, Qt::NoButton);
+        QCOMPARE(points().size(), std::size_t{2});
+        // Alt-dragging a straight segment upwards bends it into a rising-early curve.
+        drag({240, 101}, {240, 71}, Qt::AltModifier);
+        QVERIFY(points()[0].shape == CurveShape::Curve); QCOMPARE(points()[0].bend, .5);
+        QVERIFY(points()[0].shape == CurveShape::Curve && c.project.show.clips[0].volume.at(frames(1), 0) > .5 / 3);
+        c.undo(); QVERIFY(points()[0].shape == CurveShape::Linear);
+        // Show mode locks keyframes like every other edit.
+        c.showMode = true; drag({340, 93}, {390, 81}); QCOMPARE(points()[1].time, frames(3)); c.showMode = false;
+        c.dirty = false;
+    }
     void timelineZoomAnchorsPlayheadAndCursor() {
         Controller c; c.replace(longShow()); Timeline timeline(c); timeline.resize(900, 300); timeline.show(); QVERIFY(QTest::qWaitForWindowExposed(&timeline));
         auto x = [&](double t) { return 190 + t * timeline.zoom() - timeline.horizontalScrollBar()->value(); };
