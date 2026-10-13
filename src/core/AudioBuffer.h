@@ -1,6 +1,7 @@
 #pragma once
 #include "core/Model.h"
 #include <atomic>
+#include <chrono>
 
 namespace sav {
 // One disk worker, one callback consumer. Slots are exclusively owned while
@@ -9,10 +10,24 @@ class AudioBuffer {
 public:
     static constexpr Frame blockFrames = 8192;
     static constexpr std::size_t slotCount = 4;
+    // Transient read failures retry within the read-ahead; they latch once they persist this long.
+    static constexpr std::chrono::milliseconds retryInterval{25}, retryWindow{2000};
     AudioBuffer(std::shared_ptr<const AudioData> data, Frame offset, bool loop, Frame initial);
-    bool sample(Frame frame, float& left, float& right) noexcept;
-    void service(); // Disk worker only (or while the callback is closed).
+    bool sample(Frame frame, float& left, float& right) noexcept { requested_.store(frame / blockFrames * blockFrames, std::memory_order_release); return read(current_, tail_, frame, left, right); }
+    // Callback only: a release tail reads resident blocks without moving the read-ahead; a miss never waits.
+    bool peek(Frame frame, float& left, float& right) noexcept { return read(tail_, current_, frame, left, right); }
+    void settle() noexcept { release(tail_, current_); } // Callback only: the release tail ended.
+    // Callback only: read ahead from this source frame before the clip needs it.
+    void request(Frame frame) noexcept;
+    // Disk worker only (or while the callback is closed). Returns false when a read attempt failed transiently.
+    bool service();
+    // Pre-roll while the callback is closed; any failure latches.
+    void prebuffer();
     bool failed() const noexcept { return failed_.load(std::memory_order_acquire); }
+    // While the callback and worker are stopped: read ahead from a new entry, keeping resident
+    // blocks. Returns whether the entry block is already resident.
+    bool retarget(Frame frame) noexcept;
+    bool matches(const AudioData* data, Frame offset, bool loop) const noexcept { return data_.get() == data && offset_ == offset && loop_ == loop; }
 private:
     enum Ownership { Empty, Writing, Ready, Reading };
     struct Slot {
@@ -26,6 +41,10 @@ private:
     std::array<Slot, slotCount> slots_;
     std::atomic<Frame> requested_;
     std::atomic<bool> failed_{false};
-    int current_ = -1; // Callback only.
+    int current_ = -1, tail_ = -1; // Callback only: slots held by the voice and its release tail (possibly the same).
+    std::chrono::steady_clock::time_point firstFailure_{}, retryAt_{}; // Worker only.
+    bool failing_ = false, strict_ = false;
+    void release(int& held, int other) noexcept;
+    bool read(int& held, int other, Frame frame, float& left, float& right) noexcept;
 };
 }

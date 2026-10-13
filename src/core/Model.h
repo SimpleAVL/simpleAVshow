@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,9 @@ struct Envelope {
         return a.value + t * (right->value - a.value);
     }
 };
+// A source no longer matches what was prepared. Retrying cannot help; other
+// read failures (locked or briefly unavailable files) are retried.
+struct AudioSourceChanged : std::runtime_error { using std::runtime_error::runtime_error; };
 class AudioStorage {
 public:
     virtual ~AudioStorage() = default;
@@ -39,8 +43,8 @@ public:
     virtual void read(Frame first, float* stereo, std::size_t count) const = 0;
 };
 struct AudioData {
-    // Generated/test sources may stay resident. Imported sources use disk PCM.
-    // Both representations are stereo, interleaved, 48 kHz.
+    // Generated/test sources may stay resident. Imported sources use direct
+    // PCM files or prepared disk caches. Reads return interleaved 48 kHz stereo.
     std::vector<float> samples;
     std::shared_ptr<const AudioStorage> storage;
     static constexpr Frame peakStride = 480;
@@ -62,6 +66,8 @@ struct Track {
 };
 struct Clip {
     std::string id, assetId, text;
+    // Clips sharing a non-empty link (a video and its audio) move, trim, split, and delete together.
+    std::string link;
     int track = 0;
     Frame start = 0, duration = sampleRate * 10, offset = 0;
     bool loop = false;

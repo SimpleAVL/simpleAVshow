@@ -1,10 +1,10 @@
 #include "app/Controller.h"
-#include <QDataStream>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QMetaObject>
 #include <QPainter>
-#include <QSaveFile>
+#include <QStandardPaths>
 #include <chrono>
 #include <set>
 
@@ -14,32 +14,47 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
     arm(0);
     timer_.setInterval(16);
     connect(&timer_, &QTimer::timeout, this, [this] {
-        if (configured_ && !device.running()) {
+        // A stream that stops calling back without reporting an error has stalled just the same.
+        if (device.callbacks() != heartbeat_ || !device.running()) { heartbeat_ = device.callbacks(); stall_.restart(); }
+        const bool stalled = configured_ && device.running() && stall_.hasExpired(750);
+        if (configured_ && (!device.running() || stalled)) {
+            const QString reason = stalled ? QString("stopped responding") : device.lastError().isEmpty() ? QString("stopped") : "failed: " + device.lastError();
             configured_ = false; device.close();
             // Once the device is closed, it is safe to render a zero-sized control block.
             transport.command({Action::StopAll}); transport.render(nullptr, 0, 0);
-            report("Audio output stopped. Press Play to reconnect, or choose another device in Outputs.");
+            report("Audio output " + reason + ". Press Play to reconnect, or choose another device in Outputs.");
             playbackProblem = status;
         }
         if (transport.eventOverflow() && transport.state() != State::Stopped) {
             stopAll(); report("MIDI event queue overflow. Playback is stopped; inspect the project.");
         }
         if (transport.audioReadFailed() && transport.state() != State::Stopped) {
-            stopAll(); report("Prepared audio cache could not be read. Playback is stopped; reopen the project to rebuild it."); playbackProblem = status;
+            stopAll(); report("Audio source changed or could not be read. Playback is stopped; restore missing media and press Play to retry, or reopen the project to rebuild changed caches."); playbackProblem = status;
         }
+        if (midiWatch_.hasExpired(1000)) { midiWatch_.restart(); watchMidi(); }
         emit tick();
-    }); timer_.start();
+    }); timer_.start(); midiWatch_.start(); stall_.start();
     autosave_.setInterval(60000);
     connect(&autosave_, &QTimer::timeout, this, [this] {
-        if (!dirty || path.isEmpty() || busy) return;
-        try { writeProject(project, path + ".autosave"); }
-        catch (const std::exception& e) { report("Autosave failed: " + QString::fromUtf8(e.what())); }
+        // Extracted package media is temporary, and generated media has no file to reference yet.
+        if (!dirty || busy || project.packageDirectory) return;
+        const bool untitled = path.isEmpty();
+        if (untitled && std::any_of(project.assets.cbegin(), project.assets.cend(), [](const MediaAsset& a) { return a.path.isEmpty(); })) return;
+        try {
+            if (untitled) QDir().mkpath(QFileInfo(autosavePath()).absolutePath());
+            writeProject(project, autosavePath());
+        } catch (const std::exception& e) { report("Autosave failed: " + QString::fromUtf8(e.what())); }
     }); autosave_.start();
 }
 Controller::~Controller() {
     timer_.stop(); stopMidiThread(); device.close();
 }
 void Controller::report(QString text) { status = text; emit message(text); }
+QString Controller::untitledAutosavePath() {
+    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/Untitled.savshow.autosave";
+}
+QString Controller::autosavePath() const { return path.isEmpty() ? untitledAutosavePath() : path + ".autosave"; }
+void Controller::discardAutosave() { QFile::remove(autosavePath()); }
 bool Controller::canEdit(bool reportFailure) {
     const bool allowed = !showMode && !busy && transport.state() != State::Playing && transport.state() != State::Held &&
         transport.asyncVoices() == 0;
@@ -51,32 +66,41 @@ bool Controller::edit(const std::function<void(Project&)>& mutation) {
     try {
         Project next = project; mutation(next); bindAudio(next); validate(next);
         const Frame time = std::min(position(), next.show.duration);
-        undo_.push_back(project); if (undo_.size() > 32) undo_.erase(undo_.begin()); redo_.clear();
+        // The previous state moves into history rather than being copied again.
+        undo_.push_back(std::move(project)); if (undo_.size() > 32) undo_.pop_front(); redo_.clear();
         project = std::move(next); dirty = true; arm(time); emit changed(); return true;
     } catch (const std::exception& e) { report(QString::fromUtf8(e.what())); return false; }
 }
 void Controller::replace(Project next, QString projectPath) {
-    validate(next); project = std::move(next); path = std::move(projectPath); dirty = false; playbackProblem.clear();
+    validate(next);
+    // Readers hold extracted package files open; Windows cannot remove them while open.
+    videos_.clear(); lastPicture_ = {};
+    project = std::move(next); path = std::move(projectPath); dirty = false; playbackProblem.clear();
     undo_.clear(); redo_.clear();
     arm(0); report("Project ready. Space plays or pauses; Stop All silences async audio."); emit changed();
 }
 void Controller::undo() {
     if (!canEdit() || undo_.empty()) return;
-    redo_.push_back(project); project = std::move(undo_.back()); undo_.pop_back(); dirty = true;
+    redo_.push_back(std::move(project)); project = std::move(undo_.back()); undo_.pop_back(); dirty = true;
     arm(std::min(position(), project.show.duration)); emit changed();
 }
 void Controller::redo() {
     if (!canEdit() || redo_.empty()) return;
-    undo_.push_back(project); project = std::move(redo_.back()); redo_.pop_back(); dirty = true;
+    undo_.push_back(std::move(project)); project = std::move(redo_.back()); redo_.pop_back(); dirty = true;
     arm(std::min(position(), project.show.duration)); emit changed();
 }
 void Controller::arm(Frame position) {
     stopMidiThread();
-    device.close(); videos_.clear(); lastPicture_ = {}; lastComposed_ = -1; lateFrames = 0;
+    // The callback must be stopped before configure; a healthy stream only pauses.
+    const bool keep = configured_ && device.running();
+    if (keep) device.pause(); else device.close();
+    videos_.clear(); videoErrors_.clear(); lastPicture_ = {}; lastComposed_ = -1; lateFrames = 0;
     armed_ = std::make_shared<Show>(project.show); transport.configure(armed_, position);
-    if (configured_) {
+    if (keep && device.resume()) stall_.restart();
+    else if (configured_) {
         QString error;
         if (!device.open(api_, deviceId_, channels_, buffer_, error)) { configured_ = false; report("Audio output unavailable: " + error); }
+        stall_.restart();
     }
     startMidiThread();
 }
@@ -111,14 +135,20 @@ bool Controller::routesValid() const {
 }
 void Controller::toggle() {
     if (busy) return;
-    const bool playing = transport.state() == State::Playing;
+    const State state = transport.state(); const bool playing = state == State::Playing;
     if (!playing) {
         playbackProblem.clear();
-        if (transport.audioReadFailed()) { report("Reopen the project to rebuild its unreadable audio cache"); playbackProblem = status; return; }
-        for (const auto& asset : project.assets) if (asset.video && !QFileInfo::exists(asset.path)) {
-            report("Video source is missing: " + asset.path); playbackProblem = status; return;
+        // Re-arming retries sources that were briefly unavailable; changed sources still need reopening.
+        if (transport.audioReadFailed() && state != State::Held && !transport.asyncVoices()) arm(position());
+        if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and press Play to retry, or reopen the project to rebuild changed or damaged caches."); playbackProblem = status; return; }
+        // Resuming a live show never blocks on picture or MIDI; it warns and continues.
+        const bool resuming = state == State::Held || transport.asyncVoices() || (state == State::Paused && device.running());
+        if (const auto missing = missingMedia(); !missing.isEmpty()) {
+            report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
+            playbackProblem = status;
+            if (!resuming) return;
         }
-        if (needsMidi() && !prepareMidi()) { playbackProblem = status; return; }
+        if (needsMidi() && !prepareMidi()) { playbackProblem = status; if (!resuming) return; }
         if (!prepareAudio()) { playbackProblem = status; return; }
         if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return; }
     }
@@ -141,7 +171,7 @@ bool Controller::configureAudio(RtAudio::Api api, unsigned id, QString name, uns
 bool Controller::openAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer) {
     api_ = api; deviceId_ = id; channels_ = channels; buffer_ = buffer; audioName = name;
     QString error;
-    configured_ = device.open(api, id, channels, buffer, error);
+    configured_ = device.open(api, id, channels, buffer, error); stall_.restart();
     if (configured_) {
         playbackProblem.clear();
         QSettings settings; settings.setValue("audio/api", static_cast<int>(api)); settings.setValue("audio/device", name);
@@ -161,15 +191,52 @@ bool Controller::openMidi(int port) {
     if (ok) { midiName_ = midi.name(); QSettings().setValue("midi/port", midiName_); playbackProblem.clear(); }
     report(ok ? (port < 0 ? "MIDI output disconnected" : "MIDI output: " + midi.name()) : error); return ok;
 }
+QStringList Controller::preflight() {
+    QStringList problems;
+    if (dirty) problems << "The show has unsaved changes.";
+    for (const auto& missing : missingMedia()) problems << "Media is missing: " + missing;
+    if (needsMidi() && !midi.connected()) {
+        const QString remembered = QSettings().value("midi/port").toString();
+        if (remembered.isEmpty()) problems << "MIDI cues need a destination. Choose one in Outputs.";
+        else if (!midi.ports().contains(remembered)) problems << "MIDI destination “" + remembered + "” is missing.";
+    }
+    // Probe audio drivers only while nothing is playing.
+    if (!device.running() && transport.state() != State::Playing && transport.state() != State::Held && !transport.asyncVoices()) {
+        QSettings settings; const QString remembered = settings.value("audio/device").toString();
+        const auto api = remembered.isEmpty() ? RtAudio::UNSPECIFIED : static_cast<RtAudio::Api>(settings.value("audio/api", 0).toInt());
+        try {
+            if (!playbackDevice(device.devices(api), remembered))
+                problems << (remembered.isEmpty() ? "No audio output is available." : "Audio output “" + remembered + "” is missing.");
+        } catch (const std::exception& e) { problems << "Cannot check audio outputs: " + QString::fromUtf8(e.what()); }
+    } else if (device.running() && !routesValid()) problems << "A track is routed to more outputs than the audio interface provides.";
+    return problems;
+}
+QStringList Controller::missingMedia() const {
+    QStringList missing;
+    for (const auto& clip : project.show.clips) {
+        const auto asset = project.assets.constFind(QString::fromStdString(clip.assetId));
+        if (asset == project.assets.cend() || missing.contains(asset->path)) continue;
+        if (asset->offline || (asset->video && !QFileInfo::exists(asset->path))) missing << asset->path;
+    }
+    return missing;
+}
+void Controller::watchMidi() {
+    if (!needsMidi() || midiName_.isEmpty() || busy) return;
+    const bool present = midi.ports().contains(midiName_);
+    if (midi.connected() && !present) {
+        stopMidiThread(); midi.close(); startMidiThread();
+        report("MIDI destination “" + midiName_ + "” disconnected. Cues are skipped until it reconnects."); playbackProblem = status;
+    } else if (!midi.connected() && present && transport.state() != State::Stopped) {
+        if (prepareMidi()) report("MIDI destination “" + midiName_ + "” reconnected.");
+    }
+}
 bool Controller::needsMidi() const {
     return std::any_of(project.show.markers.begin(), project.show.markers.end(), [](const Marker& marker) { return !marker.message.empty(); });
 }
 bool Controller::prepareMidi() {
     if (midi.connected()) return true;
-    // Automatic preparation is allowed in Show mode, but never while voices are live.
-    if (busy || transport.state() == State::Playing || transport.state() == State::Held || transport.asyncVoices()) {
-        report("Use Stop All before reconnecting MIDI in Outputs."); return false;
-    }
+    // Automatic preparation is allowed in Show mode and while voices are live: queued cues wait in the transport.
+    if (busy) { report("Wait for media preparation to finish."); return false; }
     const QString remembered = QSettings().value("midi/port").toString();
     midiName_ = remembered;
     if (remembered.isEmpty()) {
@@ -234,7 +301,7 @@ QImage Controller::compose() {
         if (upcoming) needed.insert(upcoming->id);
     }
     for (auto it = videos_.begin(); it != videos_.end();) {
-        if (!needed.contains(it->first)) it = videos_.erase(it);
+        if (!needed.contains(it->first)) { videoErrors_.erase(it->first); it = videos_.erase(it); }
         else ++it;
     }
     for (const auto& clip : project.show.clips) {
@@ -275,12 +342,14 @@ QImage Controller::compose() {
                     if (c.loop) time = seconds(c.offset) + std::fmod(seconds(local), std::max(.001, a.duration - seconds(c.offset)));
                     auto it = videos_.find(c.id);
                     if (it != videos_.end()) {
+                        it->second->setLoop(c.loop ? seconds(c.offset) : -1, a.duration);
                         source = it->second->imageAt(std::min(time, std::max(0., a.duration - 1. / a.fps)));
+                        // A failed reader freezes its picture; audio and cues continue.
                         const QString error = it->second->error();
-                        if (!error.isEmpty()) {
-                            if (transport.state() == State::Playing || transport.state() == State::Held) stopAll();
-                            const QString message = "Video error: " + error;
-                            if (status != message) report(message);
+                        if (!error.isEmpty() && !videoErrors_.contains(c.id)) {
+                            videoErrors_.insert(c.id);
+                            report("Video error in " + a.name + ": " + error + " The picture holds its last frame; audio continues.");
+                            playbackProblem = status;
                         }
                     }
                     if (source.isNull()) waiting = true;
@@ -301,33 +370,38 @@ QImage Controller::compose() {
     }
     lastComposed_ = frame; lastPicture_ = picture; return picture;
 }
+QString Controller::mediaDirectory(const QString& target) {
+    return QFileInfo(target).absolutePath() + "/" + QFileInfo(target).completeBaseName() + ".media";
+}
+bool Controller::savingCopiesMedia() const {
+    return project.packageDirectory || std::any_of(project.assets.cbegin(), project.assets.cend(), [](const MediaAsset& a) { return a.path.isEmpty(); });
+}
 void Controller::save(QString target) {
     if (!canEdit()) return;
+    try { Project candidate = project; materializeProjectMedia(candidate, mediaDirectory(target)); commitSave(std::move(candidate), target); }
+    catch (const std::exception& e) { report("Save failed: " + QString::fromUtf8(e.what())); }
+}
+void Controller::commitSave(Project candidate, QString target) {
     try {
-        Project candidate = project;
-        QDir mediaDir(QFileInfo(target).absolutePath() + "/" + QFileInfo(target).completeBaseName() + ".media");
-        for (auto& a : candidate.assets) if (a.path.isEmpty()) {
-            if (!QDir().mkpath(mediaDir.absolutePath())) throw std::runtime_error("Cannot create generated media directory");
-            a.path = mediaDir.filePath(newId() + (a.image ? ".png" : ".wav"));
-            if (a.image) {
-                QSaveFile image(a.path);
-                if (!image.open(QIODevice::WriteOnly) || !a.still.save(&image, "PNG") || !image.commit()) throw std::runtime_error("Cannot save generated image");
-            } else if (a.audio) {
-                QSaveFile wav(a.path);
-                if (!wav.open(QIODevice::WriteOnly)) throw std::runtime_error("Cannot save generated audio");
-                QDataStream out(&wav); out.setByteOrder(QDataStream::LittleEndian);
-                const quint16 channels = a.audio->mono ? 1 : 2;
-                const quint32 bytes = static_cast<quint32>(a.audio->length() * channels * 2);
-                out.writeRawData("RIFF", 4); out << quint32(bytes + 36); out.writeRawData("WAVEfmt ", 8);
-                out << quint32(16) << quint16(1) << channels << quint32(sampleRate) << quint32(sampleRate * channels * 2) << quint16(channels * 2) << quint16(16);
-                out.writeRawData("data", 4); out << bytes;
-                for (std::size_t i = 0; i < a.audio->samples.size(); i += a.audio->mono ? 2 : 1)
-                    out << static_cast<qint16>(std::clamp(a.audio->samples[i], -1.f, 1.f) * 32767);
-                if (out.status() != QDataStream::Ok || !wav.commit()) throw std::runtime_error("Cannot finish generated audio file");
-            } else throw std::runtime_error("Asset has no source file");
+        const auto sourceDirectory = project.packageDirectory;
+        const QString previous = path;
+        writeProject(candidate, target); project.assets = std::move(candidate.assets); bindAudio(project); project.packageDirectory.reset(); path = target; dirty = false;
+        // Undo must not restore temporary package paths or unsaved generated media.
+        for (auto* history : {&undo_, &redo_}) for (auto& snapshot : *history) {
+            bool extracted = false;
+            for (auto it = snapshot.assets.begin(); it != snapshot.assets.end(); ++it) {
+                if (const auto saved = project.assets.constFind(it.key()); saved != project.assets.cend()) { it->path = saved->path; it->audio = saved->audio; }
+                else extracted |= sourceDirectory && it->path.startsWith(sourceDirectory->path() + "/");
+            }
+            if (!extracted) snapshot.packageDirectory.reset();
+            bindAudio(snapshot);
         }
-        writeProject(candidate, target); project.assets = std::move(candidate.assets); path = target; dirty = false;
+        if (sourceDirectory) arm(position());
+        // The edits now live in target; a sidecar left next to the previous file would offer them again.
+        for (const auto& saved : {target, previous}) if (!saved.isEmpty()) QFile::remove(saved + ".autosave");
+        QFile::remove(untitledAutosavePath());
         report("Saved " + QFileInfo(target).fileName()); emit changed();
     } catch (const std::exception& e) { report("Save failed: " + QString::fromUtf8(e.what())); }
 }
+
 }

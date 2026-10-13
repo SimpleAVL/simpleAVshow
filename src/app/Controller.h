@@ -5,6 +5,9 @@
 #include <QObject>
 #include <QTimer>
 #include <QSettings>
+#include <QElapsedTimer>
+#include <deque>
+#include <set>
 #include <functional>
 #include <map>
 #include <thread>
@@ -36,11 +39,23 @@ public:
     bool configureMidi(int port);
     bool testMidi(const std::vector<unsigned char>& message);
     bool needsMidi() const;
+    // Offline sources and vanished videos used on the timeline.
+    QStringList missingMedia() const;
+    // Problems worth fixing before a performance; empty when the show is ready.
+    QStringList preflight();
     QString midiDestination() const { return midiName_; }
     void setShowMode(bool enabled);
     QImage compose();
     void save(QString target);
+    // Saving an opened package or generated media copies files; MainWindow runs that part on a worker.
+    bool savingCopiesMedia() const;
+    static QString mediaDirectory(const QString& target);
+    void commitSave(Project candidate, QString target);
     void report(QString message);
+    // Sidecar for crash recovery: next to the show, or in app data while untitled.
+    QString autosavePath() const;
+    static QString untitledAutosavePath();
+    void discardAutosave();
     bool routesValid() const;
     unsigned lateFrames = 0;
 signals:
@@ -57,11 +72,15 @@ private:
     std::shared_ptr<const Show> armed_;
     std::thread midiThread_;
     std::atomic<bool> midiStop_{true};
+    QElapsedTimer midiWatch_, stall_;
+    std::uint64_t heartbeat_ = 0;
+    std::set<std::string> videoErrors_;
     QImage lastPicture_;
     Frame lastComposed_ = -1;
-    std::vector<Project> undo_, redo_;
+    std::deque<Project> undo_, redo_;
     void arm(Frame position);
     void startMidiThread();
+    void watchMidi();
     void stopMidiThread();
     bool prepareAudio();
     bool prepareMidi();

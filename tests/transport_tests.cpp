@@ -21,6 +21,7 @@ void operator delete[](void* p) noexcept { ::operator delete(p); }
 
 using namespace sav;
 namespace {
+constexpr int fade = Transport::fadeFrames;
 void expect(bool condition, const char* message) { if (!condition) throw std::runtime_error(message); }
 void near(float actual, double expected, const char* message) { if (std::abs(actual - expected) > 1e-5) throw std::runtime_error(message); }
 std::shared_ptr<AudioData> audio(std::initializer_list<float> mono) {
@@ -40,13 +41,14 @@ public:
     void read(Frame first, float* out, std::size_t count) const override {
         if (checkingCallback) callbackReads.store(true);
         reads.fetch_add(1);
+        if (changed.load()) throw AudioSourceChanged("Test source changed");
         if (fail.load()) throw std::runtime_error("Test cache failure");
         std::this_thread::sleep_for(std::chrono::milliseconds(delay.load()));
         for (std::size_t i = 0; i < count; ++i) out[i * 2] = out[i * 2 + 1] = value(first + static_cast<Frame>(i));
     }
     mutable std::atomic<bool> callbackReads{false};
     mutable std::atomic<unsigned> reads{0};
-    std::atomic<bool> fail{false};
+    std::atomic<bool> fail{false}, changed{false};
     std::atomic<int> delay{0};
 private:
     Frame length_;
@@ -78,8 +80,9 @@ int main() {
         {"normal audio stops at hold, resumes at the same sample", [] {
             auto p = show(false); p->markers.push_back({"hold", "Hold", 3, true});
             Transport t; t.configure(p); play(t); std::vector<float> out; render(t, 8, out);
-            near(out[4], .3, "last sample before hold"); for (int i = 6; i < 16; ++i) near(out[i], 0, "normal audio silent while held");
-            play(t); render(t, 1, out); near(out[0], .4, "normal audio resumes from hold position");
+            near(out[4], .3, "last sample before hold");
+            for (int i = 3; i < 8; ++i) near(out[i * 2], (.1 + .1 * i) * (fade - (i - 2)) / fade, "held normal audio fades out past the hold");
+            play(t); render(t, 1, out); near(out[0], .4 / fade, "normal audio resumes from hold position, fading in");
         }},
         {"manual pause preserves async source", [] {
             Transport t; t.configure(show()); play(t); std::vector<float> out; render(t, 2, out);
@@ -90,13 +93,14 @@ int main() {
             auto p = show(); p->clips[0].duration = 10;
             Transport t; t.configure(p); play(t); std::vector<float> out; render(t, 2, out);
             t.command({Action::Seek, 6}); render(t, 1, out); near(out[0], .3, "source retained on interior seek"); expect(t.position() == 7, "show seeks independently");
-            t.command({Action::Seek, 12}); render(t, 2, out); near(out[0], 0, "exterior seek stops async source"); expect(t.asyncVoices() == 0, "no lingering async voice");
+            t.command({Action::Seek, 12}); render(t, 8, out); near(out[0], .4 * (fade - 1) / fade, "exterior seek fades the async source out"); near(out[10], 0, "fade ends with the source");
+            expect(t.asyncVoices() == 0, "no lingering async voice");
             t.command({Action::Seek, 1}); render(t, 1, out); near(out[0], .2, "inactive clip starts at seek position");
         }},
         {"seek to exclusive clip end stops paused async voice", [] {
             auto p = show(); p->clips[0].duration = 6; Transport t; t.configure(p); play(t);
             std::vector<float> out; render(t, 1, out); t.command({Action::Pause}); t.command({Action::Seek, 6}); render(t, 2, out);
-            near(out[0], 0, "end is outside clip"); expect(t.asyncVoices() == 0, "paused seek stops voice");
+            near(out[0], .2 * (fade - 1) / fade, "end is outside clip; the voice fades out"); expect(t.asyncVoices() == 0, "paused seek stops voice");
         }},
         {"looping and non-looping ambience survive an arbitrarily long hold", [] {
             auto p = show(); p->markers.push_back({"hold", "Hold", 1, true}); p->clips[0].loop = true;
@@ -129,13 +133,16 @@ int main() {
             near(out[0], .1, "main left"); near(out[1], .1, "main right"); near(out[2], .2, "guide only on channel 3"); near(out[3], .3, "click only on channel 4"); near(out[4], 0, "unused channel silent"); near(out[5], 0, "unused channel silent");
         }},
         {"Stop All stops ambience without resetting show time", [] {
-            Transport t; t.configure(show()); play(t); std::vector<float> out; render(t, 2, out); t.command({Action::StopAll}); render(t, 4, out);
-            expect(t.position() == 2 && t.state() == State::Stopped && t.asyncVoices() == 0, "hard stop state"); for (auto sample : out) near(sample, 0, "hard stop silence");
+            Transport t; t.configure(show()); play(t); std::vector<float> out; render(t, 2, out); t.command({Action::StopAll}); render(t, fade + 4, out);
+            expect(t.position() == 2 && t.state() == State::Stopped && t.asyncVoices() == 0, "hard stop state");
+            for (int i = 0; i < 6; ++i) near(out[i * 2], (.3 + .1 * i) * (fade - 1 - i) / fade, "Stop All fades out");
+            for (int i = 12; i < (fade + 4) * 2; ++i) near(out[i], 0, "silence after the fade");
         }},
         {"show end stops all voices", [] {
             auto p = show(); p->duration = 4; p->clips[0].duration = 4; p->clips[0].loop = true;
             Transport t; t.configure(p); play(t); std::vector<float> out; render(t, 12, out);
-            expect(t.state() == State::Ended && t.position() == 4, "show end boundary"); near(out[8], 0, "async silent at project end"); expect(t.asyncVoices() == 0, "project end clears voices");
+            expect(t.state() == State::Ended && t.position() == 4, "show end boundary"); near(out[8], .5 * (fade - 1) / fade, "async fades out at project end");
+            expect(t.asyncVoices() == 0, "project end clears voices"); render(t, fade, out); near(out[(fade - 8) * 2], 0, "async silent after the fade");
         }},
         {"mixing clamps overload and reports clipping", [] {
             auto p = show(false); p->clips[0].gain = 4;
@@ -202,12 +209,14 @@ int main() {
             storage->delay.store(30);
             const Frame destination = frames(30 * 3600) + 123;
             t.command({Action::Seek, destination}); checkedRender(t, out, 1, 2);
-            expect(t.position() == destination && t.bufferWaits() == 1, "seek miss freezes sample clock"); near(out[0], 0, "all tracks wait together");
+            expect(t.position() == destination && t.bufferWaits() == 1, "seek miss freezes sample clock");
+            near(out[0], (PatternStorage::value(1) + .2) * (fade - 1) / fade, "all tracks wait together; only the old frames fade out");
             for (int i = 0; i < 1000 && t.position() == destination; ++i) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1)); checkedRender(t, out, 1, 2);
             }
             expect(t.position() == destination + 1, "buffering recovers");
-            near(out[0], PatternStorage::value(destination) + .4, "recovery skips no samples on either track");
+            std::vector<float> after(fade * 2); checkedRender(t, after.data(), fade, 2);
+            near(after[(fade - 1) * 2], PatternStorage::value(destination + fade) + .1 * (1 + (destination + fade) % 4), "recovery skips no samples on either track");
             expect(!storage->callbackReads.load(), "seek never reads disk on callback");
         }},
         {"disk async loop keeps offset through hold, pause, seek, and Stop All", [] {
@@ -220,7 +229,8 @@ int main() {
             t.command({Action::Pause}); checkedRender(t, out.data(), 1, 2);
             t.command({Action::Seek, 10}); checkedRender(t, out.data(), 1, 2);
             near(out[0], PatternStorage::value(8131 + 40001 % (17003 - 8131)), "interior seek retains async cursor");
-            t.command({Action::StopAll}); checkedRender(t, out.data(), 1, 2); near(out[0], 0, "disk voice stops");
+            t.command({Action::StopAll}); checkedRender(t, out.data(), fade + 1, 2); near(out[fade * 2], 0, "disk voice stops after its fade");
+            near(out[0], PatternStorage::value(8131 + 40002 % (17003 - 8131)) * (fade - 1) / fade, "disk voice fades out");
             expect(!storage->callbackReads.load() && !t.bufferWaits(), "short loop is fully prebuffered");
         }},
         {"unreadable disk cache is reported outside the callback", [] {
@@ -229,6 +239,131 @@ int main() {
             Transport t; t.configure(p); expect(t.audioReadFailed(), "pre-roll reports storage failure");
             play(t); float out[2]; checkedRender(t, out, 1, 2); near(out[0], 0, "failure does not emit garbage");
             expect(t.position() == 0 && !storage->callbackReads.load(), "failure never advances or accesses disk on callback");
+        }},
+        {"disk clip replays without a miss after seeking back before it", [] {
+            auto storage = std::make_shared<PatternStorage>(frames(60));
+            auto p = show(false); p->duration = frames(120); p->clips[0].start = 1000; p->clips[0].duration = storage->length(); p->clips[0].audio = diskAudio(storage);
+            Transport t; t.configure(p); play(t); std::vector<float> out(512 * 2);
+            for (int block = 0; block < 100; ++block) { checkedRender(t, out.data(), 512, 2); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+            const auto waits = t.bufferWaits();
+            t.command({Action::Seek, 0}); checkedRender(t, out.data(), 1, 2);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            checkedRender(t, out.data(), 512, 2); checkedRender(t, out.data(), 512, 2);
+            expect(t.bufferWaits() == waits, "seek back re-reads the clip entry before it is needed");
+            near(out[(1000 - 513) * 2], PatternStorage::value(0), "replay starts at the source-in frame");
+            expect(!storage->callbackReads.load(), "retargeting never reads disk on callback");
+        }},
+        {"re-arming keeps resident read-ahead for unchanged disk clips", [] {
+            auto storage = std::make_shared<PatternStorage>(frames(60));
+            auto p = show(false); p->duration = frames(120); p->clips[0].duration = storage->length(); p->clips[0].audio = diskAudio(storage);
+            Transport t; t.configure(p); const auto reads = storage->reads.load(); expect(reads > 0, "first arm prebuffers");
+            auto edited = std::make_shared<Show>(*p); edited->markers.push_back({"m", "Cue", frames(90), true});
+            t.configure(edited); expect(storage->reads.load() == reads, "unchanged clip performs no new reads");
+            play(t); std::vector<float> out(64 * 2); checkedRender(t, out.data(), 64, 2);
+            for (int i = 0; i < 64; ++i) near(out[i * 2], PatternStorage::value(i), "reused read-ahead plays the entry");
+            expect(t.bufferWaits() == 0 && !storage->callbackReads.load(), "reuse never misses");
+            edited = std::make_shared<Show>(*edited); edited->clips[0].offset = 10; t.configure(edited);
+            expect(storage->reads.load() > reads, "changed offset prebuffers again");
+            play(t); checkedRender(t, out.data(), 64, 2); near(out[0], PatternStorage::value(10), "new offset plays");
+            const auto moved = storage->reads.load(); t.configure(edited, frames(30));
+            expect(storage->reads.load() > moved, "a non-resident entry prebuffers"); expect(t.bufferWaits() == 0, "re-arm resets wait count");
+        }},
+        {"transient read failures retry, then recover without latching", [] {
+            auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto p = show(false); p->duration = storage->length(); p->clips[0].duration = p->duration; p->clips[0].audio = diskAudio(storage);
+            Transport t; t.configure(p); play(t); float out[2]; checkedRender(t, out, 1, 2);
+            storage->fail.store(true);
+            const Frame destination = frames(20 * 3600);
+            t.command({Action::Seek, destination});
+            for (int i = 0; i < 100; ++i) { checkedRender(t, out, 1, 2); std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+            expect(t.position() == destination && t.readRetries() > 0 && !t.audioReadFailed(), "a locked file waits and retries");
+            storage->fail.store(false);
+            for (int i = 0; i < 1000 && t.position() == destination; ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); checkedRender(t, out, 1, 2); }
+            expect(t.position() == destination + 1 && !t.audioReadFailed(), "playback resumes once the file is readable");
+            std::vector<float> after(fade * 2); checkedRender(t, after.data(), fade, 2);
+            near(after[(fade - 1) * 2], PatternStorage::value(destination + fade), "recovery resumes at the exact frame");
+        }},
+        {"persistent read failures latch after the retry window; changed sources latch at once", [] {
+            for (const bool sourceChanged : {false, true}) {
+                auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));
+                auto p = show(false); p->duration = storage->length(); p->clips[0].duration = p->duration; p->clips[0].audio = diskAudio(storage);
+                Transport t; t.configure(p); play(t); float out[2]; checkedRender(t, out, 1, 2);
+                (sourceChanged ? storage->changed : storage->fail).store(true);
+                t.command({Action::Seek, frames(20 * 3600)}); checkedRender(t, out, 1, 2);
+                const auto started = std::chrono::steady_clock::now();
+                while (!t.audioReadFailed() && std::chrono::steady_clock::now() - started < std::chrono::seconds(4))
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                const auto elapsed = std::chrono::steady_clock::now() - started;
+                expect(t.audioReadFailed(), "unrecoverable reads are reported");
+                expect(sourceChanged ? elapsed < std::chrono::milliseconds(500) : elapsed >= AudioBuffer::retryWindow - std::chrono::milliseconds(100),
+                    sourceChanged ? "changed source fails without retrying" : "transient failures retry for the full window");
+            }
+        }},
+        {"a single connected leg carries the whole source", [] {
+            auto p = show(false); p->tracks[0].left = 1; p->tracks[0].right = -1; p->tracks[0].pan = .7;
+            auto stereo = std::make_shared<AudioData>(); stereo->samples = {.2f, .4f}; p->clips[0].audio = stereo; p->clips[0].loop = true;
+            Transport t; t.configure(p); play(t); float out[2]; checkedRender(t, out, 1, 2);
+            near(out[0], 0, "disconnected leg stays silent"); near(out[1], .3, "stereo sums to mono at full level, ignoring pan");
+            auto mono = audio({.5f}); mono->mono = true; p->clips[0].audio = mono; p->tracks[0].left = -1; p->tracks[0].right = 0;
+            t.configure(p); play(t); checkedRender(t, out, 1, 2); near(out[0], .5, "mono source keeps full level on one leg");
+        }},
+        {"non-finite samples are silenced and flagged", [] {
+            auto p = show(false); p->clips[0].audio = audio({std::nanf(""), .25f});
+            auto companion = p->clips[0]; companion.audio = audio({.25f}); companion.loop = true; p->clips.push_back(companion);
+            Transport t; t.configure(p); play(t); float out[4]; checkedRender(t, out, 2, 2);
+            near(out[0], 0, "NaN never reaches the device"); expect(t.clipped(), "NaN latches the overload indicator");
+            near(out[2], .5, "following samples mix normally");
+        }},
+        {"cached envelope segments and pan gains match per-sample evaluation", [] {
+            auto p = show(); p->duration = 4000; p->clips[0].duration = 4000; p->clips[0].loop = true;
+            auto source = audio({.5f}); source->mono = true; p->clips[0].audio = source;
+            p->clips[0].volume.points = {{100, 0}, {1100, 1}, {1101, .2}, {1150, .25}, {3000, .75}};
+            p->clips[0].balance.points = {{0, -1}, {2000, 1}, {2500, -.5}};
+            const auto expected = [&](Frame local) {
+                const double pan = std::clamp(p->clips[0].balance.at(local, 0), -1., 1.), gain = .5 * p->clips[0].volume.at(local, 1);
+                return std::pair{gain * std::cos((pan + 1.) * 0.7853981633974483), gain * std::sin((pan + 1.) * 0.7853981633974483)};
+            };
+            const auto check = [&](const std::vector<float>& out, Frame from, Frame count) {
+                for (Frame f = 0; f < count; ++f) {
+                    const auto [left, right] = expected(from + f);
+                    expect(std::abs(out[f * 2] - left) < 1e-4 && std::abs(out[f * 2 + 1] - right) < 1e-4, "automation matches Envelope::at");
+                }
+            };
+            Transport t; t.configure(p); play(t); std::vector<float> out(4000 * 2);
+            checkedRender(t, out.data(), 3990, 2); check(out, 0, 3990);
+            t.command({Action::Seek, 1090}); checkedRender(t, out.data(), 200, 2); check(out, 1090, 200);
+        }},
+        {"cut voices fade out and mid-source voices fade in without moving show time", [] {
+            auto ramp = std::make_shared<AudioData>(); for (int i = 0; i < 1000; ++i) ramp->samples.insert(ramp->samples.end(), {i / 1000.f, i / 1000.f});
+            const auto out = [](Frame k) { return 1. - static_cast<double>(std::min<Frame>(k + 1, fade)) / fade; }; // Release gain k frames after a cut.
+            const auto in = [](Frame k) { return static_cast<double>(std::min<Frame>(k + 1, fade)) / fade; }; // Attack gain k frames after a start.
+            auto p = show(false); p->duration = 2000; p->clips[0].duration = 800; p->clips[0].audio = ramp; p->markers.push_back({"hold", "Hold", 100, true});
+            Transport t; t.configure(p); play(t); std::vector<float> buffer(400 * 2);
+            const auto check = [&](Frame count, const std::function<double(Frame)>& expected, const char* message) {
+                checkedRender(t, buffer.data(), static_cast<unsigned>(count), 2);
+                for (Frame k = 0; k < count; ++k) near(buffer[k * 2], expected(k), message);
+            };
+            check(400, [&](Frame k) { return k < 100 ? k / 1000. : (k - 100 < fade ? k / 1000. * out(k - 100) : 0.); }, "hold fades normal audio out past the marker");
+            expect(t.position() == 100 && t.state() == State::Held, "fade leaves the hold in place");
+            play(t); check(200, [&](Frame k) { return (100 + k) / 1000. * in(k); }, "resume from a hold fades in");
+            t.command({Action::Pause}); check(200, [&](Frame k) { return k < fade ? (300 + k) / 1000. * out(k) : 0.; }, "manual pause fades out");
+            expect(t.position() == 300, "fade leaves paused show time in place");
+            play(t); check(200, [&](Frame k) { return (300 + k) / 1000. * in(k); }, "resume from a pause fades in");
+            t.command({Action::Seek, 200}); check(200, [&](Frame k) { return (k < fade ? (500 + k) / 1000. * out(k) : 0.) + (200 + k) / 1000. * in(k); }, "a seek crossfades the jump");
+            t.command({Action::Seek, 600});
+            check(300, [&](Frame k) { return (k < fade ? (400 + k) / 1000. * out(k) : 0.) + (600 + k) / 1000. * (k < 200 ? in(k) : out(k - 200)); },
+                "a clip cut by its timeline end fades out past it");
+            expect(t.position() == 900, "fades never move show time");
+        }},
+        {"a release tail that misses on disk ends silently without waiting", [] {
+            auto storage = std::make_shared<PatternStorage>(frames(60)); const Frame end = 4 * AudioBuffer::blockFrames;
+            auto p = show(false); p->duration = 40000; p->clips[0].duration = end; p->clips[0].audio = diskAudio(storage);
+            auto companion = p->clips[0]; companion.duration = 40000; companion.audio = audio({.25f}); companion.loop = true; p->clips.push_back(companion);
+            Transport t; t.configure(p); storage->fail.store(true); play(t);
+            std::vector<float> out((end + 8) * 2); checkedRender(t, out.data(), static_cast<unsigned>(end + 8), 2);
+            near(out[(end - 1) * 2], PatternStorage::value(end - 1) + .25, "disk clip plays to its timeline end");
+            for (Frame i = 0; i < 8; ++i) near(out[(end + i) * 2], .25, "a tail beyond resident blocks is silent");
+            expect(t.position() == end + 8 && t.bufferWaits() == 0 && !storage->callbackReads.load(), "a tail miss never freezes the show");
         }},
         {"envelope interpolation follows exact frame position", [] {
             Envelope e{{{10, .2}, {20, .8}}}; near(e.at(0, 1), .2, "before first key"); near(e.at(15, 1), .5, "linear middle"); near(e.at(30, 1), .8, "after last key");

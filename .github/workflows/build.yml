@@ -7,7 +7,8 @@ on:
   workflow_dispatch:
 concurrency:
   group: native-build-${{ github.ref }}
-  cancel-in-progress: true
+  # Newer pushes cancel superseded pull request runs; every push to main gets a complete run.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 permissions:
   contents: read
 jobs:
@@ -15,13 +16,25 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        os: [windows-2022, macos-15, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: cmake -S . -B build-core -DSAV_BUILD_APP=OFF
       - run: cmake --build build-core --config Release
       - run: ctest --test-dir build-core -C Release --output-on-failure
+  tsan:
+    name: core (ThreadSanitizer)
+    runs-on: ubuntu-24.04
+    env:
+      TSAN_OPTIONS: halt_on_error=1 second_deadlock_stack=1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # TSan in Ubuntu 24.04's toolchain cannot map its shadow memory with the kernel's default 32-bit mmap ASLR entropy.
+      - run: sudo sysctl -w vm.mmap_rnd_bits=28
+      - run: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSAV_BUILD_APP=OFF -DSAV_TSAN=ON
+      - run: cmake --build build-tsan --parallel 4
+      - run: ctest --test-dir build-tsan --output-on-failure
   macos:
     needs: core
     if: github.event_name != 'pull_request'
@@ -30,8 +43,8 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
       MACOSX_DEPLOYMENT_TARGET: '15.0'
     steps:
-      - uses: actions/checkout@v4
-      - run: brew install qtbase ffmpeg rtaudio rtmidi pkgconf ninja
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: brew install qtbase ffmpeg rtaudio rtmidi libarchive pkgconf ninja
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix)"
       - run: cmake --build build --parallel 4
       - run: ctest --test-dir build --output-on-failure
@@ -50,12 +63,12 @@ jobs:
         run: QT_QPA_PLATFORM=offscreen dist/simpleavshow.app/Contents/MacOS/simpleavshow --demo --preview-time 6 --screenshot artifacts/editor.png
       - name: Archive
         run: ditto -c -k --sequesterRsrc dist artifacts/SimpleAVShow-macos-arm64.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: macos-arm64-release
           path: artifacts/SimpleAVShow-macos-arm64.zip
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: macos-arm64-preview
           path: artifacts/editor.png
@@ -63,11 +76,14 @@ jobs:
     needs: core
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y qt6-base-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev librtmidi-dev libasound2-dev pkg-config ninja-build ffmpeg
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: sudo apt-get update && sudo apt-get install -y qt6-base-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev librtmidi-dev libasound2-dev libarchive-dev pkg-config ninja-build ffmpeg
       - name: Build RtAudio 6 (Ubuntu's packaged RtAudio is older)
         run: |
-          git clone --branch 6.0.1 --depth 1 https://github.com/thestk/rtaudio.git /tmp/rtaudio
+          # RtAudio 6.0.1, pinned by the tag's commit.
+          git init -q /tmp/rtaudio
+          git -C /tmp/rtaudio fetch -q --depth 1 https://github.com/thestk/rtaudio.git b4f04903312e0e0efffbe77655172e0f060dc085
+          git -C /tmp/rtaudio checkout -q --detach FETCH_HEAD
           cmake -S /tmp/rtaudio -B /tmp/rtaudio-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DRTAUDIO_BUILD_TESTING=OFF -DRTAUDIO_API_PULSE=OFF -DRTAUDIO_API_JACK=OFF
           cmake --build /tmp/rtaudio-build
           sudo cmake --install /tmp/rtaudio-build
@@ -84,38 +100,44 @@ jobs:
           LDAI_OUTPUT: SimpleAVShow-linux-x86_64.AppImage
         run: |
           mkdir -p artifacts AppDir/usr/share/simpleavshow
-          curl -fL --retry 3 https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -o /tmp/linuxdeploy-x86_64.AppImage
-          curl -fL --retry 3 https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage -o /tmp/linuxdeploy-plugin-qt-x86_64.AppImage
+          curl -fL --retry 3 https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage -o /tmp/linuxdeploy-x86_64.AppImage
+          curl -fL --retry 3 https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-qt-x86_64.AppImage -o /tmp/linuxdeploy-plugin-qt-x86_64.AppImage
+          sha256sum -c - <<'EOF'
+          c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d  /tmp/linuxdeploy-x86_64.AppImage
+          15106be885c1c48a021198e7e1e9a48ce9d02a86dd0a1848f00bdbf3c1c92724  /tmp/linuxdeploy-plugin-qt-x86_64.AppImage
+          EOF
           chmod +x /tmp/linuxdeploy*.AppImage
-          python3 packaging/collect_licenses.py linux AppDir/usr/share/simpleavshow/licenses
           cp packaging/README.txt README.md AppDir/usr/share/simpleavshow/
           cp -R docs AppDir/usr/share/simpleavshow/
           cp assets/icon.svg /tmp/simpleavshow.svg
-          /tmp/linuxdeploy-x86_64.AppImage --appdir AppDir --executable build/simpleavshow --desktop-file packaging/simpleavshow.desktop --icon-file /tmp/simpleavshow.svg --plugin qt --output appimage
+          # Deploy first so notices cover exactly the bundled libraries, then pack.
+          /tmp/linuxdeploy-x86_64.AppImage --appdir AppDir --executable build/simpleavshow --desktop-file packaging/simpleavshow.desktop --icon-file /tmp/simpleavshow.svg --plugin qt
+          python3 packaging/collect_licenses.py linux AppDir/usr/share/simpleavshow/licenses --appdir AppDir
+          /tmp/linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage
           mv SimpleAVShow-linux-x86_64.AppImage artifacts/
       - name: Smoke test the packaged app
         if: github.event_name != 'pull_request'
         run: QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 artifacts/SimpleAVShow-linux-x86_64.AppImage --demo --preview-time 6 --screenshot artifacts/editor.png
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: github.event_name != 'pull_request'
         with:
           name: linux-x86_64-release
           path: artifacts/SimpleAVShow-linux-x86_64.AppImage
           if-no-files-found: error
   windows:
+    # Windows is the show platform: build and test it on pull requests too; package only on main.
     needs: core
-    if: github.event_name != 'pull_request'
     runs-on: windows-2022
     env:
       VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/vcpkg-cache,readwrite"
     steps:
-      - uses: actions/checkout@v4
-      - uses: jurplel/install-qt-action@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
         with:
           version: '6.8.3'
           arch: win64_msvc2022_64
           cache: true
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ffmpeg-sdk/ffmpeg-sdk.zip
           key: windows-ffmpeg-sdk-${{ hashFiles('packaging/ffmpeg-windows.json') }}
@@ -126,7 +148,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $pin = Get-Content packaging/ffmpeg-windows.json | ConvertFrom-Json
           "FFMPEG_ROOT=$pwd/ffmpeg-sdk/$($pin.directory)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: dependencies
         with:
           path: vcpkg-cache
@@ -142,12 +164,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$env:VCPKG_INSTALLATION_ROOT/bootstrap-vcpkg.bat" -disableMetrics
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build RtAudio/RtMidi and configure (prebuilt Qt and FFmpeg)
+      - name: Build RtAudio/RtMidi/libarchive and configure (prebuilt Qt and FFmpeg)
         shell: pwsh
         run: cmake -S . -B build -A x64 "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON "-DCMAKE_PREFIX_PATH=$env:QT_ROOT_DIR" "-DSAV_FFMPEG_ROOT=$env:FFMPEG_ROOT"
       - name: Cache built dependencies before compiling the app
         if: steps.dependencies.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: vcpkg-cache
           key: windows-vcpkg-noqt-${{ hashFiles('vcpkg.json') }}
@@ -159,7 +181,9 @@ jobs:
           $env:PATH = "$env:FFMPEG_ROOT/bin;$env:PATH"
           ctest --test-dir build -C Release --output-on-failure
       - run: cmake --install build --config Release --prefix "$pwd/dist"
+        if: github.event_name != 'pull_request'
       - name: Package and smoke test
+        if: github.event_name != 'pull_request'
         shell: pwsh
         run: |
           python packaging/collect_licenses.py windows dist/licenses --vcpkg build/vcpkg_installed/x64-windows --qt $env:QT_ROOT_DIR --ffmpeg $env:FFMPEG_ROOT
@@ -181,37 +205,39 @@ jobs:
           $process = Start-Process dist/bin/simpleavshow.exe -ArgumentList '--demo','--preview-time','6','--screenshot',"$pwd/artifacts/editor.png" -Wait -PassThru
           if ($process.ExitCode -ne 0 -or !(Test-Path artifacts/editor.png)) { throw 'Packaged app smoke test failed' }
           Compress-Archive -Path dist/* -DestinationPath artifacts/SimpleAVShow-windows-x86_64.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.event_name != 'pull_request'
         with:
           name: windows-x86_64-release
           path: artifacts/SimpleAVShow-windows-x86_64.zip
           if-no-files-found: error
   ci:
     name: CI
-    needs: [core, linux, macos, windows]
+    needs: [core, tsan, linux, macos, windows]
     # A required check must fail when a dependency fails or is unexpectedly skipped.
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Verify required jobs passed
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
           CORE_RESULT: ${{ needs.core.result }}
+          TSAN_RESULT: ${{ needs.tsan.result }}
           LINUX_RESULT: ${{ needs.linux.result }}
           MACOS_RESULT: ${{ needs.macos.result }}
           WINDOWS_RESULT: ${{ needs.windows.result }}
         run: |
-          echo "core=$CORE_RESULT linux=$LINUX_RESULT macos=$MACOS_RESULT windows=$WINDOWS_RESULT"
-          if [[ "$CORE_RESULT" != success || "$LINUX_RESULT" != success ]]; then
-            echo 'Core and Linux builds/tests must pass.' >&2
+          echo "core=$CORE_RESULT tsan=$TSAN_RESULT linux=$LINUX_RESULT macos=$MACOS_RESULT windows=$WINDOWS_RESULT"
+          if [[ "$CORE_RESULT" != success || "$TSAN_RESULT" != success || "$LINUX_RESULT" != success || "$WINDOWS_RESULT" != success ]]; then
+            echo 'Core, ThreadSanitizer, Linux, and Windows builds/tests must pass.' >&2
             exit 1
           fi
           expected=success
           if [[ "$EVENT_NAME" == pull_request ]]; then
             expected=skipped
           fi
-          if [[ "$MACOS_RESULT" != "$expected" || "$WINDOWS_RESULT" != "$expected" ]]; then
-            echo "macOS and Windows jobs must report $expected for $EVENT_NAME." >&2
+          if [[ "$MACOS_RESULT" != "$expected" ]]; then
+            echo "The macOS job must report $expected for $EVENT_NAME." >&2
             exit 1
           fi

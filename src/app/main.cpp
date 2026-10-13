@@ -1,4 +1,5 @@
 #include "app/MainWindow.h"
+#include "media/AudioSources.h"
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QTimer>
@@ -6,8 +7,18 @@
 #include <QDir>
 #include <QPalette>
 #include <QFont>
+#include <QThreadPool>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <timeapi.h>
+#endif
 
 int main(int argc, char** argv) {
+#ifdef Q_OS_WIN
+    // The MIDI and disk workers sleep 1 ms between polls; the default 15.6 ms tick would delay cues and read-ahead.
+    timeBeginPeriod(1);
+    struct TimerPeriod { ~TimerPeriod() { timeEndPeriod(1); } } timerPeriod;
+#endif
     QApplication app(argc, argv);
     app.setStyle("Fusion"); app.setFont(QFont("Arial", 10));
     QPalette palette;
@@ -22,7 +33,9 @@ int main(int argc, char** argv) {
     parser.addOption({"demo", "Open the built-in demonstration"});
     parser.addOption({"screenshot", "Save an editor screenshot and exit (for visual QA)", "path"});
     parser.addOption({"preview-time", "Seek before capturing a screenshot (seconds)", "seconds"});
-    parser.addPositionalArgument("project", "Project to open (.savshow)"); parser.process(app);
+    parser.addPositionalArgument("project", "Project or package to open (.savshow, .savpack)"); parser.process(app);
+    // Deleting a crashed instance's extraction can take a while for large media.
+    QThreadPool::globalInstance()->start([] { sav::removeStalePackageDirectories(); sav::detail::trimAudioCache(); });
     sav::MainWindow window;
     if (parser.isSet("demo")) { window.controller().replace(sav::demoProject()); window.controller().dirty = true; }
     if (!parser.positionalArguments().isEmpty()) window.openPath(parser.positionalArguments().front());
@@ -32,6 +45,8 @@ int main(int argc, char** argv) {
         window.controller().seek(sav::frames(time));
     }
     window.show();
+    if (!parser.isSet("demo") && !parser.isSet("screenshot") && parser.positionalArguments().isEmpty())
+        QTimer::singleShot(0, &window, [&window] { window.offerUntitledRecovery(); });
     if (parser.isSet("screenshot")) QTimer::singleShot(1000, &app, [&] {
         const QString path = parser.value("screenshot"); QDir().mkpath(QFileInfo(path).absolutePath());
         if (!window.grab().save(path)) app.exit(2); else app.exit(0);

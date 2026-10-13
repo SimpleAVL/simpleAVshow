@@ -123,6 +123,8 @@ void MidiMessageEditor::setMessage(const std::vector<unsigned char>& bytes) {
     int type = bytes.empty() ? 0 : 8;
     if (!bytes.empty() && bytes[0] < 0xf0 && validMidi(bytes)) {
         for (int i = 1; i < 8; ++i) if ((bytes[0] & 0xf0) == statuses[i]) type = i;
+        // Note On with velocity 0 acts as a stop; show its exact bytes rather than a "play" with no level.
+        if (type == 1 && bytes[2] == 0) type = 8;
     }
     loading_ = true; type_->setCurrentIndex(type); loading_ = false; updateFields(false);
     loading_ = true;
