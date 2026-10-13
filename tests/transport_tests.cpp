@@ -275,8 +275,13 @@ int main() {
             storage->fail.store(true);
             const Frame destination = frames(20 * 3600);
             t.command({Action::Seek, destination});
-            for (int i = 0; i < 100; ++i) { checkedRender(t, out, 1, 2); std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
-            expect(t.position() == destination && t.readRetries() > 0 && !t.audioReadFailed(), "a locked file waits and retries");
+            // Bounded by wall-clock time, well inside the retry window: sleeps overshoot on loaded CI runners.
+            const auto started = std::chrono::steady_clock::now();
+            while (t.readRetries() < 3 && std::chrono::steady_clock::now() - started < AudioBuffer::retryWindow / 2) {
+                checkedRender(t, out, 1, 2); std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            checkedRender(t, out, 1, 2);
+            expect(t.position() == destination && t.readRetries() >= 3 && !t.audioReadFailed(), "a locked file waits and retries");
             storage->fail.store(false);
             for (int i = 0; i < 1000 && t.position() == destination; ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); checkedRender(t, out, 1, 2); }
             expect(t.position() == destination + 1 && !t.audioReadFailed(), "playback resumes once the file is readable");
