@@ -24,6 +24,8 @@ Packages include their runtime libraries and third-party notices. Prereleases ar
 
 Start with `--demo` (or **File → Open demonstration**) to explore a sample show.
 
+For real MP4/MP3/WAV media, eight-channel stems, async stage waits, MIDI and repeatable recording checks, open [The Last Lighthouse demonstration](demos/last-lighthouse/README.md).
+
 ## Documentation
 
 The [illustrated user manual](docs/README.md) covers installation, timeline editing, audio routing, MIDI cues, Show mode, portable packages, recovery, and troubleshooting. It also ships inside every package.

@@ -1,0 +1,27 @@
+{
+    "backend": "native persistence; no playback",
+    "checks": [
+        {
+            "detail": "",
+            "name": "real media loaded",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "save/reopen preserves show",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "portable package reopens",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "all packaged media bytes match original sources",
+            "passed": true
+        }
+    ],
+    "passed": true,
+    "scenario": "package"
+}

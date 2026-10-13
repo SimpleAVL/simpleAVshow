@@ -1,0 +1,380 @@
+{
+  "format": "simpleavshow",
+  "version": 1,
+  "title": "The Last Lighthouse - eight-channel line check",
+  "width": 1280,
+  "height": 720,
+  "fps": 24,
+  "duration": 384000,
+  "tracks": [
+    {
+      "id": "channel-1---211-hz",
+      "name": "Channel 1 - 211 Hz",
+      "visual": false,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": 0,
+      "right": -1,
+      "async": false
+    },
+    {
+      "id": "channel-2---307-hz",
+      "name": "Channel 2 - 307 Hz",
+      "visual": false,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": 1,
+      "right": -1,
+      "async": false
+    },
+    {
+      "id": "channel-3---419-hz",
+      "name": "Channel 3 - 419 Hz",
+      "visual": false,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": 2,
+      "right": -1,
+      "async": false
+    },
+    {
+      "id": "channel-4---557-hz",
+      "name": "Channel 4 - 557 Hz",
+      "visual": false,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": 3,
+      "right": -1,
+      "async": false
+    },
+    {
+      "id": "channel-5---683-hz",
+      "name": "Channel 5 - 683 Hz",
+      "visual": false,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": 4,
+      "right": -1,
+      "async": false
+    },
+    {
+      "id": "channel-6---809-hz",
+      "name": "Channel 6 - 809 Hz",
+      "visual": false,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": 5,
+      "right": -1,
+      "async": false
+    },
+    {
+      "id": "channel-7---947-hz",
+      "name": "Channel 7 - 947 Hz",
+      "visual": false,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": 6,
+      "right": -1,
+      "async": false
+    },
+    {
+      "id": "channel-8---1103-hz",
+      "name": "Channel 8 - 1103 Hz",
+      "visual": false,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": 7,
+      "right": -1,
+      "async": false
+    }
+  ],
+  "clips": [
+    {
+      "id": "line-1",
+      "asset": "channel-01",
+      "text": "",
+      "track": 0,
+      "start": 48000,
+      "duration": 288000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "line-2",
+      "asset": "channel-02",
+      "text": "",
+      "track": 1,
+      "start": 48000,
+      "duration": 288000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "line-3",
+      "asset": "channel-03",
+      "text": "",
+      "track": 2,
+      "start": 48000,
+      "duration": 288000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "line-4",
+      "asset": "channel-04",
+      "text": "",
+      "track": 3,
+      "start": 48000,
+      "duration": 288000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "line-5",
+      "asset": "channel-05",
+      "text": "",
+      "track": 4,
+      "start": 48000,
+      "duration": 288000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "line-6",
+      "asset": "channel-06",
+      "text": "",
+      "track": 5,
+      "start": 48000,
+      "duration": 288000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "line-7",
+      "asset": "channel-07",
+      "text": "",
+      "track": 6,
+      "start": 48000,
+      "duration": 288000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "line-8",
+      "asset": "channel-08",
+      "text": "",
+      "track": 7,
+      "start": 48000,
+      "duration": 288000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    }
+  ],
+  "markers": [],
+  "assets": [
+    {
+      "id": "bell",
+      "name": "bell.wav",
+      "path": "media/bell.wav"
+    },
+    {
+      "id": "channel-01",
+      "name": "channel-01.wav",
+      "path": "media/channel-01.wav"
+    },
+    {
+      "id": "channel-02",
+      "name": "channel-02.wav",
+      "path": "media/channel-02.wav"
+    },
+    {
+      "id": "channel-03",
+      "name": "channel-03.wav",
+      "path": "media/channel-03.wav"
+    },
+    {
+      "id": "channel-04",
+      "name": "channel-04.wav",
+      "path": "media/channel-04.wav"
+    },
+    {
+      "id": "channel-05",
+      "name": "channel-05.wav",
+      "path": "media/channel-05.wav"
+    },
+    {
+      "id": "channel-06",
+      "name": "channel-06.wav",
+      "path": "media/channel-06.wav"
+    },
+    {
+      "id": "channel-07",
+      "name": "channel-07.wav",
+      "path": "media/channel-07.wav"
+    },
+    {
+      "id": "channel-08",
+      "name": "channel-08.wav",
+      "path": "media/channel-08.wav"
+    },
+    {
+      "id": "click",
+      "name": "click.wav",
+      "path": "media/click.wav"
+    },
+    {
+      "id": "dawn",
+      "name": "dawn.mp4",
+      "path": "media/dawn.mp4"
+    },
+    {
+      "id": "guide",
+      "name": "guide.wav",
+      "path": "media/guide.wav"
+    },
+    {
+      "id": "night",
+      "name": "night.mp4",
+      "path": "media/night.mp4"
+    },
+    {
+      "id": "proscenium",
+      "name": "proscenium.png",
+      "path": "media/proscenium.png"
+    },
+    {
+      "id": "score",
+      "name": "score.mp3",
+      "path": "media/score.mp3"
+    },
+    {
+      "id": "score-source-wav",
+      "name": "score.wav",
+      "path": "media/score.wav"
+    },
+    {
+      "id": "sea-loop",
+      "name": "sea-loop.wav",
+      "path": "media/sea-loop.wav"
+    },
+    {
+      "id": "signal",
+      "name": "signal.mp4",
+      "path": "media/signal.mp4"
+    },
+    {
+      "id": "storm",
+      "name": "storm.mp4",
+      "path": "media/storm.mp4"
+    },
+    {
+      "id": "thunder",
+      "name": "thunder.wav",
+      "path": "media/thunder.wav"
+    }
+  ]
+}

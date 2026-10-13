@@ -1,0 +1,113 @@
+{
+  "passed": true,
+  "scenario": "long-hold",
+  "backend": "native CoreAudio output",
+  "hardware_audio_verified": true,
+  "checks": [
+    {
+      "name": "native runner passed",
+      "passed": true
+    },
+    {
+      "name": "independent input has no dropped blocks",
+      "passed": true,
+      "statistics": {
+        "input_overflows": 0,
+        "queue_overflows": 0,
+        "frames": 15293952,
+        "relay_errors": [],
+        "start_monotonic": 4220371.348107333,
+        "backend": "independent native CoreAudio app through float32 pipe",
+        "duration_seconds": 318.624,
+        "wall_seconds": 319.11833358276635,
+        "native": {
+          "audio_start_monotonic": 4220371.710249541,
+          "backend": "independent native CoreAudio input app",
+          "frames": 15293952,
+          "input_device": {
+            "buffer_frames": 512,
+            "channels": 16,
+            "name": "Existential Audio Inc.: BlackHole 16ch",
+            "sample_rate": 48000
+          },
+          "input_overflows": 0,
+          "queue_overflows": 0,
+          "write_failed": false
+        },
+        "input_device": {
+          "buffer_frames": 512,
+          "channels": 16,
+          "name": "Existential Audio Inc.: BlackHole 16ch",
+          "sample_rate": 48000
+        },
+        "audio_start_monotonic": 4220371.710249541,
+        "write_failed": false
+      }
+    },
+    {
+      "name": "native input transfer completed",
+      "passed": true
+    },
+    {
+      "name": "all native input frames reached the WAV recorder",
+      "passed": true,
+      "native_frames": 15293952,
+      "wav_frames": 15293952
+    },
+    {
+      "name": "unused channels 9-16 are silent",
+      "passed": true,
+      "peak": 0.0
+    },
+    {
+      "name": "hold 1: synchronous score/guide/click silent",
+      "passed": true,
+      "rms": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.02822229452431202,
+        0.028320016339421272,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "hold 1: async sea audible on 5-6",
+      "passed": true
+    },
+    {
+      "name": "hold 1: completed one-shot/effects silent",
+      "passed": true
+    },
+    {
+      "name": "actor hold lasts at least five wall-clock minutes",
+      "passed": true,
+      "wall_seconds": 300.122906292
+    },
+    {
+      "name": "every sampled hold state retains the same show time",
+      "passed": true,
+      "samples": 3001
+    },
+    {
+      "name": "sea is audible throughout every five-second hold window",
+      "passed": true,
+      "windows": 59,
+      "minimum_rms": 0.024580594152212143
+    },
+    {
+      "name": "Stop All captured as silence on every channel",
+      "passed": true
+    }
+  ]
+}

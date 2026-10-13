@@ -1,0 +1,115 @@
+{
+    "buffer_frames": 512,
+    "channels": 2,
+    "checks": [
+        {
+            "detail": "",
+            "name": "real media loaded",
+            "passed": true
+        },
+        {
+            "detail": "Lighthouse MIDI Logger",
+            "name": "native MIDI destination connected",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "each hold reached once",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "hold 1 freezes show time",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "hold 1 freezes picture",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "each hold reached once",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "hold 2 freezes show time",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "hold 2 freezes picture",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "each hold reached once",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "hold 3 freezes show time",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "hold 3 freezes picture",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "full show reached end",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "three stage holds completed",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "project end clears async voices",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "no clipping",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "no source read failure",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "no MIDI queue overflow",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "audio callbacks advanced",
+            "passed": true
+        },
+        {
+            "detail": "0",
+            "name": "no driver underruns",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "no unresolved playback problem",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "Stop All clears async voices",
+            "passed": true
+        }
+    ],
+    "device": "Apple Inc.: Mac mini-Lautsprecher",
+    "passed": true,
+    "scenario": "midi",
+    "wall_seconds": 70.464900916
+}

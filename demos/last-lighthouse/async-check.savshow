@@ -1,0 +1,215 @@
+{
+  "format": "simpleavshow",
+  "version": 1,
+  "title": "The Last Lighthouse - async pause and seek check",
+  "width": 1280,
+  "height": 720,
+  "fps": 24,
+  "duration": 960000,
+  "tracks": [
+    {
+      "id": "async-sea",
+      "name": "Async sea",
+      "visual": false,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": 4,
+      "right": 5,
+      "async": true
+    },
+    {
+      "id": "ordinary-click",
+      "name": "Ordinary click",
+      "visual": false,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": 3,
+      "right": -1,
+      "async": false
+    },
+    {
+      "id": "async-bell",
+      "name": "Async bell",
+      "visual": false,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": 6,
+      "right": 7,
+      "async": true
+    }
+  ],
+  "clips": [
+    {
+      "id": "probe-sea",
+      "asset": "sea-loop",
+      "text": "",
+      "track": 0,
+      "start": 0,
+      "duration": 768000,
+      "offset": 0,
+      "loop": true,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "probe-click",
+      "asset": "click",
+      "text": "",
+      "track": 1,
+      "start": 0,
+      "duration": 960000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "probe-bell",
+      "asset": "bell",
+      "text": "",
+      "track": 2,
+      "start": 0,
+      "duration": 768000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    }
+  ],
+  "markers": [],
+  "assets": [
+    {
+      "id": "bell",
+      "name": "bell.wav",
+      "path": "media/bell.wav"
+    },
+    {
+      "id": "channel-01",
+      "name": "channel-01.wav",
+      "path": "media/channel-01.wav"
+    },
+    {
+      "id": "channel-02",
+      "name": "channel-02.wav",
+      "path": "media/channel-02.wav"
+    },
+    {
+      "id": "channel-03",
+      "name": "channel-03.wav",
+      "path": "media/channel-03.wav"
+    },
+    {
+      "id": "channel-04",
+      "name": "channel-04.wav",
+      "path": "media/channel-04.wav"
+    },
+    {
+      "id": "channel-05",
+      "name": "channel-05.wav",
+      "path": "media/channel-05.wav"
+    },
+    {
+      "id": "channel-06",
+      "name": "channel-06.wav",
+      "path": "media/channel-06.wav"
+    },
+    {
+      "id": "channel-07",
+      "name": "channel-07.wav",
+      "path": "media/channel-07.wav"
+    },
+    {
+      "id": "channel-08",
+      "name": "channel-08.wav",
+      "path": "media/channel-08.wav"
+    },
+    {
+      "id": "click",
+      "name": "click.wav",
+      "path": "media/click.wav"
+    },
+    {
+      "id": "dawn",
+      "name": "dawn.mp4",
+      "path": "media/dawn.mp4"
+    },
+    {
+      "id": "guide",
+      "name": "guide.wav",
+      "path": "media/guide.wav"
+    },
+    {
+      "id": "night",
+      "name": "night.mp4",
+      "path": "media/night.mp4"
+    },
+    {
+      "id": "proscenium",
+      "name": "proscenium.png",
+      "path": "media/proscenium.png"
+    },
+    {
+      "id": "score",
+      "name": "score.mp3",
+      "path": "media/score.mp3"
+    },
+    {
+      "id": "score-source-wav",
+      "name": "score.wav",
+      "path": "media/score.wav"
+    },
+    {
+      "id": "sea-loop",
+      "name": "sea-loop.wav",
+      "path": "media/sea-loop.wav"
+    },
+    {
+      "id": "signal",
+      "name": "signal.mp4",
+      "path": "media/signal.mp4"
+    },
+    {
+      "id": "storm",
+      "name": "storm.mp4",
+      "path": "media/storm.mp4"
+    },
+    {
+      "id": "thunder",
+      "name": "thunder.wav",
+      "path": "media/thunder.wav"
+    }
+  ]
+}

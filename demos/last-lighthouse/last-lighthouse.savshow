@@ -1,0 +1,1146 @@
+{
+  "format": "simpleavshow",
+  "version": 1,
+  "title": "The Last Lighthouse - a chamber musical",
+  "width": 1280,
+  "height": 720,
+  "fps": 24,
+  "duration": 3072000,
+  "tracks": [
+    {
+      "id": "sea-and-lighthouse",
+      "name": "Sea and lighthouse",
+      "visual": true,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": -1,
+      "right": -1,
+      "async": false
+    },
+    {
+      "id": "signal-film",
+      "name": "Signal film",
+      "visual": true,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": -1,
+      "right": -1,
+      "async": false
+    },
+    {
+      "id": "proscenium",
+      "name": "Proscenium",
+      "visual": true,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": -1,
+      "right": -1,
+      "async": false
+    },
+    {
+      "id": "surtitles",
+      "name": "Surtitles",
+      "visual": true,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": -1,
+      "right": -1,
+      "async": false
+    },
+    {
+      "id": "score-mp3---audience-1-2",
+      "name": "Score MP3 - audience 1-2",
+      "visual": false,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": 0,
+      "right": 1,
+      "async": false
+    },
+    {
+      "id": "sea-wav---async-5-6",
+      "name": "Sea WAV - async 5-6",
+      "visual": false,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": 4,
+      "right": 5,
+      "async": true
+    },
+    {
+      "id": "crew-guide---3",
+      "name": "Crew guide - 3",
+      "visual": false,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": 2,
+      "right": -1,
+      "async": false
+    },
+    {
+      "id": "click---4",
+      "name": "Click - 4",
+      "visual": false,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": 3,
+      "right": -1,
+      "async": false
+    },
+    {
+      "id": "signal-sound---7-8",
+      "name": "Signal sound - 7-8",
+      "visual": false,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": 6,
+      "right": 7,
+      "async": false
+    },
+    {
+      "id": "keeper-bell---async-one-shot-7-8",
+      "name": "Keeper bell - async one-shot 7-8",
+      "visual": false,
+      "muted": false,
+      "gain": 1,
+      "pan": 0,
+      "left": 6,
+      "right": 7,
+      "async": true
+    },
+    {
+      "id": "muted-rehearsal-safety",
+      "name": "Muted rehearsal safety",
+      "visual": false,
+      "muted": true,
+      "gain": 1,
+      "pan": 0,
+      "left": 0,
+      "right": 1,
+      "async": false
+    }
+  ],
+  "clips": [
+    {
+      "id": "watch",
+      "asset": "night",
+      "text": "",
+      "track": 0,
+      "start": 0,
+      "duration": 1152000,
+      "offset": 0,
+      "loop": true,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "storm",
+      "asset": "storm",
+      "text": "",
+      "track": 0,
+      "start": 1152000,
+      "duration": 1152000,
+      "offset": 0,
+      "loop": true,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "dawn",
+      "asset": "dawn",
+      "text": "",
+      "track": 0,
+      "start": 2304000,
+      "duration": 768000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "radio-picture",
+      "asset": "signal",
+      "text": "",
+      "track": 1,
+      "start": 1296000,
+      "duration": 168000,
+      "offset": 12000,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": -0.19,
+      "y": 0.05,
+      "scale": 0.55,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [
+        [
+          0,
+          0.08
+        ],
+        [
+          168000,
+          0
+        ]
+      ],
+      "size": [
+        [
+          0,
+          0.48
+        ],
+        [
+          96000,
+          0.55
+        ],
+        [
+          168000,
+          0.52
+        ]
+      ],
+      "alpha": [
+        [
+          0,
+          0
+        ],
+        [
+          24000,
+          1
+        ],
+        [
+          144000,
+          1
+        ],
+        [
+          168000,
+          0
+        ]
+      ],
+      "link": "signal-pair"
+    },
+    {
+      "id": "frame",
+      "asset": "proscenium",
+      "text": "",
+      "track": 2,
+      "start": 0,
+      "duration": 3072000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "score",
+      "asset": "score",
+      "text": "",
+      "track": 4,
+      "start": 0,
+      "duration": 2400000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [
+        [
+          0,
+          0
+        ],
+        [
+          96000,
+          1
+        ],
+        [
+          576000,
+          0.7
+        ],
+        [
+          768000,
+          1
+        ],
+        [
+          2064000,
+          0.7
+        ],
+        [
+          2304000,
+          1
+        ],
+        [
+          2400000,
+          0
+        ]
+      ],
+      "balance": [
+        [
+          0,
+          -0.2
+        ],
+        [
+          768000,
+          0.2
+        ],
+        [
+          1536000,
+          -0.1
+        ],
+        [
+          2304000,
+          0.1
+        ],
+        [
+          2400000,
+          0
+        ]
+      ],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "sea",
+      "asset": "sea-loop",
+      "text": "",
+      "track": 5,
+      "start": 0,
+      "duration": 2496000,
+      "offset": 0,
+      "loop": true,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [
+        [
+          0,
+          0
+        ],
+        [
+          96000,
+          1
+        ],
+        [
+          2112000,
+          1
+        ],
+        [
+          2496000,
+          0
+        ]
+      ],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "guide",
+      "asset": "guide",
+      "text": "",
+      "track": 6,
+      "start": 0,
+      "duration": 3072000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "click",
+      "asset": "click",
+      "text": "",
+      "track": 7,
+      "start": 0,
+      "duration": 3072000,
+      "offset": 0,
+      "loop": false,
+      "gain": 0.65,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "radio-sound",
+      "asset": "signal",
+      "text": "",
+      "track": 8,
+      "start": 1296000,
+      "duration": 168000,
+      "offset": 12000,
+      "loop": false,
+      "gain": 0.65,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": [],
+      "link": "signal-pair"
+    },
+    {
+      "id": "thunder",
+      "asset": "thunder",
+      "text": "",
+      "track": 8,
+      "start": 1632000,
+      "duration": 192000,
+      "offset": 0,
+      "loop": false,
+      "gain": 0.8,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "keeper-bell",
+      "asset": "bell",
+      "text": "",
+      "track": 9,
+      "start": 480000,
+      "duration": 480000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "muted-score",
+      "asset": "score",
+      "text": "",
+      "track": 10,
+      "start": 0,
+      "duration": 3072000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    },
+    {
+      "id": "title",
+      "asset": "",
+      "text": "THE LAST LIGHTHOUSE\nA chamber musical in three movements",
+      "track": 3,
+      "start": 96000,
+      "duration": 384000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0.28,
+      "scale": 0.6,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [
+        [
+          0,
+          -0.03
+        ],
+        [
+          384000,
+          0.03
+        ]
+      ],
+      "positionY": [],
+      "size": [],
+      "alpha": [
+        [
+          0,
+          0
+        ],
+        [
+          48000,
+          1
+        ],
+        [
+          336000,
+          1
+        ],
+        [
+          384000,
+          0
+        ]
+      ]
+    },
+    {
+      "id": "keeper",
+      "asset": "",
+      "text": "KEEPER\nIf I hold the light, will you find your way home?",
+      "track": 3,
+      "start": 576000,
+      "duration": 480000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0.28,
+      "scale": 0.6,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [
+        [
+          0,
+          -0.03
+        ],
+        [
+          480000,
+          0.03
+        ]
+      ],
+      "positionY": [],
+      "size": [],
+      "alpha": [
+        [
+          0,
+          0
+        ],
+        [
+          48000,
+          1
+        ],
+        [
+          432000,
+          1
+        ],
+        [
+          480000,
+          0
+        ]
+      ]
+    },
+    {
+      "id": "signal",
+      "asset": "",
+      "text": "THE SIGNAL\nThree flashes across a restless sea.",
+      "track": 3,
+      "start": 1296000,
+      "duration": 576000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0.28,
+      "scale": 0.6,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [
+        [
+          0,
+          -0.03
+        ],
+        [
+          576000,
+          0.03
+        ]
+      ],
+      "positionY": [],
+      "size": [],
+      "alpha": [
+        [
+          0,
+          0
+        ],
+        [
+          48000,
+          1
+        ],
+        [
+          528000,
+          1
+        ],
+        [
+          576000,
+          0
+        ]
+      ]
+    },
+    {
+      "id": "reply",
+      "asset": "",
+      "text": "THE REPLY\nI see your light. Keep it burning.",
+      "track": 3,
+      "start": 2064000,
+      "duration": 432000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0.28,
+      "scale": 0.6,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [
+        [
+          0,
+          -0.03
+        ],
+        [
+          432000,
+          0.03
+        ]
+      ],
+      "positionY": [],
+      "size": [],
+      "alpha": [
+        [
+          0,
+          0
+        ],
+        [
+          48000,
+          1
+        ],
+        [
+          384000,
+          1
+        ],
+        [
+          432000,
+          0
+        ]
+      ]
+    },
+    {
+      "id": "finale",
+      "asset": "",
+      "text": "HOME\nThe morning belongs to those who waited.",
+      "track": 3,
+      "start": 2544000,
+      "duration": 480000,
+      "offset": 0,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0.28,
+      "scale": 0.6,
+      "opacity": 1,
+      "volume": [],
+      "balance": [],
+      "positionX": [
+        [
+          0,
+          -0.03
+        ],
+        [
+          480000,
+          0.03
+        ]
+      ],
+      "positionY": [],
+      "size": [],
+      "alpha": [
+        [
+          0,
+          0
+        ],
+        [
+          48000,
+          1
+        ],
+        [
+          432000,
+          1
+        ],
+        [
+          480000,
+          0
+        ]
+      ]
+    },
+    {
+      "id": "finale-score",
+      "asset": "score-source-wav",
+      "text": "",
+      "track": 4,
+      "start": 2304000,
+      "duration": 768000,
+      "offset": 2304000,
+      "loop": false,
+      "gain": 1,
+      "pan": 0,
+      "x": 0,
+      "y": 0,
+      "scale": 1,
+      "opacity": 1,
+      "volume": [
+        [
+          0,
+          0
+        ],
+        [
+          96000,
+          1
+        ],
+        [
+          624000,
+          1
+        ],
+        [
+          768000,
+          0
+        ]
+      ],
+      "balance": [],
+      "positionX": [],
+      "positionY": [],
+      "size": [],
+      "alpha": []
+    }
+  ],
+  "markers": [
+    {
+      "id": "preset",
+      "name": "LX 01 - blue night / Program 5",
+      "time": 0,
+      "hold": false,
+      "timing": "arrival",
+      "message": [
+        192,
+        4
+      ]
+    },
+    {
+      "id": "level",
+      "name": "LX intensity / CC7",
+      "time": 0,
+      "hold": false,
+      "timing": "arrival",
+      "message": [
+        176,
+        7,
+        90
+      ]
+    },
+    {
+      "id": "note-on",
+      "name": "Bell reinforcement / Note C4",
+      "time": 240000,
+      "hold": false,
+      "timing": "arrival",
+      "message": [
+        144,
+        60,
+        80
+      ]
+    },
+    {
+      "id": "poly",
+      "name": "Note pressure",
+      "time": 288000,
+      "hold": false,
+      "timing": "arrival",
+      "message": [
+        160,
+        60,
+        44
+      ]
+    },
+    {
+      "id": "note-off",
+      "name": "Release C4",
+      "time": 336000,
+      "hold": false,
+      "timing": "arrival",
+      "message": [
+        128,
+        60,
+        0
+      ]
+    },
+    {
+      "id": "actor-arrival",
+      "name": "HOLD - keeper entrance / blue LX",
+      "time": 576000,
+      "hold": true,
+      "timing": "arrival",
+      "message": [
+        176,
+        1,
+        30
+      ]
+    },
+    {
+      "id": "actor-resume",
+      "name": "GO - keeper ready / Program 6",
+      "time": 576000,
+      "hold": true,
+      "timing": "resume",
+      "message": [
+        192,
+        5
+      ]
+    },
+    {
+      "id": "bend",
+      "name": "Pitch bend up",
+      "time": 864000,
+      "hold": false,
+      "timing": "arrival",
+      "message": [
+        224,
+        0,
+        80
+      ]
+    },
+    {
+      "id": "bend-center",
+      "name": "Pitch bend center",
+      "time": 912000,
+      "hold": false,
+      "timing": "arrival",
+      "message": [
+        224,
+        0,
+        64
+      ]
+    },
+    {
+      "id": "pressure",
+      "name": "Channel pressure",
+      "time": 960000,
+      "hold": false,
+      "timing": "arrival",
+      "message": [
+        208,
+        36
+      ]
+    },
+    {
+      "id": "storm-lx",
+      "name": "LX 02 - storm / CC1",
+      "time": 1152000,
+      "hold": false,
+      "timing": "arrival",
+      "message": [
+        176,
+        1,
+        100
+      ]
+    },
+    {
+      "id": "signal-hold",
+      "name": "HOLD - signal ready",
+      "time": 1440000,
+      "hold": true,
+      "timing": "arrival",
+      "message": []
+    },
+    {
+      "id": "signal-go",
+      "name": "GO - signal / educational SysEx",
+      "time": 1440000,
+      "hold": true,
+      "timing": "resume",
+      "message": [
+        240,
+        125,
+        1,
+        2,
+        3,
+        247
+      ]
+    },
+    {
+      "id": "sustain",
+      "name": "Sustain on",
+      "time": 1632000,
+      "hold": false,
+      "timing": "arrival",
+      "message": [
+        176,
+        64,
+        127
+      ]
+    },
+    {
+      "id": "sustain-off",
+      "name": "Sustain off",
+      "time": 1680000,
+      "hold": false,
+      "timing": "arrival",
+      "message": [
+        176,
+        64,
+        0
+      ]
+    },
+    {
+      "id": "reply-hold",
+      "name": "HOLD - wait for reply / dim LX",
+      "time": 2064000,
+      "hold": true,
+      "timing": "arrival",
+      "message": [
+        176,
+        11,
+        50
+      ]
+    },
+    {
+      "id": "reply-go",
+      "name": "GO - reply received / warm LX",
+      "time": 2064000,
+      "hold": true,
+      "timing": "resume",
+      "message": [
+        192,
+        8
+      ]
+    },
+    {
+      "id": "dawn-lx",
+      "name": "LX 03 - dawn",
+      "time": 2304000,
+      "hold": false,
+      "timing": "arrival",
+      "message": [
+        176,
+        11,
+        110
+      ]
+    },
+    {
+      "id": "cleanup",
+      "name": "External all notes off",
+      "time": 2976000,
+      "hold": false,
+      "timing": "arrival",
+      "message": [
+        176,
+        123,
+        0
+      ]
+    },
+    {
+      "id": "blackout",
+      "name": "LX blackout",
+      "time": 3024000,
+      "hold": false,
+      "timing": "arrival",
+      "message": [
+        176,
+        7,
+        0
+      ]
+    }
+  ],
+  "assets": [
+    {
+      "id": "bell",
+      "name": "bell.wav",
+      "path": "media/bell.wav"
+    },
+    {
+      "id": "channel-01",
+      "name": "channel-01.wav",
+      "path": "media/channel-01.wav"
+    },
+    {
+      "id": "channel-02",
+      "name": "channel-02.wav",
+      "path": "media/channel-02.wav"
+    },
+    {
+      "id": "channel-03",
+      "name": "channel-03.wav",
+      "path": "media/channel-03.wav"
+    },
+    {
+      "id": "channel-04",
+      "name": "channel-04.wav",
+      "path": "media/channel-04.wav"
+    },
+    {
+      "id": "channel-05",
+      "name": "channel-05.wav",
+      "path": "media/channel-05.wav"
+    },
+    {
+      "id": "channel-06",
+      "name": "channel-06.wav",
+      "path": "media/channel-06.wav"
+    },
+    {
+      "id": "channel-07",
+      "name": "channel-07.wav",
+      "path": "media/channel-07.wav"
+    },
+    {
+      "id": "channel-08",
+      "name": "channel-08.wav",
+      "path": "media/channel-08.wav"
+    },
+    {
+      "id": "click",
+      "name": "click.wav",
+      "path": "media/click.wav"
+    },
+    {
+      "id": "dawn",
+      "name": "dawn.mp4",
+      "path": "media/dawn.mp4"
+    },
+    {
+      "id": "guide",
+      "name": "guide.wav",
+      "path": "media/guide.wav"
+    },
+    {
+      "id": "night",
+      "name": "night.mp4",
+      "path": "media/night.mp4"
+    },
+    {
+      "id": "proscenium",
+      "name": "proscenium.png",
+      "path": "media/proscenium.png"
+    },
+    {
+      "id": "score",
+      "name": "score.mp3",
+      "path": "media/score.mp3"
+    },
+    {
+      "id": "score-source-wav",
+      "name": "score.wav",
+      "path": "media/score.wav"
+    },
+    {
+      "id": "sea-loop",
+      "name": "sea-loop.wav",
+      "path": "media/sea-loop.wav"
+    },
+    {
+      "id": "signal",
+      "name": "signal.mp4",
+      "path": "media/signal.mp4"
+    },
+    {
+      "id": "storm",
+      "name": "storm.mp4",
+      "path": "media/storm.mp4"
+    },
+    {
+      "id": "thunder",
+      "name": "thunder.wav",
+      "path": "media/thunder.wav"
+    }
+  ]
+}

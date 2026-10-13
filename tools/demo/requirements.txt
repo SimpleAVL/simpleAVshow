@@ -1,0 +1,5 @@
+numpy>=2,<3
+Pillow>=11,<13
+sounddevice>=0.5,<1
+python-rtmidi>=1.5,<2
+websocket-client>=1.8,<2
