@@ -42,10 +42,12 @@ On Windows the app requests 1 ms timer resolution so these polling workers wake 
 
 Package opening first reads every header and the manifest, then extracts. It accepts only the manifest plus stored (uncompressed) regular files named `media/<uuid>.<ext>` that the manifest references, and checks the declared media size against free temporary space. It rejects duplicate/case-colliding entries, links, encryption, traversal, missing/external references, and malformed/truncated/CRC-failing archives before loading sources. QFile callbacks handle native Unicode archive paths. A shared QTemporaryDir on Project keeps extracted sources alive across undo/redo snapshots; the last owner removes them. Open extractions hold a lock file, and startup removes unlocked extraction/export folders older than a day that crashed instances left behind. The UI opens packages as unsaved editable copies. Normal Save materializes extracted sources into a persistent sibling `.media` folder and re-arms video readers against the new paths; subsequent autosaves use the existing JSON sidecar mechanism. Packages omit temporary PCM caches, local device preferences, and fonts.
 
-## Next milestones
+## Roadmap
 
-1. Windows/ASIO build and physical routing verification; disconnect/reconnect and full rehearsal runs.
+1. Physical ASIO routing verification on Windows show hardware, including interface unplug/reconnect and full rehearsal runs.
 2. Measure display and MIDI bridge latency, then add compensation.
 3. Profile four-layer 1080p24 and long shows; measure disk-cache read-ahead and add GPU/hardware decoding.
-4. Crash logging, signed installers, release metadata, and third-party notices.
+4. Crash logging and signed/notarized installers.
 5. NDI using the composed picture.
+
+Smaller known follow-ups: async voices that start mid-source still start without a fade-in, and saving an opened package copies extracted media instead of trying a rename first.

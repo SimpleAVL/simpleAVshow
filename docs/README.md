@@ -2,7 +2,7 @@
 
 SimpleAVShow builds and plays stage shows from a timeline of pictures, sound, text, holds, and MIDI cues. This manual covers preparing a show, rehearsing it, operating it, and transferring it to another computer.
 
-Verified against remote `main`, commit `460ef1d`, on 13 October 2026. Screenshots show the current native editor on macOS; Windows and Linux use the same controls. Device names, fonts, decimal separators, and menu shortcuts can differ. This is a development prototype: complete a rehearsal on the actual show hardware before a performance.
+This manual describes SimpleAVShow 0.2. Screenshots show the current native editor on macOS; Windows and Linux use the same controls. Device names, fonts, decimal separators, and menu shortcuts can differ. This is a development prototype: complete a rehearsal on the actual show hardware before a performance.
 
 ![SimpleAVShow editor with the demonstration at six seconds](screenshots/01-editor-overview.png)
 
@@ -32,9 +32,6 @@ For a first session, follow chapter 1 and its demonstration exercise. For a perf
 
 ## Other documentation
 
-- [Show-machine hardware validation](hardware-validation.md): physical routing, driver, display, MIDI, and long-run tests.
-- [Windows remote testing](windows-remote-testing.md): preparing a Windows machine for remote development/testing.
-- [Architecture](architecture.md): engine and implementation overview.
-- [Review findings](review-findings.md): development review and remaining work.
-- [Screenshot notes](screenshots/README.md): capture provenance and maintenance instructions.
-- [Repository README](../README.md): builds, downloads, and developer tests.
+- [Show-machine validation](hardware-validation.md): a structured rehearsal for routing, drivers, display, MIDI, and failure handling on the actual show computer.
+- [Project README](../README.md): downloads, features, and license.
+- Building from source and developer documentation: see [CONTRIBUTING.md](https://github.com/staubichsauger/simpleAVshow/blob/main/CONTRIBUTING.md) in the source repository.
