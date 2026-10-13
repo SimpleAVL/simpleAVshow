@@ -18,7 +18,31 @@ inline constexpr double maxSeconds = static_cast<double>(maxFrame / sampleRate);
 inline Frame frames(double seconds) { return static_cast<Frame>(std::llround(seconds * sampleRate)); }
 inline double seconds(Frame frame) { return static_cast<double>(frame) / sampleRate; }
 
-struct Keyframe { Frame time = 0; double value = 1.; };
+// Each keyframe shapes the segment to the following keyframe. Bend (−1…1, 0 = straight)
+// adjusts Curve (positive rises early, negative late) and S-curve (positive eases both ends).
+enum class CurveShape { Linear, Hold, Curve, SCurve };
+struct Keyframe {
+    Frame time = 0; double value = 1.;
+    CurveShape shape = CurveShape::Linear; double bend = 0.;
+};
+// Progress along a segment, 0 → 1, for t in [0, 1).
+inline double shaped(const Keyframe& k, double t) noexcept {
+    switch (k.shape) {
+    case CurveShape::Linear: return t;
+    case CurveShape::Hold: return 0;
+    case CurveShape::Curve: return k.bend == 0 ? t : 1. - std::pow(1. - t, std::exp2(3. * k.bend));
+    case CurveShape::SCurve: {
+        if (k.bend == 0) return t;
+        const double p = std::exp2(3. * k.bend);
+        return t < .5 ? .5 * std::pow(2. * t, p) : 1. - .5 * std::pow(2. - 2. * t, p);
+    }
+    }
+    return t;
+}
+inline double segment(const Keyframe& a, const Keyframe& b, Frame time) noexcept {
+    const double t = static_cast<double>(time - a.time) / static_cast<double>(b.time - a.time);
+    return a.value + shaped(a, t) * (b.value - a.value);
+}
 struct Envelope {
     std::vector<Keyframe> points;
     double at(Frame time, double fallback) const noexcept {
@@ -27,9 +51,7 @@ struct Envelope {
         const auto right = std::upper_bound(points.begin(), points.end(), time,
             [](Frame t, const Keyframe& p) { return t < p.time; });
         if (right == points.end()) return points.back().value;
-        const auto& a = *(right - 1);
-        const double t = static_cast<double>(time - a.time) / (right->time - a.time);
-        return a.value + t * (right->value - a.value);
+        return segment(*(right - 1), *right, time);
     }
 };
 // A source no longer matches what was prepared. Retrying cannot help; other

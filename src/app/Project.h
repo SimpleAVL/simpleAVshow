@@ -46,4 +46,9 @@ void retimeLinked(Project& project, const std::string& id, Frame start, Frame du
 std::vector<std::string> linkedClips(const Project& project, const std::string& id);
 const Envelope* envelope(const Clip& clip, int property);
 double propertyValue(const Clip& clip, int property);
+// Valid automation values for a property (the same ranges as its base value).
+std::pair<double, double> propertyRange(int property);
+// A keyframe at time carrying the value and segment shape there, for cutting a curve.
+Keyframe cutPoint(const Envelope& envelope, Frame time, double fallback);
+QString shapeName(CurveShape shape);
 }

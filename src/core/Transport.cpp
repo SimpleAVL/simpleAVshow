@@ -18,9 +18,7 @@ double level(const Envelope& envelope, Frame time, double fallback, std::size_t&
     if (!holds(key) && !holds(++key)) key = static_cast<std::size_t>(std::upper_bound(p.begin(), p.end(), time,
         [](Frame t, const Keyframe& k) { return t < k.time; }) - p.begin());
     if (key == p.size()) return p.back().value;
-    const auto& a = p[key - 1]; const auto& b = p[key];
-    const double t = static_cast<double>(time - a.time) / (b.time - a.time);
-    return a.value + t * (b.value - a.value);
+    return segment(p[key - 1], p[key], time);
 }
 // The source frame to play, wrapping loops to the source-in point; -1 once a one-shot source ends.
 Frame wrap(const Clip& clip, Frame source) noexcept {
