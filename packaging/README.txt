@@ -25,8 +25,25 @@ This is a development prototype. Automated transport, media, persistence, and
 UI tests pass, but ASIO routing, MIDI equipment, and full shows still require
 rehearsal testing on the actual hardware. See docs/hardware-validation.md.
 
-Source and build instructions:
-https://github.com/staubichsauger/simpleAVshow
+License
+-------
+SimpleAVShow is free software, licensed under the GNU General Public License,
+version 3 or (at your option) any later version. See LICENSE. It comes with
+ABSOLUTELY NO WARRANTY.
+
+Source code
+-----------
+Complete source and build instructions for this version:
+https://github.com/staubichsauger/simpleAVshow (tag matching this release).
+Each release also attaches SimpleAVShow-<version>-source.tar.gz.
+
+Third-party components keep their own licenses. The macOS and Linux packages
+bundle FFmpeg built with GPL options; Windows bundles an LGPL FFmpeg. The
+Windows build includes Steinberg's ASIO SDK 2.3.4 under its GPLv3 option
+(licenses/vcpkg/rtaudio). Corresponding sources are available from the
+locations below at the versions recorded in licenses/. For three years after
+receiving this package, you may also request the complete corresponding source
+of any bundled component through the project repository's issue tracker.
 
 Third-party library notices and license texts are included in licenses/.
 Qt: https://code.qt.io/cgit/qt/qtbase.git/ (LGPLv3 / GPL options)

@@ -1,5 +1,9 @@
 Second development prerelease of SimpleAVShow, a native timeline editor and player for stage performances. This release focuses on keeping a running show alive when something goes wrong, plus a round of editing and workflow improvements. See the [review findings](https://github.com/staubichsauger/simpleAVshow/blob/v0.2.0/docs/review-findings.md) for the full list.
 
+## License
+
+SimpleAVShow is now free software under the GNU GPL, version 3 or later. Every package includes `LICENSE`, and the release attaches `SimpleAVShow-0.2.0-source.tar.gz`. The Windows build's ASIO support now comes from Steinberg's ASIO SDK 2.3.4 under its GPLv3 option. **Help → About SimpleAVShow** shows the license notice.
+
 ## Live-show resilience
 
 - A damaged video freezes its last frame instead of stopping the show; audio and MIDI cues continue.

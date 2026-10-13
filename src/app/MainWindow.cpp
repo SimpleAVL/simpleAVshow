@@ -217,6 +217,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             p.show.tracks.erase(p.show.tracks.begin() + index); for (auto& clip : p.show.clips) if (clip.track > index) --clip.track; });
     });
     auto* help = menuBar()->addMenu("Help");
+    help->addAction("About SimpleAVShow", this, [this] {
+        QMessageBox::about(this, "About SimpleAVShow", QString(
+            "<b>SimpleAVShow %1</b><p>Copyright © 2026 the SimpleAVShow contributors.</p>"
+            "<p>This program is free software: you can redistribute it and/or modify it under the terms of the "
+            "GNU General Public License as published by the Free Software Foundation, either version 3 of the License, "
+            "or (at your option) any later version.</p>"
+            "<p>This program is distributed in the hope that it will be useful, but <b>without any warranty</b>; without even "
+            "the implied warranty of merchantability or fitness for a particular purpose. See the LICENSE file included "
+            "with this program or <a href='https://www.gnu.org/licenses/gpl-3.0.html'>gnu.org/licenses</a>.</p>"
+            "<p>Source code: <a href='https://github.com/staubichsauger/simpleAVshow'>github.com/staubichsauger/simpleAVshow</a>. "
+            "Third-party notices are in the bundled licenses folder.</p>").arg(QCoreApplication::applicationVersion()));
+    });
     help->addAction("Keyboard and playback rules", this, [this] {
         QMessageBox::information(this, "Operating SimpleAVShow",
             "Space: play / pause / resume a hold (outside text fields).\nEscape: Stop All, including async audio (press twice in Show mode).\nDelete: delete the selected clip or marker.\n\n"
