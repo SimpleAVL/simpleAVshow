@@ -417,6 +417,23 @@ private slots:
         QVERIFY(c.project.show.clips[0].link.empty()); QVERIFY(c.project.show.clips[1].link.empty());
         c.dirty = false;
     }
+    void timelineKeyboardNavigationAndDescription() {
+        MainWindow window; window.show(); auto& c = window.controller();
+        QVERIFY(c.edit([](Project& p) {
+            for (int i = 0; i < 3; ++i) { Clip clip; clip.id = "t" + std::to_string(i); clip.text = "Slide " + std::to_string(i); clip.track = 1; clip.start = frames(2 + 5 * i); clip.duration = frames(4); p.show.clips.push_back(clip); }
+        }));
+        auto* timeline = window.findChild<Timeline*>(); timeline->setFocus(); QTRY_VERIFY(timeline->hasFocus());
+        QCOMPARE(timeline->selectedTrack, 0);
+        QTest::keyClick(timeline, Qt::Key_Down); QCOMPARE(timeline->selectedTrack, 1);
+        QVERIFY(timeline->accessibleDescription().startsWith("Track 2 of"));
+        QTest::keyClick(timeline, Qt::Key_Right); QCOMPARE(timeline->selectedClip, QString("t0"));
+        QTest::keyClick(timeline, Qt::Key_Right); QCOMPARE(timeline->selectedClip, QString("t1"));
+        QVERIFY(timeline->accessibleDescription().startsWith("Clip Slide 1 on")); QVERIFY(timeline->accessibleDescription().contains("starts 00:00:07:00"));
+        QTest::keyClick(timeline, Qt::Key_Left); QCOMPARE(timeline->selectedClip, QString("t0"));
+        QTest::keyClick(timeline, Qt::Key_End); QCOMPARE(c.position(), c.project.show.duration);
+        QTest::keyClick(timeline, Qt::Key_Home); QCOMPARE(c.position(), Frame{0});
+        c.dirty = false;
+    }
     void quittingDuringShowModeRequiresConfirmation() {
         MainWindow window; window.show(); window.controller().setShowMode(true);
         bool asked = false;

@@ -19,6 +19,8 @@ QColor trackColor(const Track& track) {
 }
 }
 Timeline::Timeline(Controller& c, QWidget* parent) : QAbstractScrollArea(parent), c_(c) {
+    setFocusPolicy(Qt::StrongFocus); setAccessibleName("Timeline");
+    connect(this, &Timeline::selectionChanged, this, [this] { setAccessibleDescription(describe()); });
     setMinimumHeight(240); setFrameShape(QFrame::NoFrame); setAcceptDrops(true); setMouseTracking(true);
     viewport()->setAcceptDrops(true); viewport()->setMouseTracking(true);
     connect(&c, &Controller::changed, this, &Timeline::refresh);
@@ -104,6 +106,53 @@ Frame Timeline::snap(Frame time, const std::string& ignore) const {
     for (const auto& clip : c_.project.show.clips) if (clip.id != ignore) { consider(clip.start); consider(clip.end()); }
     return std::clamp(snapped, Frame{0}, c_.project.show.duration);
 }
+QString Timeline::describe() const {
+    // Screen readers announce the selection; the painted timeline has no child widgets to inspect.
+    const auto& show = c_.project.show;
+    for (const auto& c : show.clips) if (c.id == selectedClip.toStdString()) {
+        const QString name = c.text.empty() ? c_.project.assets.value(QString::fromStdString(c.assetId)).name : QString::fromStdString(c.text).section('\n', 0, 0);
+        return QString("Clip %1 on %2, starts %3, length %4%5").arg(name, QString::fromStdString(show.tracks[c.track].name), timecode(c.start, c_.project.fps),
+            timecode(c.duration, c_.project.fps), c.link.empty() ? "" : ", linked");
+    }
+    for (const auto& m : show.markers) if (m.id == selectedMarker.toStdString())
+        return QString("%1 %2 at %3").arg(m.hold ? "Hold" : "Cue", QString::fromStdString(m.name), timecode(m.time, c_.project.fps));
+    if (selectedTrack >= 0 && static_cast<std::size_t>(selectedTrack) < show.tracks.size())
+        return QString("Track %1 of %2: %3").arg(selectedTrack + 1).arg(show.tracks.size()).arg(QString::fromStdString(show.tracks[selectedTrack].name));
+    return "Timeline";
+}
+void Timeline::reveal(Frame time) {
+    const double x = xAt(time);
+    if (x < header || x > viewport()->width() - 40) { setOffset(offset() + x - header - 60); manual_.restart(); viewport()->update(); }
+}
+void Timeline::keyPressEvent(QKeyEvent* event) {
+    // Up/Down choose a track, Left/Right step through its clips, Home/End move the playhead.
+    const auto& show = c_.project.show;
+    if (event->modifiers() & ~Qt::KeypadModifier) { QAbstractScrollArea::keyPressEvent(event); return; }
+    switch (event->key()) {
+    case Qt::Key_Up: case Qt::Key_Down: {
+        const int next = std::clamp(selectedTrack + (event->key() == Qt::Key_Down ? 1 : -1), 0, static_cast<int>(show.tracks.size()) - 1);
+        selectedTrack = next; selectedClip.clear(); selectedMarker.clear();
+        verticalScrollBar()->setValue(std::clamp(verticalScrollBar()->value(), (next + 1) * row - viewport()->height() + ruler, next * row));
+        emit selectionChanged(); viewport()->update(); break;
+    }
+    case Qt::Key_Left: case Qt::Key_Right: {
+        const bool forward = event->key() == Qt::Key_Right; Frame from = c_.position(); const Clip* best = nullptr;
+        for (const auto& c : show.clips) if (c.id == selectedClip.toStdString()) from = c.start;
+        for (const auto& c : show.clips) {
+            if (c.track != selectedTrack || c.id == selectedClip.toStdString()) continue;
+            if (forward ? c.start >= from && (!best || c.start < best->start) : c.start <= from && (!best || c.start > best->start)) best = &c;
+        }
+        if (best) { reveal(best->start); selectClip(QString::fromStdString(best->id)); }
+        break;
+    }
+    case Qt::Key_Home: c_.seek(0); reveal(0); break;
+    case Qt::Key_End: c_.seek(show.duration); reveal(show.duration); break;
+    default: QAbstractScrollArea::keyPressEvent(event); return;
+    }
+    event->accept();
+}
+void Timeline::focusInEvent(QFocusEvent* event) { QAbstractScrollArea::focusInEvent(event); viewport()->update(); }
+void Timeline::focusOutEvent(QFocusEvent* event) { QAbstractScrollArea::focusOutEvent(event); viewport()->update(); }
 void Timeline::selectClip(QString id) {
     selectedClip = std::move(id); selectedMarker.clear();
     for (const auto& c : c_.project.show.clips) if (c.id == selectedClip.toStdString()) selectedTrack = c.track;
@@ -217,6 +266,8 @@ void Timeline::paintEvent(QPaintEvent* event) {
         p.setPen(QPen(color, 1.5)); p.drawLine(QPointF(playhead, 0), QPointF(playhead, viewport()->height()));
         p.setBrush(color); p.drawPolygon(QPolygonF{QPointF(playhead - 5, 0), QPointF(playhead + 5, 0), QPointF(playhead, 7)});
     }
+    // Keyboard focus is visible, so arrow-key navigation has an obvious target.
+    if (hasFocus()) { p.setPen(QPen(QColor("#7ea6eb"), 2)); p.setBrush(Qt::NoBrush); p.drawRect(QRectF(viewport()->rect()).adjusted(1, 1, -1, -1)); }
 }
 void Timeline::mousePressEvent(QMouseEvent* event) {
     if (event->button() != Qt::LeftButton) return;

@@ -119,7 +119,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setStyleSheet(R"(
       QMainWindow, QDialog { background: #111720; color: #dee7f3; }
       QWidget { color: #dee7f3; font-family: 'Segoe UI', 'Helvetica Neue', 'Arial'; font-size: 12px; }
-      QLabel#section { color: #8499b5; font-size: 10px; font-weight: 600; letter-spacing: 1px; margin: 7px 0; }
+      QLabel#section { color: #8499b5; font-size: 11px; font-weight: 600; letter-spacing: 1px; margin: 7px 0; }
       QPushButton, QToolButton { background: #263448; border: 1px solid #34455d; border-radius: 5px; padding: 7px 12px; }
       QPushButton:hover, QToolButton:hover { background: #354963; }
       QPushButton:checked { background: #8a6131; border-color: #e0b864; }
@@ -248,7 +248,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         for (const auto& m : c_.project.show.markers) if (m.id == item->data(Qt::UserRole).toString().toStdString()) c_.seek(m.time);
     });
     auto* import = button("+ Import media", libraryLayout); connect(import, &QPushButton::clicked, this, &MainWindow::importMedia);
-    auto* libraryHint = new QLabel("Drag media onto a track.\nDouble-click to place at the playhead."); libraryHint->setStyleSheet("color: #7890b0; font-size: 10px;"); libraryLayout->addWidget(libraryHint);
+    auto* libraryHint = new QLabel("Drag media onto a track.\nDouble-click to place at the playhead."); libraryHint->setStyleSheet("color: #7890b0; font-size: 11px;"); libraryLayout->addWidget(libraryHint);
     libraryPane->setMinimumWidth(210); upper->addWidget(libraryPane);
     auto* previewPane = new QWidget; auto* previewLayout = new QVBoxLayout(previewPane); previewLayout->setContentsMargins(18, 8, 18, 14);
     auto* previewTop = new QHBoxLayout; previewTop->addWidget(section("PROGRAM")); previewTop->addStretch();
@@ -323,7 +323,7 @@ void MainWindow::buildInspector() {
     });
     trackPan_->setToolTip("−1 = left, 0 = center, +1 = right. With one connected output, stereo sources are summed to mono at full level and pan has no effect.");
     audio->addRow("Volume (1 = full)", trackGain_); audio->addRow("Pan", trackPan_); audio->addRow("Left → output", trackLeft_); audio->addRow("Right → output", trackRight_);
-    auto* routeHint = new QLabel("Presets and fields apply immediately. Guide and Click start silent so they do not reach the audience. Use separate interface outputs for them."); routeHint->setWordWrap(true); routeHint->setStyleSheet("color: #88a0be; font-size: 10px;"); audio->addRow(routeHint);
+    auto* routeHint = new QLabel("Presets and fields apply immediately. Guide and Click start silent so they do not reach the audience. Use separate interface outputs for them."); routeHint->setWordWrap(true); routeHint->setStyleSheet("color: #88a0be; font-size: 11px;"); audio->addRow(routeHint);
     trackLayout->addWidget(trackAudio_); auto* applyTrackButton = button("Apply track", trackLayout); connect(applyTrackButton, &QPushButton::clicked, this, &MainWindow::applyTrack); trackLayout->addStretch(); inspector_->addWidget(trackPage);
     // Clip panel.
     auto* clipPage = new QWidget; auto* clipLayout = new QVBoxLayout(clipPage); clipLayout->setContentsMargins(0, 0, 0, 0);
@@ -343,7 +343,7 @@ void MainWindow::buildInspector() {
     auto* pointButtons = new QHBoxLayout; auto* addPoint = button("+ At playhead", pointButtons); auto* removePoint = button("− Point", pointButtons); automationLayout->addLayout(pointButtons);
     auto* fadeButtons = new QHBoxLayout; auto* fadeIn = button("Fade in", fadeButtons); auto* fadeOut = button("After hold", fadeButtons); automationLayout->addLayout(fadeButtons);
     auto* applyCurveButton = button("Apply curve", automationLayout);
-    auto* curveHint = new QLabel("Times are relative to clip start.\nLinear interpolation; held while paused.\nAfter hold: fade out over 4 seconds."); curveHint->setWordWrap(true); curveHint->setStyleSheet("color: #88a0be; font-size: 10px;"); automationLayout->addWidget(curveHint);
+    auto* curveHint = new QLabel("Times are relative to clip start.\nLinear interpolation; held while paused.\nAfter hold: fade out over 4 seconds."); curveHint->setWordWrap(true); curveHint->setStyleSheet("color: #88a0be; font-size: 11px;"); automationLayout->addWidget(curveHint);
     clipLayout->addWidget(automation); clipLayout->addStretch(); inspector_->addWidget(clipPage);
     connect(curveProperty_, &QComboBox::currentIndexChanged, this, [this] { if (!refreshing_) updateCurve(); });
     connect(addPoint, &QPushButton::clicked, this, [this] {
@@ -379,7 +379,7 @@ void MainWindow::buildInspector() {
     auto* cueForm = new QFormLayout; markerName_ = new QLineEdit; markerTime_ = new TimeSpin(c_.project.fps, 0); markerHold_ = new QCheckBox("Hold · Space to continue");
     cueForm->addRow("Name", markerName_); cueForm->addRow("Time", markerTime_); cueForm->addRow(markerHold_); cueLayout->addLayout(cueForm);
     auto* midiBox = new QGroupBox("Control another device with MIDI"); auto* midiLayout = new QVBoxLayout(midiBox);
-    midiDestination_ = new QLabel; midiDestination_->setWordWrap(true); midiDestination_->setStyleSheet("color: #88a0be; font-size: 10px;"); midiLayout->addWidget(midiDestination_);
+    midiDestination_ = new QLabel; midiDestination_->setWordWrap(true); midiDestination_->setStyleSheet("color: #88a0be; font-size: 11px;"); midiLayout->addWidget(midiDestination_);
     midiTiming_ = new QComboBox; midiTiming_->addItems({"At this cue", "After continuing the hold"});
     midiTiming_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); midiTiming_->setMinimumContentsLength(10);
     midiTiming_->setObjectName("midiCueTiming");

@@ -54,7 +54,7 @@ Status: `open`, `fixed`, `wontfix` (with reason), `deferred`.
 | U14 | Low | fixed | **Mixed units.** The inspector uses decimal seconds; the clock uses timecode. |
 | U15 | Low | fixed | **Lists rebuild on every change.** Media and Cues lose their scroll position; the cue selected on the timeline is not highlighted. |
 | U16 | Low | fixed | **Delete track confirmation is vague.** The prompt does not name the track, and it deletes the current track even while a clip is selected. |
-| U17 | Low | partly fixed (Tab-reachable buttons, no missing font; timeline keyboard/accessibility support open) | **Accessibility gaps.** Buttons are `Qt::NoFocus`; the timeline has no keyboard or accessibility support; hints use 10 px text. The stylesheet requests an uninstalled "Inter" font while `main.cpp` sets Arial. |
+| U17 | Low | fixed (Tab-reachable buttons; timeline arrow/Home/End navigation, focus outline, spoken selection description; 11 px hints) | **Accessibility gaps.** Buttons are `Qt::NoFocus`; the timeline has no keyboard or accessibility support; hints use 10 px text. The stylesheet requests an uninstalled "Inter" font while `main.cpp` sets Arial. |
 | U18 | Low | fixed | **MIDI editor: velocity 0.** A Note On with velocity 0 loads as "Play a note" but its summary says "Stop" (`MidiMessageEditor.cpp:37,125`). |
 | U19 | Low | fixed | **Duplicate cue names.** New cues are named "Hold N" from the current count, so names repeat after deletions. |
 | U20 | Low | fixed | **Track rows are tall.** 76 px track rows show only four of the demo's six tracks at 960 px window height. |

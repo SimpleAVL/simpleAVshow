@@ -18,6 +18,8 @@ public:
     void selectClip(QString id);
     void selectMarker(QString id);
     void refresh();
+    // Spoken summary of the current selection (also the accessible description).
+    QString describe() const;
 signals:
     void selectionChanged();
     void zoomChanged(double pixelsPerSecond);
@@ -29,6 +31,9 @@ protected:
     void mouseReleaseEvent(QMouseEvent*) override;
     void mouseDoubleClickEvent(QMouseEvent*) override;
     void wheelEvent(QWheelEvent*) override;
+    void keyPressEvent(QKeyEvent*) override;
+    void focusInEvent(QFocusEvent*) override;
+    void focusOutEvent(QFocusEvent*) override;
     void dragEnterEvent(QDragEnterEvent*) override;
     void dragMoveEvent(QDragMoveEvent*) override;
     void dropEvent(QDropEvent*) override;
@@ -47,6 +52,7 @@ private:
     State drawnState_ = State::Stopped;
     QElapsedTimer manual_;
     void onTick();
+    void reveal(Frame time);
     void zoomAround(double pixelsPerSecond, double x);
     double offset() const;
     void setOffset(double pixels);
