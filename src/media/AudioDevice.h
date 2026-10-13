@@ -19,6 +19,9 @@ public:
     std::vector<DeviceDescription> devices(RtAudio::Api api);
     bool open(RtAudio::Api api, unsigned device, unsigned channels, unsigned buffer, QString& error);
     void close();
+    // Stops callbacks while keeping the stream open, so re-arming avoids a slow driver reopen (ASIO).
+    void pause() { if (audio_ && audio_->isStreamRunning()) audio_->stopStream(); }
+    bool resume() { return audio_ && !failed_.load() && audio_->isStreamOpen() && (audio_->isStreamRunning() || audio_->startStream() == RTAUDIO_NO_ERROR); }
     // A reported stream error (e.g. an unplugged interface) counts as stopped even if RtAudio still says running.
     bool running() const { return audio_ && !failed_.load() && audio_->isStreamRunning(); }
     // Increments once per device callback; a running stream whose count stalls has stopped delivering audio.

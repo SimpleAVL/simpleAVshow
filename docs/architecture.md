@@ -2,7 +2,7 @@
 
 ## Transport and clocks
 
-`Transport::render` is independent of Qt and runs in one audio device callback at 48 kHz. Before each output sample, it checks markers at the current integer show position. Holds consume their markers and freeze show time before rendering that sample. Normal clips become silent; async sources keep advancing and evaluate automation at the frozen show time. The audio device remains running.
+`Transport::render` is independent of Qt and runs in one audio device callback at 48 kHz. Before each output sample, it checks markers at the current integer show position. Holds consume their markers and freeze show time before rendering that sample. Abrupt cuts (Stop All, holds and pauses of normal clips, seeks, show end, a clip's timeline end inside its source, cache misses) render a 120-frame (2.5 ms) linear tail from the frames the voice would have played; a separate tail slot means tails never disturb read-ahead and simply end if their block is not resident. Normal voices that become audible mid-source fade in over the same length; clips arriving at their own source start do not. Voices cache their envelope segment and pan gains. Normal clips become silent; async sources keep advancing and evaluate automation at the frozen show time. The audio device remains running.
 
 An async clip beginning exactly at a hold starts on arrival. Loops wrap to the source-in point. One-shots become Finished at source end and do not retrigger because show time remains inside them. Play from Held sends resume MIDI once and advances show time; same-time holds are consumed together. Manual pause cannot consume a held cue.
 
@@ -10,7 +10,7 @@ Seek changes show time and rearms markers without sending MIDI. It preserves run
 
 ## Thread boundaries
 
-The armed Show is immutable and references prepared audio sources. UI edits validate a candidate before committing, close the device, then swap the snapshot. SPSC queues carry commands and MIDI events; MIDI capacity is allocated while disarmed and scales to the project marker count. Published status uses lock-free atomics. The callback does no allocation, disk I/O, mutex locking, Qt work, or MIDI sending.
+The armed Show is immutable and references prepared audio sources. UI edits validate a candidate before committing, pause the open stream (closing it only if it failed), then swap the snapshot and resume. Re-arming keeps the read-ahead of clips whose source, offset, and loop are unchanged and only prebuffers new or changed clips. SPSC queues carry commands and MIDI events; MIDI capacity is allocated while disarmed and scales to the project marker count. Published status uses lock-free atomics. The callback does no allocation, disk I/O, mutex locking, Qt work, or MIDI sending.
 
 Voice state and active-clip storage are allocated while disarmed. Stable sorted indices schedule clip starts and markers; per-sample work visits active audio clips and the markers at the current boundary instead of scanning the entire show. Seeking rebuilds the active set and locates the marker cursor without allocating. Clip completion retires voices; held async voices continue under the same rules as resident sources.
 

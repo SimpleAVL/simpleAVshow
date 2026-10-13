@@ -90,9 +90,13 @@ void Controller::redo() {
 }
 void Controller::arm(Frame position) {
     stopMidiThread();
-    device.close(); videos_.clear(); videoErrors_.clear(); lastPicture_ = {}; lastComposed_ = -1; lateFrames = 0;
+    // The callback must be stopped before configure; a healthy stream only pauses.
+    const bool keep = configured_ && device.running();
+    if (keep) device.pause(); else device.close();
+    videos_.clear(); videoErrors_.clear(); lastPicture_ = {}; lastComposed_ = -1; lateFrames = 0;
     armed_ = std::make_shared<Show>(project.show); transport.configure(armed_, position);
-    if (configured_) {
+    if (keep && device.resume()) stall_.restart();
+    else if (configured_) {
         QString error;
         if (!device.open(api_, deviceId_, channels_, buffer_, error)) { configured_ = false; report("Audio output unavailable: " + error); }
         stall_.restart();

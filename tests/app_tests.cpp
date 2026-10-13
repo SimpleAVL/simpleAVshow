@@ -313,7 +313,11 @@ private slots:
         QString error; QVERIFY2(device.open(RtAudio::UNSPECIFIED, selected->id, 2, 512, error), qPrintable(error));
         const auto before = device.callbacks(); QTest::qWait(300);
         QVERIFY(device.running()); QVERIFY(device.callbacks() > before); QVERIFY(device.lastError().isEmpty());
-        device.close(); QVERIFY(!device.running());
+        // Re-arming pauses and resumes the open stream instead of reopening the driver.
+        device.pause(); QVERIFY(!device.running()); transport.configure(std::make_shared<Show>());
+        const auto paused = device.callbacks(); QVERIFY(device.resume()); QTest::qWait(200);
+        QVERIFY(device.running()); QVERIFY(device.callbacks() > paused);
+        device.close(); QVERIFY(!device.running()); QVERIFY(!device.resume());
     }
     void noteOffAsZeroVelocityKeepsItsBytesAndCueNamesStayUnique() {
         MidiMessageEditor editor; std::vector<unsigned char> bytes; QString error;
@@ -1036,8 +1040,10 @@ private slots:
             QCOMPARE(output[i * 2], waveValue(source, 0));
             QCOMPARE(output[i * 2 + 1], channels == 1 ? 0.f : waveValue(source, 1));
         }
-        transport.command({Action::Seek, 7}); transport.render(output.data(), 1, 2);
-        QCOMPARE(output[0], waveValue(clip.offset + 7, 0));
+        // A seek during playback fades the new position in; it reaches full level after the fade.
+        output.resize(Transport::fadeFrames * 2);
+        transport.command({Action::Seek, 7}); transport.render(output.data(), Transport::fadeFrames, 2);
+        QCOMPARE(output[(Transport::fadeFrames - 1) * 2], waveValue(clip.offset + 6 + Transport::fadeFrames, 0));
         QVERIFY(QFile::remove(path));
         QVERIFY_THROWS_EXCEPTION(std::runtime_error, asset.audio->storage->read(0, samples, 1));
         // Direct storage must leave original bytes untouched.
