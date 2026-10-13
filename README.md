@@ -6,11 +6,25 @@ A native timeline editor and playback engine for stage performances. Windows 11 
 
 This is a **development prototype**. CI builds and tests the app on macOS, Windows, and Linux, then launches the packaged app with a demo screenshot as a smoke test. Physical channel routing, MIDI equipment, and full rehearsal runs still need validation on the show hardware.
 
-Full builds and packages run on pushes to `main` or manual workflow runs. Pull requests targeting `main` run playback-engine tests on all three platforms, a ThreadSanitizer build of those tests on Linux, and the Linux and Windows app builds with their media/UI tests, without packaging. Other branch pushes do not trigger CI. A newer push to a pull request cancels its superseded run; runs on `main` are never cancelled.
+Full builds and packages run on pushes to `main`, version tags, or manual workflow runs. Pull requests targeting `main` run playback-engine tests on all three platforms, a ThreadSanitizer build of those tests on Linux, and the Linux and Windows app builds with their media/UI tests, without packaging. Other branch pushes do not trigger CI. A newer push to a pull request cancels its superseded run; runs on `main` are never cancelled.
 
 All app builds wait for the core tests on every platform. A core failure cancels the remaining core matrix jobs and skips the app builds. The final `CI` check fails if any required build/test job (including ThreadSanitizer) fails, is cancelled, or is unexpectedly skipped; the macOS app job is intentionally skipped on pull requests.
 
 Workflow actions are pinned to commit SHAs, runners to explicit images, RtAudio to its 6.0.1 commit, and the linuxdeploy tools to tagged releases verified by SHA-256.
+
+### Releases
+
+To release, bump the version in `CMakeLists.txt`, `vcpkg.json`, and the first line of `packaging/README.txt`, and update `packaging/release-notes.md`. Merge that to `main`, then tag the merge commit and push the tag:
+
+```sh
+git tag v0.3.0 <merge commit> && git push origin v0.3.0
+```
+
+The tag runs the full build. After every build and test passes, the `Release` job:
+- checks the tag against the project version (`vX.Y.Z`, or `vX.Y.Z-suffix` for a prerelease of it)
+- publishes the macOS, Windows, and Linux packages with a source archive, `SHA256SUMS.txt`, and the release notes
+
+0.x versions and suffixed tags are marked as prereleases. Re-running the job for an existing release replaces its assets and notes.
 
 ### Merge requirements
 
