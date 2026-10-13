@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
     palette.setColor(QPalette::ButtonText, QColor("#dee7f3")); palette.setColor(QPalette::Highlight, QColor("#486ca5"));
     palette.setColor(QPalette::HighlightedText, Qt::white); palette.setColor(QPalette::Disabled, QPalette::Text, QColor("#607188"));
     app.setPalette(palette);
-    app.setOrganizationName("SimpleAVShow"); app.setApplicationName("SimpleAVShow"); app.setApplicationVersion("0.1.0");
+    app.setOrganizationName("SimpleAVShow"); app.setApplicationName("SimpleAVShow"); app.setApplicationVersion(SAV_VERSION);
     QCommandLineParser parser; parser.addHelpOption(); parser.addVersionOption();
     parser.addOption({"demo", "Open the built-in demonstration"});
     parser.addOption({"screenshot", "Save an editor screenshot and exit (for visual QA)", "path"});

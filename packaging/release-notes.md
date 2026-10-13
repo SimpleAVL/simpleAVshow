@@ -1,10 +1,33 @@
-First development prerelease of SimpleAVShow, a native timeline editor and player for stage performances.
+Second development prerelease of SimpleAVShow, a native timeline editor and player for stage performances. This release focuses on keeping a running show alive when something goes wrong, plus a round of editing and workflow improvements. See the [review findings](https://github.com/staubichsauger/simpleAVshow/blob/v0.2.0/docs/review-findings.md) for the full list.
 
-Includes audio/video/image/text tracks, composed picture layers, hold and MIDI cues, async ambience, multichannel audio routing, automation, fullscreen program output, and Show mode. Includes the fix allowing Outputs to open at a stop marker in edit mode, with visibly disabled connection controls and a Stop All action.
+## Live-show resilience
 
-Video scaling now converts every source row, fixing playback that showed only the top portion of a frame.
+- A damaged video freezes its last frame instead of stopping the show; audio and MIDI cues continue.
+- Clips that already played no longer drop out after seeking back (for example, rehearse, return to the start, enter Show mode).
+- A briefly unreadable audio file (antivirus lock, USB hiccup) is retried for up to 2 seconds instead of stopping playback.
+- A lost USB-MIDI destination is detected and reconnects by name when it returns, even during playback. A failed or stalled audio interface is reported with the driver's reason.
+- Shows with missing media open with those files offline; **File → Relink missing media** finds them by name in a folder.
+- Show mode:
+  - a checklist on entry: unsaved changes, missing media, audio/MIDI destinations, program output
+  - a confirmation before leaving Show mode or quitting while the show runs
+  - Stop All by Escape needs two presses; Space still plays and pauses everywhere
+- The program output hides the cursor, remembers its display, and closes and reopens with that display.
 
-Play prepares the remembered audio output automatically, using default speakers on first use, and reconnects remembered MIDI destinations when needed. Outputs separates audio, MIDI, and picture settings; selecting a device connects immediately. Missing remembered devices are shown explicitly and block playback. Routing presets and a guided MIDI editor add note names, named controls, program numbers, centered pitch bend, message previews, and test sending.
+## Audio
+
+- Short (2.5 ms) fades remove clicks at holds, pauses, seeks, Stop All, and cut clip ends.
+- Stereo sources on a single-output track are mixed to mono instead of losing the right channel. Mono sources on one output with pan at 0 now play at full level (3 dB louder than before).
+- Mono files whose channel is marked front-left now play centred. Existing audio caches are rebuilt once.
+- The audio cache is capped (about 20 GiB) and reopening unchanged media skips rehashing.
+
+## Editing and workflow
+
+- The transport bar shows the next cue, the time until it, and the time left.
+- Inspector fields apply when you press Enter or leave the field, and times use timecode like the clock.
+- Copy/paste, duplicate (Ctrl+D), split at the playhead (Ctrl+B), nudge (Alt+arrows), draggable cue markers, previous/next cue (Ctrl+arrows), and file drops onto the window.
+- A video placed on a picture track brings its sound as a linked clip; **Edit → Unlink clip** separates them.
+- The timeline follows the playhead, zooms around the cursor (Ctrl+wheel), has a Fit button, shows more tracks, and supports keyboard navigation.
+- Autosave offers recovery when a newer autosave exists, removes it after saving, and also protects untitled shows.
 
 ## Downloads
 
@@ -20,6 +43,6 @@ These builds are unsigned; macOS uses ad-hoc signing without notarization. Downl
 
 ## Validation and limits
 
-Native builds, transport tests, media/project/UI tests, and packaged-app launch smoke tests run on GitHub Actions. Physical ASIO routing, MIDI bridge timing, and full shows still need rehearsal testing on the target hardware. This is a prototype prerelease, not a validated production show system.
+Native builds, transport tests (including a ThreadSanitizer build), media/project/UI tests, and packaged-app launch smoke tests run on GitHub Actions for macOS, Windows, and Linux. Unplugging an ASIO interface or USB-MIDI device, Windows timer behaviour, MIDI bridge timing, and full shows still need rehearsal testing on the target hardware. This is a prototype prerelease, not a validated production show system.
 
-Audio prepares to temporary 48 kHz PCM caches on disk and streams through worker-fed playback buffers, removing the 1 GiB project RAM budget. Fixed project count caps and the 24-hour duration cap are removed; interface capabilities determine available output channels. Import mono/stereo stems separately. Video decoding and composition use software FFmpeg/QPainter. NDI is outside this version. See [hardware validation](https://github.com/staubichsauger/simpleAVshow/blob/v0.1.0/docs/hardware-validation.md) and the [README](https://github.com/staubichsauger/simpleAVshow/blob/v0.1.0/README.md).
+Video decoding and composition use software FFmpeg/QPainter. Import mono/stereo stems separately. NDI is outside this version. See [hardware validation](https://github.com/staubichsauger/simpleAVshow/blob/v0.2.0/docs/hardware-validation.md) and the [README](https://github.com/staubichsauger/simpleAVshow/blob/v0.2.0/README.md).
