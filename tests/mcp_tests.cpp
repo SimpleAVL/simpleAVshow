@@ -39,6 +39,8 @@ QJsonObject call(McpServer& server, const QString& name, QJsonObject arguments =
     return rpc(server, "tools/call", {{"name", name}, {"arguments", arguments}}).body["result"].toObject();
 }
 double revision(McpServer& server) { return call(server, "get_show")["structuredContent"].toObject()["revision"].toDouble(); }
+// Qt 6.4 on Linux has no unambiguous std::int64_t JSON constructor.
+QJsonValue frameJson(double time) { return QJsonValue(static_cast<double>(frames(time))); }
 QJsonObject operation(QString type, QString id, QJsonObject fields) { return {{"type", type}, {"id", id}, {"fields", fields}}; }
 QJsonObject edits(McpServer& server, QJsonArray operations, double expected = -1) {
     return call(server, "apply_edits", {{"expected_revision", expected < 0 ? revision(server) : expected}, {"operations", operations}});
@@ -75,8 +77,8 @@ private slots:
     }
     void atomicSharedEditsAndConflicts() {
         Controller c; McpServer server(c); QVERIFY(server.start(0));
-        const QJsonArray batch{operation("clip", "opening", {{"text", "Welcome"}, {"track", 0}, {"duration", frames(5)}}),
-            operation("marker", "wait", {{"name", "Wait for actor"}, {"time", frames(5)}, {"message", QJsonArray{144, 60, 100}}})};
+        const QJsonArray batch{operation("clip", "opening", {{"text", "Welcome"}, {"track", 0}, {"duration", frameJson(5)}}),
+            operation("marker", "wait", {{"name", "Wait for actor"}, {"time", frameJson(5)}, {"message", QJsonArray{144, 60, 100}}})};
         QVERIFY(edits(server, batch)["isError"].toBool()); QVERIFY(c.project.show.clips.empty());
         server.setEditingEnabled(true);
         const auto oldRevision = revision(server); QVERIFY(!edits(server, batch)["isError"].toBool());
@@ -89,7 +91,7 @@ private slots:
         QVERIFY(edits(server, {operation("marker", "stale", {{"time", 0}})}, r)["isError"].toBool());
         QCOMPARE(c.project.title, QString("Operator title")); QCOMPARE(c.project.show.markers.size(), size_t(1));
         const auto before = projectJson(c.project);
-        QVERIFY(edits(server, {operation("marker", "would-add", {{"time", 0}}), operation("clip", "bad", {{"text", "overlap"}, {"track", 0}, {"duration", frames(3)}})})["isError"].toBool());
+        QVERIFY(edits(server, {operation("marker", "would-add", {{"time", 0}}), operation("clip", "bad", {{"text", "overlap"}, {"track", 0}, {"duration", frameJson(3)}})})["isError"].toBool());
         QCOMPARE(projectJson(c.project), before);
         QVERIFY(edits(server, {operation("marker", "bad-midi", {{"message", QJsonArray{144, 60}}})})["isError"].toBool());
         QVERIFY(edits(server, {operation("marker", "wrong-type", {{"hold", "true"}})})["isError"].toBool());
@@ -120,9 +122,9 @@ private slots:
     }
     void linkedTimingAndAutomation() {
         Controller c; McpServer server(c); QVERIFY(server.start(0)); server.setEditingEnabled(true);
-        QVERIFY(!edits(server, {operation("clip", "picture", {{"track", 0}, {"text", "Picture"}, {"link", "av"}, {"duration", frames(10)}, {"alpha", QJsonArray{QJsonArray{0, 0}, QJsonArray{frames(4), 1}}}}),
-            operation("clip", "partner", {{"track", 1}, {"text", "Partner"}, {"link", "av"}, {"duration", frames(10)}})})["isError"].toBool());
-        QVERIFY(!edits(server, {operation("clip", "picture", {{"start", frames(2)}, {"duration", frames(8)}, {"offset", frames(2)}})})["isError"].toBool());
+        QVERIFY(!edits(server, {operation("clip", "picture", {{"track", 0}, {"text", "Picture"}, {"link", "av"}, {"duration", frameJson(10)}, {"alpha", QJsonArray{QJsonArray{0, 0}, QJsonArray{frameJson(4), 1}}}}),
+            operation("clip", "partner", {{"track", 1}, {"text", "Partner"}, {"link", "av"}, {"duration", frameJson(10)}})})["isError"].toBool());
+        QVERIFY(!edits(server, {operation("clip", "picture", {{"start", frameJson(2)}, {"duration", frameJson(8)}, {"offset", frameJson(2)}})})["isError"].toBool());
         for (const auto& clip : c.project.show.clips) { QCOMPARE(clip.start, frames(2)); QCOMPARE(clip.duration, frames(8)); QCOMPARE(clip.offset, frames(2)); }
         QCOMPARE(c.project.show.clips.front().alpha.points.front().value, .5);
         QCOMPARE(c.project.show.clips.front().alpha.points.back().time, frames(2));
@@ -148,7 +150,7 @@ private slots:
         QVERIFY(!call(server, "commit_import", {{"job_id", job}, {"expected_revision", revision(server)}})["isError"].toBool());
         QCOMPARE(c.project.assets.size(), 1); QCOMPARE(c.project.title, QString("More operator work"));
         const auto id = c.project.assets.first().id;
-        QVERIFY(!edits(server, {operation("clip", "backdrop", {{"track", 0}, {"asset", id}, {"duration", frames(10)}})})["isError"].toBool());
+        QVERIFY(!edits(server, {operation("clip", "backdrop", {{"track", 0}, {"asset", id}, {"duration", frameJson(10)}})})["isError"].toBool());
         QCOMPARE(c.project.show.clips.size(), size_t(1)); c.undo(); c.undo(); QVERIFY(c.project.assets.isEmpty());
         QFile file(dir.filePath("broken.wav")); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("bad"); file.close();
         const auto failed = call(server, "import_media", {{"expected_revision", revision(server)}, {"paths", QJsonArray{path, file.fileName()}}});
