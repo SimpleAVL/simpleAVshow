@@ -12,7 +12,7 @@ Use the packages linked under **Downloads** in the [repository README](../README
 | macOS 15 or newer, Apple Silicon | Extract the ZIP and move `simpleavshow.app` into Applications. Intel Macs are outside the supported targets. |
 | Linux x64 | The AppImage targets Ubuntu 24.04/glibc 2.39 or newer. Make it executable, then run it. If FUSE is unavailable, use `APPIMAGE_EXTRACT_AND_RUN=1`. |
 
-The prerelease packages are unsigned; macOS builds use ad-hoc signing without notarization. Follow the included `README.txt` for downloaded-app prompts. SDKs and Homebrew are not required for packaged builds. To build from source, use the platform instructions in the [repository README](../README.md).
+The prerelease packages are unsigned; macOS builds use ad-hoc signing without notarization. Follow the included `README.txt` for downloaded-app prompts. SDKs and Homebrew are not required for packaged builds. To build from source, follow [CONTRIBUTING.md](https://github.com/staubichsauger/simpleAVshow/blob/main/CONTRIBUTING.md) in the source repository.
 
 The app opens a new, empty show. If an untitled autosave from a previous session exists, startup offers recovery. You can open a `.savshow` or `.savpack` through **File → Open…**, or drop a single show/package file onto the window.
 

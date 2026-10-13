@@ -2,176 +2,48 @@
 
 # SimpleAVShow
 
-A native timeline editor and playback engine for stage performances. Windows 11 is the primary show target; macOS and Linux share the C++20 codebase.
+A native timeline editor and playback engine for stage performances. Build a show from audio, video, images, text, holds, and MIDI cues, then run it from a locked Show mode with a fullscreen audience display.
 
-This is a **development prototype**. CI builds and tests the app on macOS, Windows, and Linux, then launches the packaged app with a demo screenshot as a smoke test. Physical channel routing, MIDI equipment, and full rehearsal runs still need validation on the show hardware.
+Windows 11 is the primary show target; macOS and Linux run the same C++20 codebase.
 
-Full builds and packages run on pushes to `main`, version tags, or manual workflow runs. Pull requests targeting `main` run playback-engine tests on all three platforms, a ThreadSanitizer build of those tests on Linux, and the Linux and Windows app builds with their media/UI tests, without packaging. Other branch pushes do not trigger CI. A newer push to a pull request cancels its superseded run; runs on `main` are never cancelled.
+![SimpleAVShow editor with the demonstration show](docs/screenshots/01-editor-overview.png)
 
-All app builds wait for the core tests on every platform. A core failure cancels the remaining core matrix jobs and skips the app builds. The final `CI` check fails if any required build/test job (including ThreadSanitizer) fails, is cancelled, or is unexpectedly skipped; the macOS app job is intentionally skipped on pull requests.
-
-Workflow actions are pinned to commit SHAs, runners to explicit images, RtAudio to its 6.0.1 commit, and the linuxdeploy tools to tagged releases verified by SHA-256.
-
-### Releases
-
-To release, bump the version in `CMakeLists.txt`, `vcpkg.json`, and the first line of `packaging/README.txt`, and update `packaging/release-notes.md`. Merge that to `main`, then tag the merge commit and push the tag:
-
-```sh
-git tag v0.3.0 <merge commit> && git push origin v0.3.0
-```
-
-The app's `--version` output and macOS `CFBundleShortVersionString` / `CFBundleVersion` are generated from the CMake project version. CI verifies both fields in the packaged macOS app before archiving it.
-
-The tag runs the full build. After every build and test passes, the `Release` job:
-- checks the tag against the project version (`vX.Y.Z`, or `vX.Y.Z-suffix` for a prerelease of it)
-- publishes the macOS, Windows, and Linux packages with a source archive, `SHA256SUMS.txt`, and the release notes
-
-0.x versions and suffixed tags are marked as prereleases. Re-running the job for an existing release replaces its assets and notes.
-
-### Merge requirements
-
-The repository ruleset in [.github/main-ruleset.json](.github/main-ruleset.json) requires pull requests to `main`, an up-to-date branch, and a passing `CI` check from GitHub Actions, with no bypass actors. The JSON file must be applied to GitHub; committing it alone does not enforce merge requirements. Once this workflow has reported a successful `CI` check, an administrator can import the file under **Settings → Rules → Rulesets**, or create the ruleset from the repository root:
-
-```sh
-gh api --method POST repos/staubichsauger/simpleAVshow/rulesets --input .github/main-ruleset.json
-```
-
-If the ruleset already exists, update it rather than creating another copy. GitHub currently rejects ruleset/branch-protection requests for this private repository with HTTP 403 and an instruction to upgrade to GitHub Pro or make the repository public. Merge enforcement remains unavailable until the repository has a [plan that supports rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets).
+> **Status: development prerelease.** Automated transport, media, persistence, and UI tests pass on all three platforms, but physical channel routing, MIDI equipment, and complete shows still need validation on your own hardware. Rehearse with the [show-machine checklist](docs/hardware-validation.md) before using a build for a performance.
 
 ## Downloads
 
-Download the packages from [GitHub Releases](https://github.com/staubichsauger/simpleAVshow/releases):
+Download the latest package from [GitHub Releases](https://github.com/staubichsauger/simpleAVshow/releases):
 
-- macOS 15 or newer, Apple Silicon (`arm64`): extract the ZIP and move `simpleavshow.app` into Applications. Intel Macs are outside the supported targets.
-- Windows 11 x64: extract the entire ZIP and run `bin/simpleavshow.exe`.
-- Linux x64: AppImage built on Ubuntu 24.04 (glibc ≥ 2.39). Make it executable with `chmod +x SimpleAVShow-linux-x86_64.AppImage`, then run it. Set `APPIMAGE_EXTRACT_AND_RUN=1` if FUSE is unavailable.
+| Platform | Package | Install |
+| --- | --- | --- |
+| Windows 11 x64 | `SimpleAVShow-windows-x86_64.zip` | Extract the entire ZIP and run `bin/simpleavshow.exe`. |
+| macOS 15+, Apple Silicon | `SimpleAVShow-macos-arm64.zip` | Extract the ZIP and move `simpleavshow.app` into Applications. Intel Macs are not supported. |
+| Linux x64 | `SimpleAVShow-linux-x86_64.AppImage` | `chmod +x` the AppImage, then run it. Built on Ubuntu 24.04 (glibc ≥ 2.39). Set `APPIMAGE_EXTRACT_AND_RUN=1` if FUSE is unavailable. |
 
-Packages include runtime libraries and third-party notices; no SDK or Homebrew installation is required. These first prereleases are unsigned (macOS uses ad-hoc signing without notarization), so downloaded-app security prompts may appear. Read the included `README.txt` and [hardware validation](docs/hardware-validation.md) before using a build for a performance.
+Packages include their runtime libraries and third-party notices. Prereleases are unsigned (macOS uses ad-hoc signing without notarization), so the usual downloaded-app security prompts may appear. Each release lists package checksums in `SHA256SUMS.txt`.
+
+Start with `--demo` (or **File → Open demonstration**) to explore a sample show.
+
+## Documentation
+
+The [illustrated user manual](docs/README.md) covers installation, timeline editing, audio routing, MIDI cues, Show mode, portable packages, recovery, and troubleshooting. It also ships inside every package.
 
 ## Features
 
-See the [illustrated user manual](docs/README.md) for installation, timeline editing, audio routing, MIDI cues, Show mode, packages, recovery, and troubleshooting.
+- Audio, video, images, and text on a scrollable timeline with snapping, trimming, copy/paste, split, nudge, and 32-step undo/redo.
+- Picture layers composed into one program picture, shown on a fullscreen output that remembers its display.
+- Holds that freeze show time until the operator continues; async audio (ambience, loops) keeps playing through holds and pauses.
+- Per-track routing to physical output channels, with presets for stereo speakers, mono feeds (guide, click), or silence. ASIO on Windows.
+- Clip automation for volume, pan, position, scale, and opacity, with fade helpers.
+- MIDI cues sent on arrival or on resume, with a guided editor for notes, controls, programs, pitch bend, and raw/SysEx messages.
+- Show mode with a preflight check, editing/seek lock, next-cue countdown, and confirmations before leaving or quitting.
+- Atomic saves, autosave recovery, relinking of missing media, and portable `.savpack` packages that open on any supported platform.
 
-- Audio, video, images, and text on a scrollable timeline. Drag to place/move, drag edges to trim, and snap to frames, clips, markers, and the playhead.
-- Picture layers composed into one program picture; project resolution/frame rate default to 1920 × 1080 / 24 fps.
-- Holds freeze show time and normal media; Space continues. Manual pause holds the picture and leaves async audio playing.
-- Async audio can loop or finish naturally. Its source keeps advancing through holds while its automation freezes with show time.
-- Seeking inside an active async clip preserves its source cursor; seeking outside its `[start, end)` interval stops it. Inactive clips start at the sought source position on playback.
-- Automatic audio preparation on Play, remembered devices, configurable channel count, and per-track routing presets, gain, pan, and mute. Main, ambience, guide, and click tracks are created by default; guide/click outputs start disconnected.
-- Copy/paste, duplicate (Ctrl+D), split at playhead (Ctrl+B), nudge by a frame (Alt+arrows) or second (Alt+Shift+arrows), draggable cue markers, previous/next cue (Ctrl+arrows), and file drops onto the window. A video placed on a picture track brings its sound onto the first audio track as a linked clip that moves, trims, splits, and deletes with it (Edit → Unlink clip separates them).
-- Clip automation for volume, pan, picture X/Y, scale, and opacity; linear keyframes and fade helpers.
-- Native MIDI output ports, including MIDI bridges, with automatic reconnection on Play. A guided cue editor offers note names, named controls, programs, pitch bend, message previews, and test sending. Raw channel/system messages and SysEx remain available; each cue can fire on arrival or resume.
-- Physical fullscreen program output that hides the cursor, remembers its display, and closes when that display disconnects (reopening when it returns). Show mode runs a preflight check (unsaved changes, missing video, audio/MIDI destinations, program output) and asks before leaving or quitting while the show runs. The transport bar shows the next cue, time to it, and time left.
-- Editing/seek lock in Show mode, atomic save, relative media paths, autosave sidecars, and 32-step undo/redo.
-- Portable `.savpack` export containing the show and every media library item; open packages on Windows, macOS, or Linux.
+NDI, multiple audio devices, MIDI input, plugins, and advanced effects are not part of v1. See [current limitations](docs/reference-and-troubleshooting.md#current-limitations).
 
-NDI, multiple audio devices, MIDI input, Wings import, plugins, and advanced effects are outside v1.
+## Building from source and contributing
 
-## macOS
-
-Install Xcode Command Line Tools and Homebrew, then:
-
-```sh
-brew install cmake ninja qtbase ffmpeg rtaudio rtmidi libarchive pkgconf
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix)"
-cmake --build build
-ctest --test-dir build --output-on-failure
-open build/simpleavshow.app --args --demo
-```
-
-The demonstration contains generated ambience, click, text, a backdrop, three holds, and a fade after the first hold. Saving exports generated WAV/PNG assets into a sibling `.media` directory. Press Play to prepare your remembered audio output, or your default speakers on first use. Missing remembered devices block playback with an explanation; they do not fall back to other speakers.
-
-## Windows 11
-
-To let an assistant prepare and test a Windows PC with minimal local setup, start with the [remote testing guide](docs/windows-remote-testing.md).
-
-Install Visual Studio 2022 with Desktop development with C++, CMake, and Git. In a Visual Studio developer PowerShell:
-
-```powershell
-git clone https://github.com/microsoft/vcpkg C:\dev\vcpkg
-C:\dev\vcpkg\bootstrap-vcpkg.bat
-cmake -S . -B build -A x64 -DCMAKE_TOOLCHAIN_FILE=C:/dev/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows
-cmake --build build --config Release --parallel 4
-$env:PATH = "$pwd/build/vcpkg_installed/x64-windows/tools/ffmpeg;$env:PATH"
-ctest --test-dir build -C Release --output-on-failure
-build\Release\simpleavshow.exe --demo
-```
-
-The vcpkg manifest pins dependencies and enables ASIO. The initial Qt/FFmpeg build can take a while. In Outputs, enable Show driver and latency settings to choose the interface's ASIO driver, choose the interface, and set the needed number of output channels.
-
-Stage the development app with dependency DLLs and Qt plugins:
-
-```powershell
-cmake --install build --config Release --prefix dist
-dist\bin\simpleavshow.exe
-```
-
-CI uses prebuilt Qt 6.8.3 and a checksum-pinned FFmpeg 9.0 shared SDK from [BtbN](https://github.com/BtbN/FFmpeg-Builds). Only the app, RtAudio (with ASIO), RtMidi, and libarchive are compiled; FFmpeg is not rebuilt. The pin is in [packaging/ffmpeg-windows.json](packaging/ffmpeg-windows.json). To use that SDK locally, run `python packaging/fetch_ffmpeg_windows.py ffmpeg-sdk`, then configure with `-DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON`, `-DCMAKE_PREFIX_PATH=<Qt SDK>`, and `-DSAV_FFMPEG_ROOT=<extracted FFmpeg SDK>`. Copy its `bin/*.dll` into `build/Release/` before running tests, and add its `bin` directory to PATH for the fixture generator.
-
-The default manifest builds Qt and FFmpeg from source for local development. Release packaging includes dependency DLLs, Qt plugins, and third-party notices. Developer ID/code signing and notarization are not configured.
-
-## Linux
-
-Requires Qt ≥ 6.4, FFmpeg ≥ 5.1 development libraries, RtAudio ≥ 6, RtMidi, libarchive ≥ 3.6 development libraries, CMake, and a C++20 compiler. Ubuntu 24.04 packages an older RtAudio; install version 6 from source as shown in [.github/workflows/build.yml](.github/workflows/build.yml), or use the vcpkg manifest.
-
-```sh
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-ctest --test-dir build --output-on-failure
-build/simpleavshow --demo
-```
-
-## Operating a show
-
-1. Set title, resolution, frame rate, and duration in Project settings.
-2. Press Play to prepare audio automatically. On first use it chooses the default output; afterward it restores the remembered device by name. For a show interface, choose it in Outputs. Selecting a device connects it immediately; Use audio settings applies channel/buffer changes. Refresh devices after plugging in equipment. A missing remembered device blocks playback until it returns or you choose a replacement.
-3. Use Quick routing in the track inspector: stereo speakers, a mono output, or silent. Presets apply immediately. Guide and Click start silent. For four channels: Main stereo 1/2, Guide mono 3, Click mono 4. With one connected leg, stereo sources are summed to mono at full level and pan has no effect. Custom left/right routing remains available.
-4. Import and drag media onto compatible tracks. Video with embedded audio creates a linked audio companion on the first synchronous audio track. The pair moves, trims, splits, and deletes together; use Edit → Unlink clip to separate them.
-5. Add hold/MIDI cues at the playhead and edit them in the inspector. Choose the MIDI destination once in Outputs; selecting it connects immediately, and Play restores it next time. Choose an action such as Play a note, Change a control, or Select a program; only relevant fields appear. Programs display 1–128 (sent as MIDI 0–127); pitch bend displays −8192 to +8191 with 0 centered. Raw MIDI / SysEx accepts hex bytes and reports incomplete messages inline. Send test triggers the displayed message immediately without applying the cue or advancing show time. Note tests may need a matching Stop a note message; Stop All does not stop external equipment.
-6. Select a clip to edit transformations and automation. Numeric/name fields apply on Enter or leaving the field; toggles apply immediately. Use Apply clip for text, Apply cue for MIDI messages, and Apply curve for keyframe table edits. Keyframe times are relative to clip start and follow show time.
-7. Choose a physical program display, save, and enable Show mode. Space plays/pauses/resumes; Stop All (or Escape, pressed twice in Show mode) silences internal audio. The project end also stops voices.
-
-Use Stop All and leave Show mode before editing, saving, testing MIDI, or manually changing audio/MIDI connections. Play may prepare remembered devices in Show mode while playback is stopped. Outputs can be opened during playback or a marker hold in edit mode; locked connection controls are visibly disabled with an explanation and a Stop All button to unlock them. The program display can be opened without stopping playback. Outputs buttons and the menu item are disabled in Show mode or during media preparation, with explanatory tooltips. Text fields keep normal Space behavior. Seeking never sends MIDI; landing exactly on a marker arms it for Play. Non-hold cues fire on crossing, including those configured for resume, because there is no hold to resume.
-
-To move a show to another computer, choose **File → Export package…**. The `.savpack` file includes the current timeline/settings and every media library item, including unused items. Export includes unsaved edits, preserves original imported media bytes, and stores duplicate references to the same source only once. Generated demo sources are exported as PNG/WAV. Export does not save or change the current project. Stop All and leave Show mode before exporting.
-
-Transfer the package and open it with **File → Open…** on Windows, macOS, or Linux. Opening extracts an editable copy into temporary storage and prepares or reuses audio caches where needed; allow disk space for both the extracted media and any converted audio. Compatible PCM WAV files play directly from the extracted copy. Use **Save** to keep a normal `.savshow` with a sibling `.media` folder, or **Export package…** to share the edited copy. Autosave starts after the first normal save, because extracted media is temporary. Configure audio/MIDI outputs and the program display on the receiving device; track channel routing travels with the show. Text uses system Arial, so its appearance can vary between devices.
-
-`.savpack` is a ZIP/Zip64 archive containing `project.savshow` and `media/` files with generated portable filenames. Media is stored without additional compression. It can also be extracted with a ZIP utility and opened using the contained `.savshow`.
-
-Autosave writes `<project>.savshow.autosave` every minute after changes. Untitled shows autosave to the app data folder once all their media has files; opened packages autosave after their first save. Opening a show whose sidecar is newer offers to recover it, and the next start offers an untitled show's sidecar. Recovered changes open as unsaved edits to the original show. Saving or discarding changes removes the sidecar. Imported media remains external; move the project and media together.
-
-## Capacity and current constraints
-
-- Standard RIFF WAV files with 48 kHz mono/stereo PCM (8/16/24/32-bit integer or 32-bit float, including compatible extensible headers) stream directly from the source through worker-fed read-ahead buffers. Import scans waveforms and block checksums without creating a converted audio copy. Other formats/sample rates prepare to a reusable 48 kHz stereo float PCM cache, requiring about 1.29 GiB per source hour. There is no project audio byte budget. Mono/stereo stems are supported; multichannel source files still need separate stems.
-- Converted audio caches persist across sessions in Qt's application cache directory under `audio-pcm-v1-le` (or `audio-pcm-v1-be`). Source content, preparation version, and FFmpeg versions identify entries, so moved files and reopened packages can reuse them. Reopening checksums the original file, prepared PCM, and waveform metadata; it avoids decoding, resampling, and rewriting valid caches. Missing, incomplete, or damaged entries rebuild automatically. Caches are local to the computer and are not included in project/package exports. Startup and conversion trim old/unused caches toward a 20 GiB budget, reduced on disks with limited free space; in-use entries are retained. With the app closed, the audio cache folder can be deleted to reclaim space, and needed entries rebuild on the next open.
-- Tracks, picture layers, clips, assets, markers, and automation curves grow with the project; there are no fixed prototype count caps or 24-hour duration cap. Output channel choices follow the interface. Frame timing is bounded only by exact integer representation in the JSON format. Real capacity depends on available memory, disk throughput, and simultaneous playback/composition work.
-- Playback keeps four 8192-frame stereo buffers (256 KiB) per armed disk-backed audio clip, plus small waveform summaries (about 1.4 MiB per source hour) and block checksums for direct WAV sources. The callback performs no disk reads, decoding, allocation, or locking. On a buffer miss, all audio and show time wait together without skipping source frames; the audio wait counter records this. Changed/unreadable sources stop playback. Direct WAV files must remain available; restore missing media and reopen the project to reload sources or rebuild damaged caches.
-- Picture clips cannot overlap on one track; use separate layers and opacity automation for crossfades. Loops wrap to the clip's Source in point.
-- Video decoding/composition currently use software FFmpeg/QPainter. Multi-layer 1080p24 performance is unverified on the show PC; hardware decoding/GPU composition remain future work. Delayed video frames retain the previous composition and increment a visible wait counter.
-- Audio legs share one callback and align sample-for-sample. Video follows that clock, but display refresh and audio/monitor buffering need measurement and compensation.
-- MIDI runs on a separate worker without sample-timestamped hardware scheduling. Bridge latency needs measurement. Stop All does not command external MIDI receivers.
-- Source cursors persist across seeks, not across edits/device changes. Editing/saving are disabled while playing/held or while async voices remain active.
-
-## Tests
-
-Transport tests run without native dependencies:
-
-```sh
-cmake -S . -B build-core -DSAV_BUILD_APP=OFF
-cmake --build build-core
-ctest --test-dir build-core --output-on-failure
-```
-
-They cover hold boundaries, async looping/finish, pause/resume, seeks, MIDI timing, routing isolation, pan, clipping, Stop All, and project end, plus large timeline scheduling, disk-buffer handoffs, cache failures, and callback allocation/I/O checks. The Qt suite adds decoding/resampling, direct PCM WAV conversion/loops/seeks, changed-source detection, persistent cache reuse/content invalidation/corruption recovery/concurrent imports, an audio source expanding beyond 1 GiB with bounded resident PCM, embedded A/V offsets, video seeks, large project round-trips, save/reload/moved media, portable package export/open/save-as and archive validation, malformed projects, undo/redo, Show-mode UI checks, device selection without fallback, MIDI editor byte round trips, raw-message validation, and cue editing. FFmpeg CLI generates fixtures; media tests explicitly skip when it is unavailable. Clang/GCC builds support `-DSAV_SANITIZE=ON` for address/undefined-behavior checking, or `-DSAV_TSAN=ON` for ThreadSanitizer (the two cannot be combined).
-
-Visual QA:
-
-```sh
-QT_QPA_PLATFORM=offscreen build/simpleavshow.app/Contents/MacOS/simpleavshow --demo --preview-time 6 --screenshot artifacts/editor.png
-```
-
-See [architecture](docs/architecture.md) and [hardware validation](docs/hardware-validation.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions on macOS, Windows, and Linux, the test suites, and how to submit changes. Developer documentation (architecture, CI and releases) lives in [development/](development/).
 
 ## License
 

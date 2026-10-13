@@ -9,3 +9,8 @@ release-assets/
 vcpkg-cache/
 __pycache__/
 ffmpeg-sdk/
+.vscode/
+.idea/
+.cache/
+CMakeUserPresets.json
+compile_commands.json
