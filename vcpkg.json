@@ -1,6 +1,6 @@
 {
   "name": "simpleavshow",
-  "version-string": "0.2.0",
+  "version-string": "0.3.0",
   "builtin-baseline": "001713e802f5cf619a64461b918161be6a0634f0",
   "default-features": ["qt", "ffmpeg"],
   "features": {

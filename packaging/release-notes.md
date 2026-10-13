@@ -1,52 +1,40 @@
-Second development prerelease of SimpleAVShow, a native timeline editor and player for stage performances. This release focuses on keeping a running show alive when something goes wrong, plus a round of editing and workflow improvements. See the [review findings](https://github.com/staubichsauger/simpleAVshow/blob/v0.2.0/docs/review-findings.md) for the full list.
+SimpleAVShow 0.3.0 adds MCP agent collaboration: an agent can build the show currently open in the editor alongside an operator. This is a development prerelease.
 
-## License
+## MCP agent collaboration
 
-SimpleAVShow is now free software under the GNU GPL, version 3 or later. Every package includes `LICENSE`, and the release attaches `SimpleAVShow-0.2.0-source.tar.gz`. The Windows build's ASIO support now comes from Steinberg's ASIO SDK 2.3.4 under its GPLv3 option. **Help → About SimpleAVShow** shows the license notice.
+- Enable the local MCP server under **Project → Agent collaboration…**, or use the Agent button in the editor. Copy the connection configuration into a Streamable HTTP MCP client, then allow editing.
+- Agents can read the shared show and media library; create or edit project settings, tracks, clips, automation, holds and MIDI cues; and prepare local media imports in the background.
+- Changes appear immediately and use the operator's existing Undo history. Each batch validates and commits atomically.
+- Revision checks reject stale agent edits, including conflicts with pending inspector typing, so the agent must reread and adapt to the operator's current show.
+- The operator can switch the agent to read-only access or disconnect it. Playback, async voices, busy operations and Show mode retain their editing locks.
+- Playback, audio/MIDI equipment, audience displays, saving and package export remain under operator control.
 
-## Live-show resilience
+The server is opt-in, bound to localhost and protected by a session bearer token. It supports MCP versions 2025-11-25, 2025-06-18 and 2025-03-26. The connection requires a client running on the show computer; a hosted agent cannot reach its loopback address. See the [connection guide](https://github.com/staubichsauger/simpleAVshow/blob/v0.3.0/docs/agent-collaboration.md).
 
-- A damaged video freezes its last frame instead of stopping the show; audio and MIDI cues continue.
-- Clips that already played no longer drop out after seeking back (for example, rehearse, return to the start, enter Show mode).
-- A briefly unreadable audio file (antivirus lock, USB hiccup) is retried for up to 2 seconds instead of stopping playback.
-- A lost USB-MIDI destination is detected and reconnects by name when it returns, even during playback. A failed or stalled audio interface is reported with the driver's reason.
-- Shows with missing media open with those files offline; **File → Relink missing media** finds them by name in a folder.
-- Show mode:
-  - a checklist on entry: unsaved changes, missing media, audio/MIDI destinations, program output
-  - a confirmation before leaving Show mode or quitting while the show runs
-  - Stop All by Escape needs two presses; Space still plays and pauses everywhere
-- The program output hides the cursor, remembers its display, and closes and reopens with that display.
+## Documentation and packaging
 
-## Audio
+- The illustrated [user manual](https://github.com/staubichsauger/simpleAVshow/blob/v0.3.0/docs/README.md) now covers editing, routing, MIDI, Show mode, saving/recovery and agent collaboration. It ships inside each package.
+- macOS bundle versions are generated from the project version and verified before packaging.
+- The repository includes contributor documentation, build instructions and the release workflow.
 
-- Short (2.5 ms) fades remove clicks at holds, pauses, seeks, Stop All, and cut clip ends.
-- Stereo sources on a single-output track are mixed to mono instead of losing the right channel. Mono sources on one output with pan at 0 now play at full level (3 dB louder than before).
-- Mono files whose channel is marked front-left now play centred. Existing audio caches are rebuilt once.
-- The audio cache is capped (about 20 GiB) and reopening unchanged media skips rehashing.
+## License and source
 
-## Editing and workflow
-
-- The transport bar shows the next cue, the time until it, and the time left.
-- Inspector fields apply when you press Enter or leave the field, and times use timecode like the clock.
-- Copy/paste, duplicate (Ctrl+D), split at the playhead (Ctrl+B), nudge (Alt+arrows), draggable cue markers, previous/next cue (Ctrl+arrows), and file drops onto the window.
-- A video placed on a picture track brings its sound as a linked clip; **Edit → Unlink clip** separates them.
-- The timeline follows the playhead, zooms around the cursor (Ctrl+wheel), has a Fit button, shows more tracks, and supports keyboard navigation.
-- Autosave offers recovery when a newer autosave exists, removes it after saving, and also protects untitled shows.
+SimpleAVShow is free software under the GNU GPL, version 3 or later. Every package includes `LICENSE`, third-party notices and an About dialog license notice. This release includes `SimpleAVShow-0.3.0-source.tar.gz`. Windows ASIO support uses Steinberg's ASIO SDK 2.3.4 under its GPLv3 option.
 
 ## Downloads
 
 | Platform | Package | Launch |
 | --- | --- | --- |
-| macOS 15+ Apple Silicon | `SimpleAVShow-macos-arm64.zip` | Extract; move `simpleavshow.app` to Applications |
 | Windows 11 x64 | `SimpleAVShow-windows-x86_64.zip` | Extract the whole ZIP; run `bin/simpleavshow.exe` |
+| macOS 15+ Apple Silicon | `SimpleAVShow-macos-arm64.zip` | Extract; move `simpleavshow.app` to Applications |
 | Linux x64 | `SimpleAVShow-linux-x86_64.AppImage` | `chmod +x`, then run; Ubuntu 24.04 / glibc 2.39 or newer |
 
-Runtime dependencies and third-party license notices are bundled. `SHA256SUMS.txt` contains package checksums. If FUSE is unavailable on Linux, set `APPIMAGE_EXTRACT_AND_RUN=1`.
+Runtime dependencies and the user manual are bundled. `SHA256SUMS.txt` contains package and source checksums. If FUSE is unavailable on Linux, set `APPIMAGE_EXTRACT_AND_RUN=1`.
 
 These builds are unsigned; macOS uses ad-hoc signing without notarization. Downloaded-app security prompts may appear.
 
 ## Validation and limits
 
-Native builds, transport tests (including a ThreadSanitizer build), media/project/UI tests, and packaged-app launch smoke tests run on GitHub Actions for macOS, Windows, and Linux. Unplugging an ASIO interface or USB-MIDI device, Windows timer behaviour, MIDI bridge timing, and full shows still need rehearsal testing on the target hardware. This is a prototype prerelease, not a validated production show system.
+The release workflow publishes only after transport tests on all three platforms, ThreadSanitizer, desktop builds and tests on Windows/macOS/Linux, and packaged-app launch smoke tests pass. The MCP suite covers authentication, discovery, atomic edits/undo, conflicts, linked trimming, background imports and operator controls. An official TypeScript MCP SDK 1.32.1 client was also checked against the server.
 
-Video decoding and composition use software FFmpeg/QPainter. Import mono/stereo stems separately. NDI is outside this version. See [hardware validation](https://github.com/staubichsauger/simpleAVshow/blob/v0.2.0/docs/hardware-validation.md) and the [README](https://github.com/staubichsauger/simpleAVshow/blob/v0.2.0/README.md).
+This remains a development prototype. Rehearse ASIO routing, audio/MIDI equipment, audience output and complete shows on the actual show hardware. Video decoding and composition use software FFmpeg/QPainter; import mono/stereo stems separately. NDI is outside this version. See [hardware validation](https://github.com/staubichsauger/simpleAVshow/blob/v0.3.0/docs/hardware-validation.md).

@@ -1,4 +1,4 @@
-SimpleAVShow 0.2.0 — development prerelease
+SimpleAVShow 0.3.0 — development prerelease
 
 Windows: extract the entire ZIP, then run bin/simpleavshow.exe.
 macOS 15 or newer, Apple Silicon: extract the ZIP, then drag simpleavshow.app
@@ -20,6 +20,11 @@ Use --demo to open the demonstration, or create a fresh project in the editor.
 File > Export package collects the show and all media into a portable .savpack.
 Open it on another computer, then Save to keep an editable project/media folder.
 Choose audio/MIDI outputs and the program display on the receiving computer.
+
+Project > Agent collaboration enables a local MCP connection so an agent can
+build the open show alongside you. Copy its connection configuration into your
+agent client and allow editing when ready. Agent batches share Undo history and
+respect playback and Show mode locks. See docs/agent-collaboration.md.
 
 This is a development prototype. Automated transport, media, persistence, and
 UI tests pass, but ASIO routing, MIDI equipment, and full shows still require
