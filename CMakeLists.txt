@@ -103,7 +103,13 @@ if(SAV_BUILD_APP)
   target_link_libraries(app_tests PRIVATE sav_desktop Qt6::Test LibArchive::LibArchive)
   add_test(NAME app COMMAND app_tests)
   set_tests_properties(app PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
-  set_target_properties(simpleavshow PROPERTIES MACOSX_BUNDLE_GUI_IDENTIFIER "org.simpleavshow.app" MACOSX_BUNDLE_BUNDLE_NAME "SimpleAVShow")
+  # Keep the generated Info.plist in sync with --version and release tags.
+  set_target_properties(simpleavshow PROPERTIES
+    MACOSX_BUNDLE_GUI_IDENTIFIER "org.simpleavshow.app"
+    MACOSX_BUNDLE_BUNDLE_NAME "SimpleAVShow"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+    MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+  )
   install(TARGETS simpleavshow BUNDLE DESTINATION . RUNTIME DESTINATION bin)
   if(WIN32)
     if(SAV_FFMPEG_ROOT)

@@ -20,6 +20,8 @@ To release, bump the version in `CMakeLists.txt`, `vcpkg.json`, and the first li
 git tag v0.3.0 <merge commit> && git push origin v0.3.0
 ```
 
+The app's `--version` output and macOS `CFBundleShortVersionString` / `CFBundleVersion` are generated from the CMake project version. CI verifies both fields in the packaged macOS app before archiving it.
+
 The tag runs the full build. After every build and test passes, the `Release` job:
 - checks the tag against the project version (`vX.Y.Z`, or `vX.Y.Z-suffix` for a prerelease of it)
 - publishes the macOS, Windows, and Linux packages with a source archive, `SHA256SUMS.txt`, and the release notes

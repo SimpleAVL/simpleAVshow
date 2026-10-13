@@ -61,6 +61,17 @@ jobs:
           python3 packaging/collect_licenses.py macos dist/licenses
           cp packaging/README.txt README.md LICENSE dist/
           cp -R docs dist/
+      - name: Verify the packaged macOS bundle version
+        run: |
+          version=$(sed -nE 's/^project\(SimpleAVShow VERSION ([0-9.]+).*/\1/p' CMakeLists.txt)
+          test -n "$version"
+          for key in CFBundleShortVersionString CFBundleVersion; do
+            actual=$(/usr/libexec/PlistBuddy -c "Print :$key" dist/simpleavshow.app/Contents/Info.plist)
+            if [[ "$actual" != "$version" ]]; then
+              echo "$key is '$actual'; expected project version '$version'." >&2
+              exit 1
+            fi
+          done
       - name: Smoke test the packaged app
         run: QT_QPA_PLATFORM=offscreen dist/simpleavshow.app/Contents/MacOS/simpleavshow --demo --preview-time 6 --screenshot artifacts/editor.png
       - name: Archive
