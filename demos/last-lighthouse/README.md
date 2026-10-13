@@ -94,7 +94,17 @@ Use `--scenario routing`, `--scenario async`, `--scenario show`, or `--scenario 
 
 Every scenario writes a native-runner summary, JSONL transport telemetry, MIDI reception log, WAV, screenshots and a fail-closed `verification.json`. The show additionally writes a native `.savpack`, save/reopen round trip, OBS recording metadata/probe and relay logs. The suite's `validation-summary.json` succeeds only when the selected runner and analyses pass.
 
-For a manual rehearsal, open `last-lighthouse.savshow`, choose the eight-channel output and the logger port in Outputs, press Play and Continue at the three waits. Pause during the sea, then Stop All. Open the line-check and async-check projects separately. Guide/click sound should reach only their private feeds.
+## Run the logger during a manual rehearsal
+
+After the build/environment setup above, double-click **[Launch Lighthouse Logger.command](../../tools/demo/Launch%20Lighthouse%20Logger.command)** in Finder, or run from the repository root:
+
+```sh
+artifacts/last-lighthouse/venv/bin/python tools/demo/run_loopback.py
+```
+
+This opens **Lighthouse Loopback Recorder** with live sixteen-channel BlackHole input meters and the MIDI receipt log. It stays open while you operate SimpleAVShow. In the editor's Outputs dialog, select **Lighthouse MIDI Logger** as MIDI destination and **BlackHole 16ch** as audio output. The logger receives MIDI without echoing it back. Close its window or press Ctrl+C in the launcher's terminal to finish. Every launch uses a fresh timestamped directory under `artifacts/last-lighthouse/manual-loopback/`, containing `midi-received.jsonl` and `loopback-16ch.wav`. Audio is recorded continuously while open, including silence. Add `--obs-relay` to feed the five existing OBS stem inputs too.
+
+For a manual rehearsal, open `last-lighthouse.savshow`, choose at least eight output channels, press Play and Continue at the three waits. Pause during the sea, then Stop All. Open the line-check and async-check projects separately. Guide/click sound should reach only their private feeds.
 
 ## Regenerate the original assets
 
