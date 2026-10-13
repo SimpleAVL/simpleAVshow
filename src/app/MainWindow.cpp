@@ -926,7 +926,7 @@ void MainWindow::outputSettings() {
     auto* refreshPorts = button("Refresh devices", layout); refreshPorts->setObjectName("refreshOutputDevices");
     connect(refreshPorts, &QPushButton::clicked, &dialog, [&] { if (c_.canEdit(false)) { refreshDevices(); refreshMidi(); } });
     auto* displayBox = new QGroupBox("Picture · audience display"); auto* displayForm = new QFormLayout(displayBox); layout->addWidget(displayBox);
-    auto* displays = new QComboBox; const auto screens = QGuiApplication::screens();
+    auto* displays = new QComboBox; displays->setObjectName("audienceOutputDisplay"); const auto screens = QGuiApplication::screens();
     for (int i = 0; i < screens.size(); ++i) displays->addItem(QString("%1 · %2 × %3%4").arg(screens[i]->name()).arg(screens[i]->size().width()).arg(screens[i]->size().height()).arg(screens[i] == screen() ? " (editor)" : ""), i);
     displayForm->addRow("Show picture on", displays); auto* displayOpen = button("Open fullscreen program output"); displayOpen->setObjectName("openProgramDisplay"); displayForm->addRow(displayOpen);
     if (const int remembered = displays->findText(QSettings().value("display/screen").toString(), Qt::MatchStartsWith); remembered >= 0) displays->setCurrentIndex(remembered);
@@ -975,7 +975,14 @@ void MainWindow::openOutput(int index) {
             "This display shows the editor. The program output will cover it until you press " + QKeySequence(QKeySequence::Close).toString(QKeySequence::NativeText) + " on the output.",
             QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Ok) return;
     output_->setPicture(c_.compose()); outputWindow_->hide(); outputWindow_->winId(); outputWindow_->windowHandle()->setScreen(screens[index]);
-    outputWindow_->setGeometry(screens[index]->geometry()); outputWindow_->showFullScreen(); activateWindow();
+    outputWindow_->setGeometry(screens[index]->geometry()); outputWindow_->showFullScreen();
+#ifdef Q_OS_WIN
+    // Windows can choose the primary monitor during the fullscreen transition.
+    // Apply the selected screen and native geometry after that transition too.
+    outputWindow_->windowHandle()->setScreen(screens[index]);
+    outputWindow_->windowHandle()->setGeometry(screens[index]->geometry());
+#endif
+    activateWindow();
     outputScreen_ = screens[index]->name(); QSettings().setValue("display/screen", outputScreen_);
 }
 void MainWindow::screensChanged() {

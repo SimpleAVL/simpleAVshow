@@ -81,6 +81,16 @@ They cover hold boundaries, async looping/finish, pause/resume, seeks, MIDI timi
 
 The Qt suite (`app_tests`, built with the app) adds media decoding and caching, direct WAV streaming, video seeks, project and package round-trips, malformed input, undo/redo, Show-mode UI, device selection, and the MIDI cue editor. The FFmpeg CLI generates its fixtures; media tests skip when it is not on PATH.
 
+On a Windows desktop with two extended displays, run the opt-in audience-display check using the native Qt platform plugin:
+
+```powershell
+$env:QT_QPA_PLATFORM = 'windows'
+$env:SAV_TEST_DISPLAYS = '1'
+build\Release\app_tests.exe programOutputUsesSecondaryScreen
+```
+
+It opens and reopens fullscreen output on the second display and checks that the editor stays on its original display. Run it in the signed-in desktop session; an SSH session alone does not provide that desktop.
+
 The MCP suite (`mcp_tests`) exercises the local HTTP endpoint, authentication, protocol discovery, shared edits, revision conflicts, atomic rollback/undo, linked trimming, asynchronous media preparation, and the operator controls. It runs offscreen alongside the app tests and needs no external agent or service.
 
 Clang/GCC builds support `-DSAV_SANITIZE=ON` (AddressSanitizer + UBSan) or `-DSAV_TSAN=ON` (ThreadSanitizer); the two cannot be combined. CI runs the transport tests under ThreadSanitizer.
