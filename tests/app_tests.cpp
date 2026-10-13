@@ -28,6 +28,8 @@
 #include <QCheckBox>
 #include <QFileDialog>
 #include <QScrollBar>
+#include <QScreen>
+#include <QWindow>
 #include <archive.h>
 #include <archive_entry.h>
 #include <limits>
@@ -979,6 +981,39 @@ private slots:
             QVERIFY(button); QVERIFY(button->isEnabled()); QTest::mouseClick(button, Qt::LeftButton);
         }
         QVERIFY(opened); QVERIFY(locked); QVERIFY(playbackPreserved); QVERIFY(unlockedAfterStop);
+    }
+    void programOutputUsesSecondaryScreen() {
+        if (qEnvironmentVariable("SAV_TEST_DISPLAYS") != "1") QSKIP("Set SAV_TEST_DISPLAYS=1 with two displays and the native platform plugin");
+        MainWindow window; window.show();
+        auto* editorScreen = window.screen();
+        const auto screens = QGuiApplication::screens();
+        QScreen* target = nullptr;
+        int targetIndex = -1;
+        for (int i = 0; i < screens.size(); ++i) if (screens[i] != editorScreen) { target = screens[i]; targetIndex = i; break; }
+        QVERIFY2(target, "This test requires a second display distinct from the editor's display");
+        auto* outputs = window.findChild<QPushButton*>("outputSettingsButton"); QVERIFY(outputs);
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            bool selected = false;
+            QTimer::singleShot(0, &window, [&] {
+                auto* dialog = window.findChild<QDialog*>("outputSettingsDialog"); if (!dialog) return;
+                auto* displays = dialog->findChild<QComboBox*>("audienceOutputDisplay");
+                auto* open = dialog->findChild<QPushButton*>("openProgramDisplay");
+                if (displays && open) {
+                    const int item = displays->findData(targetIndex);
+                    if (item >= 0) { displays->setCurrentIndex(item); open->click(); selected = true; }
+                }
+                dialog->reject();
+            });
+            outputs->click(); QVERIFY(selected);
+            QWidget* program = nullptr;
+            for (auto* widget : window.findChildren<QWidget*>()) if (widget->windowTitle() == "SimpleAVShow — Program") { program = widget; break; }
+            QVERIFY(program); QTRY_VERIFY(program->isVisible()); QVERIFY(program->isFullScreen());
+            QTRY_COMPARE(program->screen(), target);
+            QTRY_COMPARE(program->geometry(), target->geometry());
+            QTRY_COMPARE(program->windowHandle()->geometry(), target->geometry());
+            QVERIFY(window.isVisible()); QCOMPARE(window.screen(), editorScreen);
+            program->hide();
+        }
     }
     void outputEntryPointsShowWhenUnavailable() {
         MainWindow window; window.show();
