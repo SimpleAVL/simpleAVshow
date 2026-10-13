@@ -28,6 +28,8 @@
 #include <QMimeData>
 #include <QProgressDialog>
 #include <QPushButton>
+#include <QClipboard>
+#include <QJsonDocument>
 #include <QScreen>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -114,7 +116,8 @@ public:
 };
 }
 
-MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
+MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this) {
+    connect(&mcp_, &McpServer::aboutToEdit, this, &MainWindow::commitInspector);
     setWindowTitle("SimpleAVShow"); resize(1440, 960); setMinimumSize(1100, 720);
     setStyleSheet(R"(
       QMainWindow, QDialog { background: #111720; color: #dee7f3; }
@@ -201,6 +204,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* project = menuBar()->addMenu("Project");
     project->setToolTipsVisible(true);
     project->addAction("Project settings…", this, &MainWindow::projectSettings);
+    auto* agentAction = project->addAction("Agent collaboration…", this, &MainWindow::agentSettings);
+    agentAction->setObjectName("agentCollaborationAction");
     outputsAction_ = project->addAction("Outputs…", this, &MainWindow::outputSettings);
     outputsAction_->setObjectName("outputSettingsAction");
     auto* tracks = project->addMenu("Add track");
@@ -245,6 +250,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(outputsButton_, &QPushButton::clicked, this, &MainWindow::outputSettings);
     showButton_ = button("Show mode", bar); showButton_->setCheckable(true);
     connect(showButton_, &QPushButton::clicked, this, &MainWindow::requestShowMode);
+    agentButton_ = button("Agent · off", bar);
+    agentButton_->setObjectName("agentCollaborationButton");
+    connect(agentButton_, &QPushButton::clicked, this, &MainWindow::agentSettings);
     vertical->addWidget(top);
     auto* split = new QSplitter(Qt::Vertical); vertical->addWidget(split, 1);
     auto* upper = new QSplitter(Qt::Horizontal); split->addWidget(upper);
@@ -446,6 +454,8 @@ void MainWindow::refresh() {
     timeline_->refresh(); updateInspector(); updatePlayback(); statusBar()->showMessage(c_.status);
 }
 void MainWindow::updatePlayback() {
+    agentButton_->setText(!mcp_.running() ? "Agent · off" : !mcp_.editingEnabled() ? "Agent · read only" : c_.canEdit(false) ? "Agent · editing" : "Agent · locked");
+    agentButton_->setToolTip("Connect an agent to help build this show through MCP");
     exportPackageAction_->setEnabled(c_.canEdit(false));
     updateRoutingPresets();
     const bool outputsAvailable = !c_.showMode && !c_.busy;
@@ -1145,5 +1155,49 @@ bool MainWindow::eventFilter(QObject* object, QEvent* event) {
     if (key->key() == Qt::Key_Space && !editing && key->modifiers() == Qt::NoModifier) { if (!key->isAutoRepeat()) c_.toggle(); return true; }
     if ((key->key() == Qt::Key_Delete || key->key() == Qt::Key_Backspace) && !editing && !qobject_cast<QTableWidget*>(widget)) { if (!key->isAutoRepeat()) deleteSelection(); return true; }
     return QMainWindow::eventFilter(object, event);
+}
+
+void MainWindow::agentSettings() {
+    QDialog dialog(this); dialog.setWindowTitle("Agent collaboration · MCP"); dialog.resize(620, 360);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* hint = new QLabel("Connect an agent to this open show. Agent changes appear immediately and use the same Undo history. Playback, Show mode, outputs and saving stay with the operator.");
+    hint->setWordWrap(true); layout->addWidget(hint);
+    auto* enabled = new QCheckBox("Enable local MCP server"); enabled->setObjectName("agentServerEnabled"); layout->addWidget(enabled);
+    auto* form = new QFormLayout; layout->addLayout(form);
+    auto* port = intSpin(1024, 65535); port->setObjectName("agentServerPort"); port->setValue(mcp_.running() ? QUrl(mcp_.endpoint()).port() : 48123); form->addRow("Local port", port);
+    auto* editing = new QCheckBox("Allow the agent to edit this show and import media"); editing->setObjectName("agentEditingEnabled"); form->addRow(editing);
+    auto* endpoint = new QLineEdit; endpoint->setReadOnly(true); form->addRow("MCP URL", endpoint);
+    auto* token = new QLineEdit; token->setReadOnly(true); token->setEchoMode(QLineEdit::Password); form->addRow("Bearer token", token);
+    auto* copy = button("Copy connection configuration", layout);
+    auto* copyToken = button("Copy bearer token", layout);
+    auto* status = new QLabel; status->setWordWrap(true); layout->addWidget(status);
+    auto refresh = [&] {
+        QSignalBlocker a(enabled), b(editing);
+        enabled->setChecked(mcp_.running()); editing->setChecked(mcp_.editingEnabled());
+        port->setEnabled(!mcp_.running()); editing->setEnabled(mcp_.running());
+        copy->setEnabled(mcp_.running()); copyToken->setEnabled(mcp_.running());
+        endpoint->setText(mcp_.endpoint()); token->setText(mcp_.token());
+        status->setText(mcp_.running() ? (mcp_.editingEnabled() ? "Agent editing enabled. Playback and Show mode still lock edits." : "Read only. Allow editing above to build the show together.") : "Disabled. Connections and tokens last for this app session only.");
+    };
+    connect(&mcp_, &McpServer::stateChanged, &dialog, refresh);
+    connect(enabled, &QCheckBox::toggled, &dialog, [&](bool on) {
+        if (on) {
+            commitInspector();
+            if (!mcp_.start(static_cast<quint16>(port->value()))) {
+                refresh(); status->setText("Cannot start MCP server: " + mcp_.errorString());
+            }
+        } else { mcp_.stop(); c_.report("Agent collaboration disabled."); }
+    });
+    connect(editing, &QCheckBox::toggled, &dialog, [&](bool on) {
+        commitInspector(); mcp_.setEditingEnabled(on);
+        c_.report(on ? "Agent editing enabled. Changes can be undone from Edit." : "Agent collaboration is read only.");
+    });
+    connect(copy, &QPushButton::clicked, &dialog, [&] {
+        QApplication::clipboard()->setText(QString::fromUtf8(QJsonDocument(mcp_.clientConfig()).toJson(QJsonDocument::Indented)));
+        status->setText("Connection configuration copied. Paste it into your agent's MCP server settings.");
+    });
+    connect(copyToken, &QPushButton::clicked, &dialog, [&] { QApplication::clipboard()->setText(mcp_.token()); status->setText("Bearer token copied."); });
+    auto* close = button("Close", layout); connect(close, &QPushButton::clicked, &dialog, &QDialog::accept);
+    refresh(); dialog.exec();
 }
 }

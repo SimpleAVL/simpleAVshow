@@ -2,6 +2,7 @@
 #include "core/Model.h"
 #include "media/Media.h"
 #include <QMap>
+#include <QJsonObject>
 #include <QString>
 #include <QTemporaryDir>
 #include <memory>
@@ -26,6 +27,8 @@ Project parseProject(const QByteArray& json, const QString& directory);
 // Loads each asset source, then binds and validates the complete project.
 void loadProjectMedia(Project& project);
 Project readProject(const QString& path);
+// Shared manifest representation; an empty directory keeps absolute source paths.
+QJsonObject projectJson(const Project& project, const QString& directory = {});
 void writeProject(const Project& project, const QString& path);
 bool isProjectPackage(const QString& path);
 Project readProjectPackage(const QString& path);

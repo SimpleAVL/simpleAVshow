@@ -13,7 +13,7 @@
     "qt": {
       "description": "Build Qt from source (disable when using an existing Qt SDK)",
       "dependencies": [
-        { "name": "qtbase", "default-features": false, "features": ["widgets", "concurrent", "testlib", "png", "jpeg"] },
+        { "name": "qtbase", "default-features": false, "features": ["widgets", "concurrent", "network", "testlib", "png", "jpeg"] },
         { "name": "qtbase", "default-features": false, "features": ["windeployqt"], "platform": "windows" }
       ]
     }
