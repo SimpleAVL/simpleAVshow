@@ -51,7 +51,7 @@ Status: `open`, `fixed`, `wontfix` (with reason), `deferred`.
 | U11 | Medium | fixed | **Trims can extend past the source.** Non-looping clips can be trimmed or lengthened beyond the source end (`Timeline.cpp:202`, `MainWindow.cpp:428`), ending in silence or a frozen frame. **Fix:** clamp to `source length − offset` unless looping. |
 | U12 | Low | mostly fixed (copy/paste, duplicate, split, nudge, draggable markers, next/previous cue, file drops; linked video+audio clips open) | **Timeline editing basics are missing.** Copy/paste, duplicate, split at playhead, frame nudge with the arrow keys, draggable markers, Ctrl+wheel zoom anchored at the cursor, fit-to-window, next/previous cue keys, drag-and-drop from Finder/Explorer, and linked video+audio clips. |
 | U13 | Low | fixed | **Zoom jumps.** Zoom keeps the pixel offset instead of anchoring at the playhead or cursor; ruler labels crowd at low zoom. |
-| U14 | Low | open | **Mixed units.** The inspector uses decimal seconds; the clock uses timecode. |
+| U14 | Low | fixed | **Mixed units.** The inspector uses decimal seconds; the clock uses timecode. |
 | U15 | Low | fixed | **Lists rebuild on every change.** Media and Cues lose their scroll position; the cue selected on the timeline is not highlighted. |
 | U16 | Low | fixed | **Delete track confirmation is vague.** The prompt does not name the track, and it deletes the current track even while a clip is selected. |
 | U17 | Low | partly fixed (Tab-reachable buttons, no missing font; timeline keyboard/accessibility support open) | **Accessibility gaps.** Buttons are `Qt::NoFocus`; the timeline has no keyboard or accessibility support; hints use 10 px text. The stylesheet requests an uninstalled "Inter" font while `main.cpp` sets Arial. |
@@ -69,7 +69,7 @@ Status: `open`, `fixed`, `wontfix` (with reason), `deferred`.
 | P4 | Low | fixed | **Windows device names pass the package filename check** (`media/CON`, `media/NUL.wav`; `ProjectPackage.cpp:85`). Fixed by the UUID-only rule in P2. |
 | P5 | Low | fixed | **Loose JSON value types.** Wrong types are coerced (`"gain":"x"` → 1, `"left":1e10` → disconnected). Every asset is decoded before the structure is validated, and unknown fields are dropped on re-save. **Fix:** strict type checks; validate structure before loading media. |
 | P6 | Low | fixed | **Failed saves leave partial files.** `materializeProjectMedia` leaves earlier copies behind when a later step fails. |
-| P7 | Low | open | **Every edit copies the whole project three times** (candidate, undo, armed). This is acceptable now but scales with show size. |
+| P7 | Low | fixed (history takes the previous state by move; the validated candidate and armed snapshot remain) | **Every edit copies the whole project three times** (candidate, undo, armed). This is acceptable now but scales with show size. |
 
 ## CI and build
 

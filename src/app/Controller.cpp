@@ -66,7 +66,8 @@ bool Controller::edit(const std::function<void(Project&)>& mutation) {
     try {
         Project next = project; mutation(next); bindAudio(next); validate(next);
         const Frame time = std::min(position(), next.show.duration);
-        undo_.push_back(project); if (undo_.size() > 32) undo_.erase(undo_.begin()); redo_.clear();
+        // The previous state moves into history rather than being copied again.
+        undo_.push_back(std::move(project)); if (undo_.size() > 32) undo_.pop_front(); redo_.clear();
         project = std::move(next); dirty = true; arm(time); emit changed(); return true;
     } catch (const std::exception& e) { report(QString::fromUtf8(e.what())); return false; }
 }
@@ -80,12 +81,12 @@ void Controller::replace(Project next, QString projectPath) {
 }
 void Controller::undo() {
     if (!canEdit() || undo_.empty()) return;
-    redo_.push_back(project); project = std::move(undo_.back()); undo_.pop_back(); dirty = true;
+    redo_.push_back(std::move(project)); project = std::move(undo_.back()); undo_.pop_back(); dirty = true;
     arm(std::min(position(), project.show.duration)); emit changed();
 }
 void Controller::redo() {
     if (!canEdit() || redo_.empty()) return;
-    undo_.push_back(project); project = std::move(redo_.back()); redo_.pop_back(); dirty = true;
+    undo_.push_back(std::move(project)); project = std::move(redo_.back()); redo_.pop_back(); dirty = true;
     arm(std::min(position(), project.show.duration)); emit changed();
 }
 void Controller::arm(Frame position) {

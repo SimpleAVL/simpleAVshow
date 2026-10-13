@@ -374,6 +374,20 @@ private slots:
         c.transport.render(nullptr, 1, 0); QCOMPARE(c.transport.state(), State::Playing); // Presses too far apart.
         c.stopAll(); c.setShowMode(false); c.dirty = false;
     }
+    void inspectorTimesUseTimecode() {
+        MainWindow window; window.show(); auto& c = window.controller();
+        QVERIFY(c.edit([](Project& p) { Clip clip; clip.id = "t"; clip.text = "Hi"; clip.track = 0; clip.start = frames(1) + 7; clip.duration = frames(4); p.show.clips.push_back(clip); }));
+        window.findChild<Timeline*>()->selectClip("t");
+        auto* start = window.findChild<QDoubleSpinBox*>("clipStart"); QVERIFY(start);
+        QCOMPARE(start->text(), QString("00:00:01:00"));
+        // Leaving the field unedited keeps the sub-frame start.
+        start->setFocus(); QVERIFY(QMetaObject::invokeMethod(start, "editingFinished")); QCOMPARE(c.project.show.clips[0].start, frames(1) + 7);
+        const auto type = [&](const QString& text) { start->selectAll(); QTest::keyClicks(start, text); QTest::keyClick(start, Qt::Key_Return); };
+        type("00:00:03:12"); QCOMPARE(c.project.show.clips[0].start, frames(3.5));
+        type("0:05"); QCOMPARE(c.project.show.clips[0].start, frames(5));
+        type("2.25"); QCOMPARE(c.project.show.clips[0].start, frames(2.25));
+        c.dirty = false;
+    }
     void quittingDuringShowModeRequiresConfirmation() {
         MainWindow window; window.show(); window.controller().setShowMode(true);
         bool asked = false;

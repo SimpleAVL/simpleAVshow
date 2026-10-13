@@ -43,6 +43,7 @@
 #include <QTextEdit>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QValidator>
 #include <QtConcurrent>
 #include <QDrag>
 #include <QWindow>
@@ -63,6 +64,40 @@ protected:
 QDoubleSpinBox* realSpin(double min, double max, double step, QWidget* parent = nullptr) {
     auto* box = new QDoubleSpinBox(parent); box->setRange(min, max); box->setDecimals(3); box->setSingleStep(step); box->setKeyboardTracking(false); return box;
 }
+// Times display as project timecode like the clock, and accept timecode, MM:SS, or plain seconds.
+class TimeSpin : public QDoubleSpinBox {
+public:
+    TimeSpin(const double& fps, double min) : fps_(fps) {
+        setRange(min, maxSeconds); setDecimals(3); setSingleStep(1); setKeyboardTracking(false);
+        setToolTip("Timecode HH:MM:SS:FF. You can also type seconds (12.5), MM:SS, or MM:SS:FF.");
+    }
+    static std::optional<double> parse(QString text, double fps) {
+        text = text.trimmed(); const auto parts = text.split(':'); bool ok = true; double total = 0;
+        if (parts.size() > 4 || text.isEmpty()) return std::nullopt;
+        if (parts.size() >= 3) {
+            // The last field counts frames; the rest are [hours:]minutes:seconds.
+            const double frame = parts.back().toInt(&ok); if (!ok || frame < 0 || frame >= std::ceil(fps)) return std::nullopt;
+            for (int i = 0; i + 1 < parts.size(); ++i) { const int field = parts[i].toInt(&ok); if (!ok || field < 0) return std::nullopt; total = total * 60 + field; }
+            return total + frame / fps;
+        }
+        for (const auto& part : parts) { const double field = part.toDouble(&ok); if (!ok || field < 0) return std::nullopt; total = total * 60 + field; }
+        return total;
+    }
+protected:
+    QString textFromValue(double value) const override { return timecode(frames(value), fps_); }
+    double valueFromText(const QString& text) const override {
+        // Leaving an unedited field must not round a sub-frame time to the displayed frame.
+        if (text == textFromValue(value())) return value();
+        return parse(text, fps_).value_or(value());
+    }
+    QValidator::State validate(QString& text, int&) const override {
+        for (const QChar c : text) if (!c.isDigit() && c != ':' && c != '.' && !c.isSpace()) return QValidator::Invalid;
+        const auto parsed = parse(text, fps_);
+        return parsed && *parsed >= minimum() && *parsed <= maximum() ? QValidator::Acceptable : QValidator::Intermediate;
+    }
+private:
+    const double& fps_;
+};
 QSpinBox* intSpin(int min, int max) { auto* box = new QSpinBox; box->setRange(min, max); box->setKeyboardTracking(false); return box; }
 QPushButton* button(QString text, QLayout* layout = nullptr) {
     auto* b = new QPushButton(text); b->setCursor(Qt::PointingHandCursor); b->setFocusPolicy(Qt::TabFocus); // Reachable by Tab; clicks never steal focus from Space handling.
@@ -287,8 +322,8 @@ void MainWindow::buildInspector() {
     trackLayout->addWidget(trackAudio_); auto* applyTrackButton = button("Apply track", trackLayout); connect(applyTrackButton, &QPushButton::clicked, this, &MainWindow::applyTrack); trackLayout->addStretch(); inspector_->addWidget(trackPage);
     // Clip panel.
     auto* clipPage = new QWidget; auto* clipLayout = new QVBoxLayout(clipPage); clipLayout->setContentsMargins(0, 0, 0, 0);
-    auto* clipForm = new QFormLayout; clipStart_ = realSpin(0, maxSeconds, 1); clipDuration_ = realSpin(.001, maxSeconds, 1); clipOffset_ = realSpin(0, maxSeconds, 1);
-    clipLoop_ = new QCheckBox("Loop source"); clipForm->addRow("Start (s)", clipStart_); clipForm->addRow("Length (s)", clipDuration_); clipForm->addRow("Source in (s)", clipOffset_); clipForm->addRow(clipLoop_); clipLayout->addLayout(clipForm);
+    auto* clipForm = new QFormLayout; clipStart_ = new TimeSpin(c_.project.fps, 0); clipDuration_ = new TimeSpin(c_.project.fps, .001); clipOffset_ = new TimeSpin(c_.project.fps, 0); clipStart_->setObjectName("clipStart");
+    clipLoop_ = new QCheckBox("Loop source"); clipForm->addRow("Start", clipStart_); clipForm->addRow("Length", clipDuration_); clipForm->addRow("Source in", clipOffset_); clipForm->addRow(clipLoop_); clipLayout->addLayout(clipForm);
     clipText_ = new QTextEdit; clipText_->setMaximumHeight(100); clipText_->setPlaceholderText("Text on the program output"); clipLayout->addWidget(clipText_);
     audioTransform_ = new QGroupBox("Audio"); auto* audioForm = new QFormLayout(audioTransform_); clipGain_ = realSpin(0, 4, .05); clipPan_ = realSpin(-1, 1, .05);
     audioForm->addRow("Gain", clipGain_); audioForm->addRow("Pan", clipPan_); clipLayout->addWidget(audioTransform_);
@@ -336,8 +371,8 @@ void MainWindow::buildInspector() {
     });
     // Cue panel.
     auto* cuePage = new QWidget; auto* cueLayout = new QVBoxLayout(cuePage); cueLayout->setContentsMargins(0, 0, 0, 0);
-    auto* cueForm = new QFormLayout; markerName_ = new QLineEdit; markerTime_ = realSpin(0, maxSeconds, 1); markerHold_ = new QCheckBox("Hold · Space to continue");
-    cueForm->addRow("Name", markerName_); cueForm->addRow("Time (s)", markerTime_); cueForm->addRow(markerHold_); cueLayout->addLayout(cueForm);
+    auto* cueForm = new QFormLayout; markerName_ = new QLineEdit; markerTime_ = new TimeSpin(c_.project.fps, 0); markerHold_ = new QCheckBox("Hold · Space to continue");
+    cueForm->addRow("Name", markerName_); cueForm->addRow("Time", markerTime_); cueForm->addRow(markerHold_); cueLayout->addLayout(cueForm);
     auto* midiBox = new QGroupBox("Control another device with MIDI"); auto* midiLayout = new QVBoxLayout(midiBox);
     midiDestination_ = new QLabel; midiDestination_->setWordWrap(true); midiDestination_->setStyleSheet("color: #88a0be; font-size: 10px;"); midiLayout->addWidget(midiDestination_);
     midiTiming_ = new QComboBox; midiTiming_->addItems({"At this cue", "After continuing the hold"});
