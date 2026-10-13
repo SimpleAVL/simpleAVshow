@@ -2,6 +2,8 @@ name: Native build and tests
 on:
   push:
     branches: [main]
+    # Version tags run the full build and then publish a GitHub release (see the release job).
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -240,4 +242,58 @@ jobs:
           if [[ "$MACOS_RESULT" != "$expected" ]]; then
             echo "The macOS job must report $expected for $EVENT_NAME." >&2
             exit 1
+          fi
+  release:
+    name: Release
+    # Runs only for version tags, after every build/test job (and the CI gate) succeeded.
+    needs: ci
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check the tag matches the project version
+        run: |
+          version=$(sed -nE 's/^project\(SimpleAVShow VERSION ([0-9.]+).*/\1/p' CMakeLists.txt)
+          # vX.Y.Z publishes that version; vX.Y.Z-suffix publishes a prerelease of it.
+          if [[ "$GITHUB_REF_NAME" != "v$version" && "$GITHUB_REF_NAME" != "v$version-"* ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match the project version $version in CMakeLists.txt." >&2
+            exit 1
+          fi
+          if ! grep -q "^SimpleAVShow $version " packaging/README.txt; then
+            echo "packaging/README.txt does not name version $version." >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: '*-release'
+          path: release
+          merge-multiple: true
+      - name: Add the source archive and checksums
+        run: |
+          for package in SimpleAVShow-macos-arm64.zip SimpleAVShow-windows-x86_64.zip SimpleAVShow-linux-x86_64.AppImage; do
+            if [[ ! -s "release/$package" ]]; then echo "Missing release package $package." >&2; exit 1; fi
+          done
+          # GPL: every release carries the complete source of the tagged commit.
+          git archive --format=tar.gz --prefix="SimpleAVShow-$VERSION/" -o "release/SimpleAVShow-$VERSION-source.tar.gz" HEAD
+          (cd release && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=()
+          title="SimpleAVShow $VERSION"
+          # 0.x versions and suffixed tags are development prereleases.
+          if [[ "$VERSION" == 0.* || "$GITHUB_REF_NAME" == *-* ]]; then
+            prerelease=(--prerelease)
+            title="$title — development prerelease"
+          fi
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            # A re-run refreshes the assets and notes of the existing release.
+            gh release upload "$GITHUB_REF_NAME" release/* --clobber
+            gh release edit "$GITHUB_REF_NAME" --notes-file packaging/release-notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" release/* "${prerelease[@]}" --verify-tag --title "$title" --notes-file packaging/release-notes.md
           fi
