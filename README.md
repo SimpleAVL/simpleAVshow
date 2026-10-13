@@ -154,3 +154,13 @@ QT_QPA_PLATFORM=offscreen build/simpleavshow.app/Contents/MacOS/simpleavshow --d
 ```
 
 See [architecture](docs/architecture.md) and [hardware validation](docs/hardware-validation.md).
+
+## License
+
+SimpleAVShow is free software: you can redistribute it and/or modify it under the terms of the [GNU General Public License](LICENSE) as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed in the hope that it will be useful, but without any warranty.
+
+Each release attaches `SimpleAVShow-<version>-source.tar.gz` (a `git archive` of the release tag) next to the packages, and every package includes `LICENSE` and third-party notices in `licenses/`. Third-party components keep their own licenses:
+
+- **FFmpeg:** the macOS (Homebrew) and Linux (Ubuntu) packages bundle GPL-configured builds; Windows bundles BtbN's LGPL build pinned in [packaging/ffmpeg-windows.json](packaging/ffmpeg-windows.json).
+- **ASIO (Windows):** RtAudio is built through the overlay port in [ports/rtaudio](ports/rtaudio) against Steinberg's ASIO SDK 2.3.4 under its GPLv3 option, instead of the 2013 SDK copies RtAudio bundles, which were licensed only under Steinberg's proprietary agreement. "ASIO" is a trademark of Steinberg Media Technologies GmbH.
+- **Qt** (LGPLv3), **RtAudio** and **RtMidi** (MIT), and **libarchive** (BSD) are bundled as replaceable shared libraries.

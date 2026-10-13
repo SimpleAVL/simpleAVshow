@@ -57,7 +57,7 @@ jobs:
           cp "$plugins/platforms/libqoffscreen.dylib" dist/simpleavshow.app/Contents/PlugIns/platforms/
           python3 packaging/bundle_macos.py dist/simpleavshow.app
           python3 packaging/collect_licenses.py macos dist/licenses
-          cp packaging/README.txt README.md dist/
+          cp packaging/README.txt README.md LICENSE dist/
           cp -R docs dist/
       - name: Smoke test the packaged app
         run: QT_QPA_PLATFORM=offscreen dist/simpleavshow.app/Contents/MacOS/simpleavshow --demo --preview-time 6 --screenshot artifacts/editor.png
@@ -107,7 +107,7 @@ jobs:
           15106be885c1c48a021198e7e1e9a48ce9d02a86dd0a1848f00bdbf3c1c92724  /tmp/linuxdeploy-plugin-qt-x86_64.AppImage
           EOF
           chmod +x /tmp/linuxdeploy*.AppImage
-          cp packaging/README.txt README.md AppDir/usr/share/simpleavshow/
+          cp packaging/README.txt README.md LICENSE AppDir/usr/share/simpleavshow/
           cp -R docs AppDir/usr/share/simpleavshow/
           cp assets/icon.svg /tmp/simpleavshow.svg
           # Deploy first so notices cover exactly the bundled libraries, then pack.
@@ -152,7 +152,7 @@ jobs:
         id: dependencies
         with:
           path: vcpkg-cache
-          key: windows-vcpkg-noqt-${{ hashFiles('vcpkg.json') }}
+          key: windows-vcpkg-noqt-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'ports/**') }}
           restore-keys: windows-vcpkg-noqt-
       - name: Fetch the pinned vcpkg revision
         shell: pwsh
@@ -172,7 +172,7 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: vcpkg-cache
-          key: windows-vcpkg-noqt-${{ hashFiles('vcpkg.json') }}
+          key: windows-vcpkg-noqt-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'ports/**') }}
       - run: cmake --build build --config Release --parallel 4
       - name: Tests
         shell: pwsh
@@ -196,7 +196,7 @@ jobs:
           $runtime = Get-Item "$vsPath/VC/Redist/MSVC/*/x64/Microsoft.VC143.CRT" | Sort-Object FullName -Descending | Select-Object -First 1
           if (!$runtime) { throw 'MSVC runtime directory not found' }
           Copy-Item "$($runtime.FullName)/*.dll" dist/bin/
-          Copy-Item packaging/README.txt,README.md dist/
+          Copy-Item packaging/README.txt,README.md,LICENSE dist/
           Copy-Item docs dist/ -Recurse
           New-Item -ItemType Directory -Force artifacts | Out-Null
           $env:QT_QPA_PLATFORM = 'offscreen'
