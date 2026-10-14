@@ -57,7 +57,7 @@ If the operator changes the show after the agent reads it, the agent's write fai
 
 `simpleavshow://show` is also exposed as a readable MCP resource with the same snapshot as `get_show`.
 
-All timeline and automation times are **48,000 Hz audio frames**: multiply seconds by 48,000 and round to an integer. They are independent of the picture frame rate. Track indices and physical audio channel numbers are zero-based; routing `-1` disconnects a leg. Automation points are ordered `[clip-relative time, value]` pairs.
+All timeline and automation times are **48,000 Hz audio frames**: multiply seconds by 48,000 and round to an integer. They are independent of the picture frame rate. Track indices and physical audio channel numbers are zero-based; routing `-1` disconnects a leg. Automation points are ordered `[clip-relative time, value]` pairs. A point may append `[shape, bend]` to shape the segment to the next point: `"linear"`, `"hold"`, `"curve"`, or `"scurve"`, with bend from −1 to 1 (0 is straight); for example `[96000, 1, "curve", 0.5]`.
 
 Here is an `apply_edits` argument that adds a five-second title and a hold at 12 seconds. Replace `expected_revision` with the revision returned by `get_show`, check that track 1 is a compatible empty picture layer, and extend the project duration first if needed:
 

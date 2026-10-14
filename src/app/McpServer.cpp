@@ -32,8 +32,9 @@ QJsonObject clipFields() {
         {"loop", field("boolean")}, {"gain", number(0, 4)}, {"pan", number(-1, 1)},
         {"x", number(-2, 2)}, {"y", number(-2, 2)}, {"scale", number(.01, 8)}, {"opacity", number(0, 1)}};
     for (const char* key : {"volume", "balance", "positionX", "positionY", "size", "alpha"})
-        fields.insert(key, QJsonObject{{"type", "array"}, {"description", "Ordered [time in 48000 Hz audio frames, value] pairs, relative to clip start."},
-            {"items", QJsonObject{{"type", "array"}, {"minItems", 2}, {"maxItems", 2}, {"items", field("number")}}}});
+        fields.insert(key, QJsonObject{{"type", "array"}, {"description", "Ordered [time in 48000 Hz audio frames, value] keyframes, relative to clip start. "
+            "Append [shape, bend] to shape the segment to the next keyframe: shape is linear, hold, curve or scurve; bend is -1 to 1 (0 = straight)."},
+            {"items", QJsonObject{{"type", "array"}, {"minItems", 2}, {"maxItems", 4}}}});
     return fields;
 }
 QJsonObject markerFields() {
