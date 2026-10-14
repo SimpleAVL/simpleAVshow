@@ -32,7 +32,7 @@ The [illustrated user manual](docs/README.md) covers installation, timeline edit
 
 - Audio, video, images, and text on a scrollable timeline with snapping, trimming, copy/paste, split, nudge, and 32-step undo/redo.
 - Picture layers composed into one program picture, shown on a fullscreen output that remembers its display.
-- Holds that freeze show time until the operator continues; async audio (ambience, loops) keeps playing through holds and pauses.
+- Holds that freeze show time until the operator continues; async audio and video (ambience, loops, projections) keep playing through holds and pauses.
 - Per-track routing to physical output channels, with presets for stereo speakers, mono feeds (guide, click), or silence. ASIO on Windows.
 - Clip automation for volume, pan, position, scale, and opacity, with fade helpers.
 - MIDI cues sent on arrival or on resume, with a guided editor for notes, controls, programs, pitch bend, and raw/SysEx messages.

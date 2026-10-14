@@ -210,6 +210,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this) {
     outputsAction_->setObjectName("outputSettingsAction");
     auto* tracks = project->addMenu("Add track");
     tracks->addAction("Picture layer", this, [this] { addTrack(true, false); });
+    tracks->addAction("Async picture layer", this, [this] { addTrack(true, true); });
     tracks->addAction("Audio", this, [this] { addTrack(false, false); });
     tracks->addAction("Async audio", this, [this] { addTrack(false, true); });
     project->addAction("Delete selected track…", this, [this] {
@@ -236,11 +237,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this) {
     });
     help->addAction("Keyboard and playback rules", this, [this] {
         QMessageBox::information(this, "Operating SimpleAVShow",
-            "Space: play / pause / resume a hold (outside text fields).\nEscape: Stop All, including async audio (press twice in Show mode).\nDelete: delete the selected clip or marker.\n\n"
+            "Space: play / pause / resume a hold (outside text fields).\nEscape: Stop All, including async audio and video (press twice in Show mode).\nDelete: delete the selected clip or marker.\n\n"
             "Import media, then drag it from Media onto a compatible track.\nDrag a clip to move; drag its edges to trim. Click the ruler to seek.\nUse the inspector to edit routing, cues, transformations, and automation.\n\n"
-            "Holds and manual pauses leave running async audio playing.\nA seek inside an active async clip preserves its source position.\nA seek outside that clip stops it. Seeking never sends MIDI.\n\n"
+            "Holds and manual pauses leave running async audio and video playing.\nA seek inside an active async clip preserves its source position.\nA seek outside that clip stops it. Seeking never sends MIDI.\n\n"
             "Guide and Click outputs start disconnected. Route them in the track inspector.\nShow mode locks editing and timeline seeks. Use Stop All before editing.\n"
-            "At the end of the project, playback and async audio stop.\n\nThis is a development build. Validate it on the Windows show machine before a performance.");
+            "At the end of the project, playback and async media stop.\n\nThis is a development build. Validate it on the Windows show machine before a performance.");
     });
     auto* root = new QWidget; auto* vertical = new QVBoxLayout(root); vertical->setContentsMargins(0, 0, 0, 0); vertical->setSpacing(0);
     auto* top = new QWidget; top->setStyleSheet("background: #1b2737;"); auto* bar = new QHBoxLayout(top); bar->setContentsMargins(18, 11, 18, 11);
@@ -324,9 +325,9 @@ void MainWindow::buildInspector() {
     // Track panel.
     auto* trackPage = new QWidget; auto* trackLayout = new QVBoxLayout(trackPage); trackLayout->setContentsMargins(0, 0, 0, 0);
     auto* trackForm = new QFormLayout; trackName_ = new QLineEdit; trackMute_ = new QCheckBox("Mute / hide track");
-    trackForm->addRow("Name", trackName_); trackForm->addRow(trackMute_); trackLayout->addLayout(trackForm);
+    trackAsync_ = new QCheckBox("Keep playing through pauses / holds");
+    trackForm->addRow("Name", trackName_); trackForm->addRow(trackMute_); trackForm->addRow(trackAsync_); trackLayout->addLayout(trackForm);
     trackAudio_ = new QGroupBox("Audio and routing"); auto* audio = new QFormLayout(trackAudio_);
-    trackAsync_ = new QCheckBox("Keep playing through pauses / holds"); audio->addRow(trackAsync_);
     trackGain_ = realSpin(0, 4, .05); trackPan_ = realSpin(-1, 1, .05); trackLeft_ = intSpin(0, std::numeric_limits<int>::max()); trackRight_ = intSpin(0, std::numeric_limits<int>::max());
     trackLeft_->setObjectName("trackLeftOutput"); trackRight_->setObjectName("trackRightOutput");
     trackLeft_->setSpecialValueText("Off"); trackRight_->setSpecialValueText("Off");
@@ -563,8 +564,9 @@ void MainWindow::applyTrack() {
     const Track& current = c_.project.show.tracks[index]; Track edited = current;
     const auto pick = [this](QWidget* field, auto shown, auto model) { return use(field) ? shown : model; };
     edited.name = pick(trackName_, trackName_->text().toStdString(), current.name); edited.muted = pick(trackMute_, trackMute_->isChecked(), current.muted);
+    edited.async = pick(trackAsync_, trackAsync_->isChecked(), current.async);
     if (!edited.visual) {
-        edited.async = pick(trackAsync_, trackAsync_->isChecked(), current.async); edited.gain = pick(trackGain_, kept(trackGain_, current.gain), current.gain);
+        edited.gain = pick(trackGain_, kept(trackGain_, current.gain), current.gain);
         edited.pan = pick(trackPan_, kept(trackPan_, current.pan), current.pan); edited.left = pick(trackLeft_, trackLeft_->value() - 1, current.left); edited.right = pick(trackRight_, trackRight_->value() - 1, current.right);
     }
     if (edited.name == current.name && edited.muted == current.muted && edited.async == current.async && edited.gain == current.gain && edited.pan == current.pan &&
@@ -777,13 +779,18 @@ void MainWindow::relinkMedia(bool afterOpening) {
 }
 void MainWindow::placeAsset(QString id, int track, Frame time) {
     if (!c_.canEdit() || !c_.project.assets.contains(id)) return;
-    const auto& asset = c_.project.assets[id]; const bool visual = c_.project.show.tracks[track].visual;
+    const auto& asset = c_.project.assets[id]; const bool visual = c_.project.show.tracks[track].visual, async = c_.project.show.tracks[track].async;
     if ((visual && !asset.image && !asset.video) || (!visual && !asset.audio)) { c_.report("Choose a compatible picture or audio track"); return; }
+    // An async video's sound goes to an async audio track so both keep playing through holds.
+    const auto soundTrack = [=](const Track& t) { return !t.visual && t.async == async; };
+    if (visual && async && asset.video && asset.audio && std::none_of(c_.project.show.tracks.begin(), c_.project.show.tracks.end(), soundTrack)) {
+        c_.report("Add an async audio track first so this video's sound keeps playing with it"); return;
+    }
     Clip clip; clip.id = newId().toStdString(); clip.assetId = id.toStdString(); clip.track = track; clip.start = time;
     clip.duration = frames(asset.duration); if (clip.duration > maxFrame - clip.start - frames(5)) { c_.report("Media extends beyond representable frame timing"); return; }
     if (c_.edit([=](Project& p) { p.show.duration = std::max(p.show.duration, clip.end() + frames(5)); p.show.clips.push_back(clip);
         if (visual && asset.video && asset.audio) {
-            auto audioTrack = std::find_if(p.show.tracks.begin(), p.show.tracks.end(), [](const Track& t) { return !t.visual && !t.async; });
+            auto audioTrack = std::find_if(p.show.tracks.begin(), p.show.tracks.end(), soundTrack);
             if (audioTrack != p.show.tracks.end()) {
                 // The picture and its sound stay in sync: they move, trim, split, and delete together.
                 Clip sound = clip; sound.id = newId().toStdString(); sound.track = static_cast<int>(audioTrack - p.show.tracks.begin());
@@ -809,7 +816,7 @@ void MainWindow::addMarker() {
     if (c_.edit([=](Project& p) { p.show.markers.push_back(marker); })) timeline_->selectMarker(QString::fromStdString(marker.id));
 }
 void MainWindow::addTrack(bool visual, bool async) {
-    Track track; track.id = newId().toStdString(); track.name = visual ? "Picture layer" : async ? "Async audio" : "Audio"; track.visual = visual; track.async = async;
+    Track track; track.id = newId().toStdString(); track.name = visual ? (async ? "Async picture layer" : "Picture layer") : async ? "Async audio" : "Audio"; track.visual = visual; track.async = async;
     if (c_.edit([=](Project& p) { p.show.tracks.push_back(track); })) { timeline_->selectedTrack = static_cast<int>(c_.project.show.tracks.size()) - 1; timeline_->selectedClip.clear(); timeline_->selectedMarker.clear(); updateInspector(); }
 }
 void MainWindow::deleteSelection() {
@@ -944,7 +951,7 @@ void MainWindow::outputSettings() {
             refreshDevices(); refreshMidi(); channels->setValue(requestedChannels);
         }
         wasEditable = editable;
-        const QString reason = editable ? QString() : "Use Stop All before changing audio or MIDI connections; this silences any running async audio.";
+        const QString reason = editable ? QString() : "Use Stop All before changing audio or MIDI connections; this stops any running async audio or video.";
         for (QWidget* control : std::initializer_list<QWidget*>{api, devices, channels, buffer, midiPort, midiConnect, refreshPorts}) {
             control->setEnabled(editable); control->setToolTip(reason);
         }
@@ -952,7 +959,7 @@ void MainWindow::outputSettings() {
         audioApply->setEnabled(editable && audioAvailable);
         audioApply->setToolTip(editable && !audioAvailable ? "Choose an available device or click Refresh devices after plugging it in" : reason);
         stopForSettings->setVisible(!editable);
-        const QString state = c_.transport.state() == State::Held ? "Held at a stop marker." : c_.transport.state() == State::Playing ? "Playback is running." : "Async audio is still running.";
+        const QString state = c_.transport.state() == State::Held ? "Held at a stop marker." : c_.transport.state() == State::Playing ? "Playback is running." : "Async audio or video is still running.";
         connectionStatus->setText(editable ?
             (c_.device.running() ? "Audio: " + c_.audioName : "Audio: automatic on Play") + "\n" +
             (c_.midi.connected() ? "MIDI: " + c_.midi.name() : c_.needsMidi() ? "MIDI: choose a destination for this show's cues" : "MIDI: not needed for this show") : state + " Audio and MIDI connections are locked. Use Stop All to silence audio and unlock them.");

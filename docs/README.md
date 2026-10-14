@@ -24,9 +24,9 @@ For a first session, follow chapter 1 and its demonstration exercise. For a perf
 ## Essential playback rules
 
 - **Space** plays, pauses, or continues a hold when focus is outside an editing field.
-- Holds and manual pauses freeze show time and the picture. Already-running **async audio** keeps playing; its automation freezes with show time.
+- Holds and manual pauses freeze show time and the picture. Already-running **async audio and video** keep playing; their automation freezes with show time.
 - **Stop All** silences internal audio and keeps the current timeline position. In Show mode, the keyboard shortcut is **Escape twice within 600 ms**; the button takes one click.
-- Stop All and leave Show mode before editing or changing audio/MIDI connections. A pause can leave async audio running.
+- Stop All and leave Show mode before editing or changing audio/MIDI connections. A pause can leave async audio or video running.
 - **Seeking does not send MIDI.** Seeking exactly to a cue arms it for the next Play.
 - Guide and Click start disconnected. Route them to their own physical outputs before use.
 - Saving a normal project keeps imported media as external files. **Export package…** collects all library media into a portable `.savpack`.
