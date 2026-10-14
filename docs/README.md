@@ -2,7 +2,7 @@
 
 SimpleAVShow builds and plays stage shows from a timeline of pictures, sound, text, holds, and MIDI cues. This manual covers preparing a show, rehearsing it, operating it, and transferring it to another computer.
 
-This manual describes SimpleAVShow 0.3. Screenshots show the current native editor on macOS; Windows and Linux use the same controls. Device names, fonts, decimal separators, and menu shortcuts can differ. This is a development prototype: complete a rehearsal on the actual show hardware before a performance.
+This manual describes SimpleAVShow 0.4.1. Screenshots show the native editor on macOS, with automation images refreshed for timeline keyframe editing; Windows and Linux use the same controls. Device names, fonts, decimal separators, and menu shortcuts can differ. This is a development prototype: complete a rehearsal on the actual show hardware before a performance.
 
 ![SimpleAVShow editor with the demonstration at six seconds](screenshots/01-editor-overview.png)
 
