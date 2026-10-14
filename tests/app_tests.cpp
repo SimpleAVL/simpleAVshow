@@ -321,6 +321,30 @@ private slots:
         QVERIFY(device.running()); QVERIFY(device.callbacks() > paused);
         device.close(); QVERIFY(!device.running()); QVERIFY(!device.resume());
     }
+    void connectedAsioDeviceRemainsAvailableWhileStreamIsOpen() {
+        const QString name = qEnvironmentVariable("SAV_TEST_ASIO_DEVICE");
+        if (name.isEmpty()) QSKIP("Set SAV_TEST_ASIO_DEVICE to a Windows ASIO output name");
+#ifndef Q_OS_WIN
+        QSKIP("Requires Windows ASIO");
+#else
+        if (QGuiApplication::platformName() != "windows") QSKIP("ASIO requires the native Windows desktop platform");
+        Transport transport; transport.configure(std::make_shared<Show>()); AudioDevice device(transport);
+        const auto selected = playbackDevice(device.devices(RtAudio::WINDOWS_ASIO), name); QVERIFY(selected);
+        QString error; QVERIFY2(device.open(RtAudio::WINDOWS_ASIO, selected->id, std::min(16u, selected->channels), 512, error), qPrintable(error));
+        QTRY_VERIFY_WITH_TIMEOUT(device.callbacks() > 0, 3000);
+        const auto before = device.callbacks();
+        // Outputs must still offer the connected device while its ASIO stream is open.
+        const auto live = playbackDevice(device.devices(RtAudio::WINDOWS_ASIO), name);
+        QVERIFY(live); QCOMPARE(live->id, selected->id); QCOMPARE(live->channels, selected->channels);
+        QVERIFY(playbackDevice(device.devices(RtAudio::UNSPECIFIED), name));
+        QVERIFY(device.running()); QTRY_VERIFY_WITH_TIMEOUT(device.callbacks() > before, 3000);
+        device.pause(); QVERIFY(!device.running());
+        QVERIFY(playbackDevice(device.devices(RtAudio::WINDOWS_ASIO), name));
+        const auto paused = device.callbacks(); QVERIFY(device.resume());
+        QTRY_VERIFY_WITH_TIMEOUT(device.callbacks() > paused, 3000);
+        QVERIFY(device.lastError().isEmpty()); device.close();
+#endif
+    }
     void noteOffAsZeroVelocityKeepsItsBytesAndCueNamesStayUnique() {
         MidiMessageEditor editor; std::vector<unsigned char> bytes; QString error;
         editor.setMessage({0x91, 60, 0}); QVERIFY(editor.message(bytes, error));
