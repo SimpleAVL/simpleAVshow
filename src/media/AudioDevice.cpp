@@ -16,12 +16,22 @@ std::vector<std::pair<RtAudio::Api, QString>> AudioDevice::apis() const {
     return result;
 }
 std::vector<DeviceDescription> AudioDevice::devices(RtAudio::Api api) {
-    RtAudio probe(api); std::vector<DeviceDescription> result;
-    for (unsigned id : probe.getDeviceIds()) {
-        auto info = probe.getDeviceInfo(id);
-        if (info.outputChannels) result.push_back({id, QString::fromStdString(info.name), info.outputChannels, info.isDefaultOutput});
-    }
-    return result;
+    auto describe = [](RtAudio& audio) {
+        std::vector<DeviceDescription> result;
+        for (unsigned id : audio.getDeviceIds()) {
+            const auto info = audio.getDeviceInfo(id);
+            if (info.outputChannels) result.push_back({id, QString::fromStdString(info.name), info.outputChannels, info.isDefaultOutput});
+        }
+        return result;
+    };
+#ifdef Q_OS_WIN
+    // RtAudio's ASIO backend refuses to probe a second instance while any ASIO
+    // stream is open. The stream owner already has a cached device inventory,
+    // including while paused; use it so Outputs does not report a missing device.
+    if (audio_ && audio_->getCurrentApi() == RtAudio::WINDOWS_ASIO && audio_->isStreamOpen() &&
+        (api == RtAudio::WINDOWS_ASIO || api == RtAudio::UNSPECIFIED)) return describe(*audio_);
+#endif
+    RtAudio probe(api); return describe(probe);
 }
 bool AudioDevice::open(RtAudio::Api api, unsigned device, unsigned channels, unsigned buffer, QString& error) {
     close();
