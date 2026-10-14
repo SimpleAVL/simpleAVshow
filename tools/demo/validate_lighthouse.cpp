@@ -57,13 +57,25 @@ int main(int argc, char** argv) {
     parser.addOption({"midi", "Virtual receiving port name", "name", "Lighthouse MIDI Logger"});
     parser.addOption({"scenario", "show, routing, async, long-hold, package audit, or silent midi-only rehearsal", "name", "show"});
     parser.addOption({"buffer", "Output buffer frames", "frames", "512"});
+    parser.addOption({"api", "Native audio API: core, asio, or wasapi", "name",
+#ifdef Q_OS_WIN
+        "asio"
+#else
+        "core"
+#endif
+    });
     parser.addOption({"hold-seconds", "Wall time at each stage hold", "seconds", "4"});
     parser.addOption({"list-devices", "List available native audio outputs and MIDI destinations, then exit"});
     parser.addOption({"software", "Record the real-file mixer to WAV without an audio device; NOT hardware-loopback proof"});
     parser.process(app);
+    const auto apiName = parser.value("api");
+    const auto api = apiName == "asio" ? RtAudio::WINDOWS_ASIO : apiName == "wasapi" ? RtAudio::WINDOWS_WASAPI : RtAudio::MACOSX_CORE;
+    if (apiName != "asio" && apiName != "wasapi" && apiName != "core") { std::cerr << "Unknown audio API" << std::endl; return 2; }
+    std::vector<RtAudio::Api> compiledApis; RtAudio::getCompiledApi(compiledApis);
+    if (std::find(compiledApis.begin(), compiledApis.end(), api) == compiledApis.end()) { std::cerr << "Requested audio API is not compiled in" << std::endl; return 2; }
     if (parser.isSet("list-devices")) {
         Transport transport; AudioDevice device(transport); MidiOutput midi; QJsonArray outputs, ports;
-        for (const auto& d : device.devices(RtAudio::MACOSX_CORE)) outputs.append(QJsonObject{{"id", static_cast<int>(d.id)}, {"name", d.name}, {"channels", static_cast<int>(d.channels)}});
+        for (const auto& d : device.devices(api)) outputs.append(QJsonObject{{"id", static_cast<int>(d.id)}, {"name", d.name}, {"channels", static_cast<int>(d.channels)}});
         for (const auto& p : midi.ports()) ports.append(p);
         std::cout << QJsonDocument(QJsonObject{{"outputs", outputs}, {"midi", ports}}).toJson().toStdString(); return 0;
     }
@@ -164,7 +176,7 @@ int main(int argc, char** argv) {
             QFile summary(out + "/runner-summary.json");
             if (!summary.open(QIODevice::WriteOnly)) { std::cerr << "Cannot write validation summary" << std::endl; app.exit(2); return; }
             summary.write(QJsonDocument(QJsonObject{{"passed", passed}, {"scenario", scenario},
-                {"backend", software ? "software mixer; no device loopback" : "native CoreAudio output"},
+                {"backend", software ? "software mixer; no device loopback" : "native " + QString::fromStdString(RtAudio::getApiDisplayName(api)) + " output"},
                 {"device", c.audioName}, {"channels", software ? 16 : static_cast<int>(c.device.channels())},
                 {"rendered_frames", renderedFrames},
                 {"buffer_frames", static_cast<int>(c.device.bufferFrames())}, {"checks", checks},
@@ -204,10 +216,10 @@ int main(int argc, char** argv) {
         if (scenario == "midi") for (auto& track : p.show.tracks) if (!track.visual) track.muted = true;
         c.replace(std::move(p), projectPath);
         if (!software) {
-        const auto devices = c.device.devices(RtAudio::MACOSX_CORE);
+        const auto devices = c.device.devices(api);
         const auto device = std::find_if(devices.begin(), devices.end(), [&](const auto& d) { return d.name == parser.value("device") || d.name.endsWith(": " + parser.value("device")); });
         if (device == devices.end() || device->channels < (scenario == "midi" ? 2u : 8u)) throw std::runtime_error("Required audio output is unavailable");
-        if (!c.configureAudio(RtAudio::MACOSX_CORE, device->id, device->name, scenario == "midi" ? 2 : 16 <= device->channels ? 16 : 8, parser.value("buffer").toUInt()))
+        if (!c.configureAudio(api, device->id, device->name, scenario == "midi" ? 2 : 16 <= device->channels ? 16 : 8, parser.value("buffer").toUInt()))
             throw std::runtime_error(c.status.toStdString());
         }
         if (c.needsMidi()) {

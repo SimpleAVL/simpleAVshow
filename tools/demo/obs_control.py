@@ -6,12 +6,16 @@ import hashlib
 import json
 from pathlib import Path
 import uuid
+import os
+import sys
+import time
 import websocket
 
 
 class OBS:
     def __init__(self):
-        config=json.loads((Path.home()/'Library/Application Support/obs-studio/plugin_config/obs-websocket/config.json').read_text())
+        config_root = Path(os.environ['APPDATA']) if sys.platform == 'win32' else Path.home()/'Library/Application Support'
+        config=json.loads((config_root/'obs-studio/plugin_config/obs-websocket/config.json').read_text(encoding='utf-8-sig'))
         self.ws=websocket.create_connection(f'ws://127.0.0.1:{config["server_port"]}',timeout=15)
         hello=json.loads(self.ws.recv())['d']
         identify=dict(rpcVersion=1,eventSubscriptions=0)
@@ -34,12 +38,24 @@ class OBS:
 
     def setup(self,output):
         name='Lighthouse validation'
-        profiles=self.call('GetProfileList')['profiles']
-        if name not in profiles:self.call('CreateProfile',profileName=name)
-        self.call('SetCurrentProfile',profileName=name)
-        collections=self.call('GetSceneCollectionList')['sceneCollections']
-        if name not in collections:self.call('CreateSceneCollection',sceneCollectionName=name)
-        self.call('SetCurrentSceneCollection',sceneCollectionName=name)
+        # OBS dispatches profile/collection changes to its UI thread. Wait for
+        # the resulting state before issuing dependent websocket requests.
+        def ensure_resource(list_request,list_key,current_key,create_request,switch_request,argument):
+            state=self.call(list_request)
+            if name not in state[list_key]:
+                self.call(create_request,**{argument:name})
+                deadline=time.monotonic()+15
+                while name not in self.call(list_request)[list_key]:
+                    if time.monotonic()>deadline:raise RuntimeError(f'OBS did not create {name}')
+                    time.sleep(.1)
+            if self.call(list_request)[current_key]!=name:
+                self.call(switch_request,**{argument:name})
+            deadline=time.monotonic()+15
+            while self.call(list_request)[current_key]!=name:
+                if time.monotonic()>deadline:raise RuntimeError(f'OBS did not activate {name}')
+                time.sleep(.1)
+        ensure_resource('GetProfileList','profiles','currentProfileName','CreateProfile','SetCurrentProfile','profileName')
+        ensure_resource('GetSceneCollectionList','sceneCollections','currentSceneCollectionName','CreateSceneCollection','SetCurrentSceneCollection','sceneCollectionName')
         for category,key,value in [('Output','Mode','Advanced'),('AdvOut','RecType','Standard'),
             ('AdvOut','RecEncoder','obs_x264'),('AdvOut','RecTracks','63'),('AdvOut','RecFormat2','mkv'),
             ('AdvOut','RecFilePath',str(output.resolve())),('AdvOut','RecUseRescale','false'),
@@ -54,12 +70,25 @@ class OBS:
         # Writing Mode alone does not reconstruct an already-active handler.
         other=next(p for p in self.call('GetProfileList')['profiles'] if p!=name)
         self.call('SetCurrentProfile',profileName=other)
+        deadline=time.monotonic()+15
+        while self.call('GetProfileList')['currentProfileName']!=other:
+            if time.monotonic()>deadline:raise RuntimeError('OBS profile refresh timeout')
+            time.sleep(.1)
         self.call('SetCurrentProfile',profileName=name)
+        deadline=time.monotonic()+15
+        while self.call('GetProfileList')['currentProfileName']!=name:
+            if time.monotonic()>deadline:raise RuntimeError('OBS profile refresh timeout')
+            time.sleep(.1)
         self.call('SetVideoSettings',baseWidth=1920,baseHeight=1080,outputWidth=1920,outputHeight=1080,fpsNumerator=24,fpsDenominator=1)
         scenes=self.call('GetSceneList')['scenes']
         scene='Live rehearsal'
         if not any(s['sceneName']==scene for s in scenes):self.call('CreateScene',sceneName=scene)
         self.call('SetCurrentProgramScene',sceneName=scene)
+        # Exclude automatic desktop/microphone inputs from the received stems.
+        for source in self.call('GetSpecialInputs').values():
+            if source:
+                self.call('SetInputMute',inputName=source,inputMuted=True)
+                self.call('SetInputAudioTracks',inputName=source,inputAudioTracks={str(t):False for t in range(1,7)})
         existing={i['inputName'] for i in self.call('GetInputList')['inputs']}
         for old in sorted(existing):
             if old.startswith('BlackHole live '):self.call('RemoveInput',inputName=old)

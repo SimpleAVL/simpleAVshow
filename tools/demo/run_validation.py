@@ -21,6 +21,10 @@ def main():
     ap=argparse.ArgumentParser()
     ap.add_argument('--output',type=Path,default=ROOT/'artifacts/last-lighthouse/live-validation')
     ap.add_argument('--device',default='BlackHole 16ch')
+    ap.add_argument('--input-device',help='Separate receiving device (Windows ASIO loopback)')
+    ap.add_argument('--midi-port',help='Existing Windows loopMIDI port')
+    ap.add_argument('--virtual-device',action='store_true',help='Explicitly label a virtual ASIO device rather than physical hardware')
+    ap.add_argument('--api',choices=['core','asio','wasapi'],default='asio' if sys.platform=='win32' else 'core')
     ap.add_argument('--software',action='store_true')
     ap.add_argument('--obs',action='store_true')
     ap.add_argument('--long-hold',action='store_true',help='Also run an actual five-minute stage hold')
@@ -28,10 +32,11 @@ def main():
     ap.add_argument('--scenario',choices=['routing','async','show','long-hold'],help='Run one scenario only')
     ap.add_argument('--python-input',action='store_true',help='Use direct Python input instead of the macOS collector app (requires host audio permission)')
     args=ap.parse_args();args.output=args.output.resolve()
-    runner=ROOT/'build/lighthouse_validation'
+    on_windows=sys.platform=='win32'
+    runner=ROOT/('build/Release/lighthouse_validation.exe' if on_windows else 'build/lighthouse_validation')
     demos=ROOT/'demos/last-lighthouse'
     if not args.software:
-        inventory=json.loads(subprocess.check_output([str(runner),'--list-devices']))
+        inventory=json.loads(subprocess.check_output([str(runner),'--list-devices','--api',args.api]))
         if not any(d['name']==args.device or d['name'].endswith(': '+args.device) for d in inventory['outputs']):
             raise RuntimeError(f'Required loopback output {args.device} is unavailable. Install it first. --software is a separate, explicitly weaker proof.')
     projects={'routing':'routing-check.savshow','async':'async-check.savshow',
@@ -46,7 +51,10 @@ def main():
         if out.exists():raise RuntimeError(f'Refusing to overwrite existing evidence: {out}; choose a fresh --output directory')
         out.mkdir()
         capture_log=(out/'capture-process.log').open('w')
-        command=[sys.executable,str(ROOT/'tools/demo/capture_loopback.py'),'--output',str(out),'--device',args.device]
+        command=[sys.executable,str(ROOT/'tools/demo/capture_loopback.py'),'--output',str(out),'--device',args.input_device or args.device]
+        if on_windows:
+            if not args.midi_port:raise RuntimeError('Windows requires an existing --midi-port')
+            command+=['--midi-port',args.midi_port,'--api','ASIO','--meters']
         record_obs=args.obs and scenario=='show'
         native=not args.software and sys.platform=='darwin' and not args.python_input
         if native:
@@ -103,7 +111,8 @@ def main():
                     existing={i['inputName'] for i in obs.call('GetInputList')['inputs']}
                     # Recreate sources to discard ScreenCaptureKit's cached list
                     # of windows from the preceding collector/rehearsal process.
-                    fresh=['Native rehearsal screen','MIDI logger and BlackHole meters']
+                    meter_source='MIDI logger and ASIO meters' if on_windows else 'MIDI logger and BlackHole meters'
+                    fresh=['Native rehearsal screen',meter_source]
                     for name in fresh:
                         if name in existing:obs.call('RemoveInput',inputName=name)
                     deadline=time.monotonic()+10
@@ -111,47 +120,56 @@ def main():
                         if time.monotonic()>deadline:raise RuntimeError('OBS did not release preceding window sources')
                         time.sleep(.05)
                     existing-=set(fresh)
-                    obs.call('CreateInput',sceneName='Live rehearsal',inputName='Native rehearsal screen',inputKind='screen_capture',inputSettings=dict(type=1,show_cursor=False),sceneItemEnabled=True)
+                    obs.call('CreateInput',sceneName='Live rehearsal',inputName='Native rehearsal screen',inputKind='window_capture' if on_windows else 'screen_capture',inputSettings=dict(cursor=False,method=2) if on_windows else dict(type=1,show_cursor=False),sceneItemEnabled=True)
                     for old in ['Native editor widget render','Native editor snapshots','Software evidence label']:
                         if old in existing:
                             item=obs.call('GetSceneItemId',sceneName='Live rehearsal',sourceName=old)['sceneItemId']
                             obs.call('SetSceneItemEnabled',sceneName='Live rehearsal',sceneItemId=item,sceneItemEnabled=False)
             runner_log=(out/'runner-process.log').open('w')
-            command=[str(runner),'--project',str(demos/project),'--output',str(out),'--scenario',scenario,'--device',args.device,'--buffer',str(args.buffer)]
+            command=[str(runner),'--project',str(demos/project),'--output',str(out),'--scenario',scenario,'--device',args.device,'--buffer',str(args.buffer),'--api',args.api]
+            if args.midi_port:command+=['--midi',args.midi_port]
             if args.software:command+=['--software']
             playback=subprocess.Popen(command,stdout=runner_log,stderr=subprocess.STDOUT)
             if record_obs:
-                deadline=time.monotonic()+10
+                deadline=time.monotonic()+(60 if on_windows else 10)
                 while not (out/'loaded-editor.png').exists():
                     if playback.poll() is not None:raise RuntimeError('Runner setup failed; see runner-process.log')
                     if time.monotonic()>deadline:raise RuntimeError('Runner readiness timeout')
                     time.sleep(.05)
                 if not args.software:
-                    windows=obs.call('GetInputPropertiesListPropertyItems',inputName='Native rehearsal screen',propertyName='window')['propertyItems']
-                    choices=[i for i in windows if 'Lighthouse' in i['itemName'] and 'SimpleAVShow' in i['itemName']]
-                    if len(choices)!=1:raise RuntimeError('OBS cannot uniquely capture the native rehearsal window; enable macOS screen capture permission')
-                    obs.call('SetInputSettings',inputName='Native rehearsal screen',inputSettings=dict(type=1,window=choices[0]['itemValue']),overlay=True)
+                    deadline=time.monotonic()+20
+                    while True:
+                        windows=obs.call('GetInputPropertiesListPropertyItems',inputName='Native rehearsal screen',propertyName='window')['propertyItems']
+                        choices=[i for i in windows if 'Lighthouse' in i['itemName'] and 'SimpleAVShow' in i['itemName']]
+                        if len(choices)==1:break
+                        if time.monotonic()>deadline:
+                            (out/'obs-window-inventory.json').write_text(json.dumps(windows,indent=2)+'\n')
+                            raise RuntimeError('OBS cannot uniquely capture the native rehearsal window; see obs-window-inventory.json')
+                        time.sleep(.1)
+                    obs.call('SetInputSettings',inputName='Native rehearsal screen',inputSettings=dict(window=choices[0]['itemValue'],**(dict(cursor=False,method=2) if on_windows else dict(type=1))),overlay=True)
                     # ScreenCaptureKit also captures application audio. Only the
                     # independently received BlackHole stems belong in this mix.
-                    obs.call('SetInputMute',inputName='Native rehearsal screen',inputMuted=True)
-                    obs.call('SetInputAudioTracks',inputName='Native rehearsal screen',inputAudioTracks={str(t):False for t in range(1,7)})
+                    if not on_windows: # Windows window_capture exposes no audio input.
+                        obs.call('SetInputMute',inputName='Native rehearsal screen',inputMuted=True)
+                        obs.call('SetInputAudioTracks',inputName='Native rehearsal screen',inputAudioTracks={str(t):False for t in range(1,7)})
                     item=obs.call('GetSceneItemId',sceneName='Live rehearsal',sourceName='Native rehearsal screen')['sceneItemId']
                     obs.call('SetSceneItemEnabled',sceneName='Live rehearsal',sceneItemId=item,sceneItemEnabled=True)
-                    obs.call('SetSceneItemTransform',sceneName='Live rehearsal',sceneItemId=item,sceneItemTransform=dict(boundsType='OBS_BOUNDS_SCALE_INNER',boundsWidth=1440 if native else 1920,boundsHeight=1020,positionX=0,positionY=0))
-                    if native:
-                        choices=[i for i in windows if 'Lighthouse Loopback Recorder' in i['itemName']]
+                    obs.call('SetSceneItemTransform',sceneName='Live rehearsal',sceneItemId=item,sceneItemTransform=dict(boundsType='OBS_BOUNDS_SCALE_INNER',boundsWidth=1440 if native or on_windows else 1920,boundsHeight=1020,positionX=0,positionY=0))
+                    if native or on_windows:
+                        choices=[i for i in windows if ('Lighthouse Windows Loopback Recorder' if on_windows else 'Lighthouse Loopback Recorder') in i['itemName']]
                         if len(choices)!=1:raise RuntimeError('OBS cannot uniquely capture the live MIDI/input-meter window')
-                        name='MIDI logger and BlackHole meters'
-                        settings=dict(type=1,window=choices[0]['itemValue'],show_cursor=False)
-                        if name not in existing:obs.call('CreateInput',sceneName='Live rehearsal',inputName=name,inputKind='screen_capture',inputSettings=settings,sceneItemEnabled=True)
+                        name=meter_source
+                        settings=dict(window=choices[0]['itemValue'],**(dict(cursor=False,method=2) if on_windows else dict(type=1,show_cursor=False)))
+                        if name not in existing:obs.call('CreateInput',sceneName='Live rehearsal',inputName=name,inputKind='window_capture' if on_windows else 'screen_capture',inputSettings=settings,sceneItemEnabled=True)
                         else:obs.call('SetInputSettings',inputName=name,inputSettings=settings,overlay=True)
-                        obs.call('SetInputMute',inputName=name,inputMuted=True)
-                        obs.call('SetInputAudioTracks',inputName=name,inputAudioTracks={str(t):False for t in range(1,7)})
+                        if not on_windows:
+                            obs.call('SetInputMute',inputName=name,inputMuted=True)
+                            obs.call('SetInputAudioTracks',inputName=name,inputAudioTracks={str(t):False for t in range(1,7)})
                         item=obs.call('GetSceneItemId',sceneName='Live rehearsal',sourceName=name)['sceneItemId']
                         obs.call('SetSceneItemEnabled',sceneName='Live rehearsal',sceneItemId=item,sceneItemEnabled=True)
                         obs.call('SetSceneItemTransform',sceneName='Live rehearsal',sceneItemId=item,sceneItemTransform=dict(boundsType='OBS_BOUNDS_SCALE_INNER',boundsWidth=480,boundsHeight=1020,positionX=1440,positionY=0))
                     deadline=time.monotonic()+10
-                    names=['Native rehearsal screen']+(['MIDI logger and BlackHole meters'] if native else [])
+                    names=['Native rehearsal screen']+([meter_source] if native or on_windows else [])
                     while True:
                         sizes=[obs.call('GetSceneItemTransform',sceneName='Live rehearsal',sceneItemId=obs.call('GetSceneItemId',sceneName='Live rehearsal',sourceName=n)['sceneItemId'])['sceneItemTransform']['sourceWidth'] for n in names]
                         if all(s>0 for s in sizes):break
@@ -170,8 +188,10 @@ def main():
                     size=recording.stat().st_size if recording.exists() else 0
                     stable=stable+1 if size==previous and size>0 else 0
                     previous=size;time.sleep(.5)
-            stop_native();(out/'stop-capture').touch();capture.wait(timeout=25)
+            stop_native();(out/'stop-capture').touch();capture_result=capture.wait(timeout=25)
+            if capture_result!=0:raise RuntimeError('Recorder failed; see capture-process.log')
             analyze=[sys.executable,str(ROOT/'tools/demo/analyze_evidence.py'),str(out),'--project',str(demos/project)]
+            if args.virtual_device:analyze+=['--virtual-device']
             if recording:analyze+=['--obs',str(recording)]
             analyzed=subprocess.run(analyze).returncode
             results.append(dict(scenario=scenario,runner_exit=result,analysis_exit=analyzed))
@@ -186,7 +206,7 @@ def main():
             if capture.poll() is None:capture.wait(timeout=25)
             capture_log.close()
     report=dict(passed=all(r['runner_exit']==0 and r['analysis_exit']==0 for r in results),
-        backend='software mixer; hardware audio unverified' if args.software else 'BlackHole CoreAudio loopback',results=results)
+        backend='software mixer; hardware audio unverified' if args.software else ('Windows ASIO device loopback' if sys.platform=='win32' else 'BlackHole CoreAudio loopback'),virtual_device=args.virtual_device,results=results)
     (args.output/'validation-summary.json').write_text(json.dumps(report,indent=2)+'\n')
     print(json.dumps(report,indent=2));raise SystemExit(0 if report['passed'] else 1)
 

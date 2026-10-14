@@ -15,6 +15,7 @@ def main():
     ap.add_argument('directory',type=Path)
     ap.add_argument('--project',required=True,type=Path)
     ap.add_argument('--obs',type=Path)
+    ap.add_argument('--virtual-device',action='store_true',help='Device loopback without a physical interface')
     args=ap.parse_args();root=args.directory
     summary=json.loads((root/'runner-summary.json').read_text())
     software=summary.get('backend','').startswith('software')
@@ -41,7 +42,9 @@ def main():
             check(f'{marker["id"]} received after Continue only',-.01<=delta<.25,delay_seconds=delta)
     def save_result():
         result=dict(passed=all(c['passed'] for c in checks),scenario=summary['scenario'],
-                    backend=summary.get('backend'),hardware_audio_verified=all(c['passed'] for c in checks) and not software and not midi_only,checks=checks)
+                    backend=summary.get('backend'),hardware_audio_verified=all(c['passed'] for c in checks) and not software and not midi_only and not args.virtual_device,
+                    device_loopback_verified=all(c['passed'] for c in checks) and not software and not midi_only,
+                    virtual_device=args.virtual_device,checks=checks)
         (root/'verification.json').write_text(json.dumps(result,indent=2)+'\n')
         return result
     if midi_only:
@@ -138,7 +141,7 @@ def main():
         difference=float(np.mean(np.abs(frames[0]-frames[-1]))) if usable else 0
         check('OBS video contains visible changing native editor frames',usable and all(np.std(f)>15 for f in frames) and difference>2,
               frame_standard_deviations=[float(np.std(f)) if len(f) else 0 for f in frames],first_last_difference=difference)
-        if 'native' in capture and usable:
+        if ('native' in capture or capture.get('meters_visible')) and usable:
             panels=[f.reshape(90,160,3)[:,120:,:] for f in frames]
             panel_difference=float(np.mean(np.abs(panels[0]-panels[-1])))
             check('OBS MIDI logger and live input meters are visible and changing',

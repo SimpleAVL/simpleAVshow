@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent CoreAudio input + native CoreMIDI receiver, optionally relayed to OBS.
+"""Independent native audio input + MIDI receiver, optionally relayed to OBS.
 
 Receives only. Never sends MIDI or renders show audio. 16-channel PCM WAV is the
 primary routing evidence; OBS relays are derived from these live input samples.
@@ -13,6 +13,11 @@ import subprocess
 import threading
 import time
 import wave
+import os
+import sys
+
+if sys.platform == 'win32':
+    os.environ['SD_ENABLE_ASIO'] = '1'
 
 import numpy as np
 import rtmidi
@@ -23,27 +28,42 @@ def main():
     ap=argparse.ArgumentParser()
     ap.add_argument('--output',required=True,type=Path)
     ap.add_argument('--device',default='BlackHole 16ch')
+    ap.add_argument('--midi-port',help='Existing loopMIDI input on Windows; otherwise create a virtual input')
+    ap.add_argument('--api',help='Require this PortAudio host API, e.g. ASIO')
+    ap.add_argument('--meters',action='store_true',help='Show independent live input meters and MIDI receipts')
     ap.add_argument('--obs-relay',action='store_true')
     ap.add_argument('--midi-only',action='store_true')
     ap.add_argument('--software-wav',type=Path,help='Relay a growing mixer WAV; explicitly NOT CoreAudio loopback')
     ap.add_argument('--native-pipe',type=Path,help='Receive unmodified float32 samples from the independent CoreAudio app')
     args=ap.parse_args()
     args.output.mkdir(parents=True,exist_ok=True)
-    begin=time.monotonic()
+    # MSVC steady_clock and Python perf_counter both use Windows QPC. Python
+    # 3.12 monotonic uses a different epoch, so it cannot map runner timestamps.
+    clock=time.perf_counter if sys.platform=='win32' else time.monotonic
+    begin=clock()
     log=(args.output/'midi-received.jsonl').open('w',buffering=1)
     midi=rtmidi.MidiIn(name='Lighthouse Independent Receiver')
     midi.ignore_types(sysex=False,timing=False,active_sense=False)
-    midi.open_virtual_port('Lighthouse MIDI Logger')
+    if args.midi_port:
+        candidates=[i for i,p in enumerate(midi.get_ports()) if p==args.midi_port or p.startswith(args.midi_port+' ')]
+        if len(candidates)!=1:raise RuntimeError(f'MIDI input is not unique: {midi.get_ports()}')
+        midi.open_port(candidates[0])
+    else:
+        midi.open_virtual_port('Lighthouse MIDI Logger')
+    messages=queue.Queue()
+    peaks=np.zeros(16)
     def receive(event, _):
         message, delta=event
-        log.write(json.dumps(dict(wall_seconds=time.monotonic()-begin,monotonic=time.monotonic(),
-            bytes=message,hex=' '.join(f'{b:02X}' for b in message),delta=delta))+'\n')
+        receipt=dict(wall_seconds=clock()-begin,monotonic=clock(),
+            bytes=message,hex=' '.join(f'{b:02X}' for b in message),delta=delta)
+        log.write(json.dumps(receipt)+'\n')
+        if args.meters:messages.put(receipt)
     midi.set_callback(receive)
     stopping=threading.Event()
     signal.signal(signal.SIGINT,lambda *_:stopping.set())
     signal.signal(signal.SIGTERM,lambda *_:stopping.set())
     block_queue=queue.Queue(maxsize=3000)
-    stats=dict(input_overflows=0,queue_overflows=0,frames=0,relay_errors=[],start_monotonic=begin)
+    stats=dict(input_overflows=0,queue_overflows=0,frames=0,relay_errors=[],start_monotonic=begin,meters_visible=args.meters)
     processes=[]
     # Track 1 full mix, 2 main, 3 guide, 4 click, 5 sea, 6 effects in OBS.
     stems=[('main',[0,1]),('guide',[2,2]),('click',[3,3]),('sea',[4,5]),('effects',[6,7])]
@@ -71,7 +91,8 @@ def main():
             except (OSError,subprocess.TimeoutExpired):process.terminate()
     def audio_callback(indata,frames,timing,status):
         if 'audio_start_monotonic' not in stats:
-            stats['audio_start_monotonic']=time.monotonic()-frames/48000
+            stats['audio_start_monotonic']=clock()-frames/48000
+        if args.meters:peaks[:]=np.max(np.abs(indata),axis=0)
         if status:stats['input_overflows']+=1
         try:block_queue.put_nowait(indata.copy())
         except queue.Full:stats['queue_overflows']+=1
@@ -108,16 +129,41 @@ def main():
         tail=threading.Thread(target=follow_file);tail.start()
     elif not args.midi_only:
         devices=sd.query_devices()
-        candidates=[i for i,d in enumerate(devices) if d['name']==args.device and d['max_input_channels']>=16]
+        apis=sd.query_hostapis()
+        candidates=[i for i,d in enumerate(devices) if d['name']==args.device and d['max_input_channels']>=16
+                    and (not args.api or apis[d['hostapi']]['name']==args.api)]
         if len(candidates)!=1:raise RuntimeError(f'16-channel input unavailable: {devices}')
         stream=sd.InputStream(device=candidates[0],channels=16,samplerate=48000,blocksize=512,
                               dtype='float32',callback=audio_callback)
-        writer=threading.Thread(target=write_audio);writer.start();stream.start()
+        writer=threading.Thread(target=write_audio);stream.start();writer.start()
         stats['input_device']=dict(devices[candidates[0]])
+        stats['backend']='independent '+apis[devices[candidates[0]]['hostapi']]['name']+' input via PortAudio'
+    panel=None
+    if args.meters:
+        import tkinter as tk
+        from tkinter import ttk
+        panel=tk.Tk();panel.title('Lighthouse Windows Loopback Recorder');panel.geometry('520x950+1650+50')
+        tk.Label(panel,text='INDEPENDENT ASIO INPUT / MIDI RECEIVER\n48 kHz · 16 received channels',font=('Arial',13)).pack(pady=12)
+        bars=[];labels=[]
+        for i in range(16):
+            label=tk.Label(panel,text=f'Channel {i+1:02d}',anchor='w');label.pack(fill='x',padx=12);labels.append(label)
+            bar=ttk.Progressbar(panel,maximum=1);bar.pack(fill='x',padx=12);bars.append(bar)
+        midi_text=tk.Text(panel,height=10);midi_text.pack(fill='both',expand=True,padx=12,pady=12)
+        counter=tk.Label(panel);counter.pack()
+        panel.protocol('WM_DELETE_WINDOW',stopping.set)
+        panel.update()
     (args.output/'capture-ready.json').write_text(json.dumps(stats,indent=2)+'\n')
-    print('READY: independent MIDI receiver'+(' and 16-channel CoreAudio capture' if stream else ''),flush=True)
+    print('READY: independent MIDI receiver'+(' and 16-channel '+stats['backend'] if stream else ''),flush=True)
     try:
         while not stopping.wait(.2):
+            if panel:
+                for i,(label,bar) in enumerate(zip(labels,bars)):
+                    level=float(peaks[i]);bar['value']=level
+                    label['text']=f'Channel {i+1:02d}: {20*np.log10(level):.1f} dBFS' if level>0 else f'Channel {i+1:02d}: silence'
+                while not messages.empty():
+                    receipt=messages.get_nowait();midi_text.insert('end',f'{receipt["wall_seconds"]:7.2f}  {receipt["hex"]}\n');midi_text.see('end')
+                counter['text']=f'{stats["frames"]} frames · drops {stats["input_overflows"]}/{stats["queue_overflows"]}'
+                panel.update()
             if (args.output/'stop-capture').exists():break
     finally:
         stopping.set()
@@ -126,7 +172,7 @@ def main():
         if writer:block_queue.put(None);writer.join(timeout=20)
         midi.cancel_callback();midi.close_port();log.close()
         stats['duration_seconds']=stats['frames']/48000
-        stats['wall_seconds']=time.monotonic()-begin
+        stats['wall_seconds']=clock()-begin
         if args.native_pipe:
             native_path=args.output/'native-capture-summary.json'
             if not native_path.exists():
@@ -141,6 +187,7 @@ def main():
             stats['queue_overflows']+=native['queue_overflows']
             stats['write_failed']=native['write_failed']
         (args.output/'capture-summary.json').write_text(json.dumps(stats,indent=2)+'\n')
+        if panel:panel.destroy()
 
 
 if __name__=='__main__':main()
