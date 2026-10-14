@@ -343,7 +343,7 @@ int main() {
         {"cached envelope segments and pan gains match per-sample evaluation", [] {
             auto p = show(); p->duration = 4000; p->clips[0].duration = 4000; p->clips[0].loop = true;
             auto source = audio({.5f}); source->mono = true; p->clips[0].audio = source;
-            p->clips[0].volume.points = {{100, 0}, {1100, 1}, {1101, .2}, {1150, .25}, {3000, .75}};
+            p->clips[0].volume.points = {{100, 0, CurveShape::Curve, .6}, {1100, 1, CurveShape::Hold}, {1101, .2, CurveShape::SCurve, -.4}, {1150, .25, CurveShape::SCurve, .8}, {3000, .75}};
             p->clips[0].balance.points = {{0, -1}, {2000, 1}, {2500, -.5}};
             const auto expected = [&](Frame local) {
                 const double pan = std::clamp(p->clips[0].balance.at(local, 0), -1., 1.), gain = .5 * p->clips[0].volume.at(local, 1);
@@ -393,6 +393,16 @@ int main() {
         }},
         {"envelope interpolation follows exact frame position", [] {
             Envelope e{{{10, .2}, {20, .8}}}; near(e.at(0, 1), .2, "before first key"); near(e.at(15, 1), .5, "linear middle"); near(e.at(30, 1), .8, "after last key");
+        }},
+        {"segment shapes hold, bend and ease between keyframes", [] {
+            Envelope e{{{0, 0, CurveShape::Hold}, {100, 1, CurveShape::Curve, 1}, {200, 0, CurveShape::Curve, -1}, {300, 1, CurveShape::SCurve, 1}, {400, 0}}};
+            near(e.at(99, 1), 0, "hold keeps the value until the next key"); near(e.at(100, 1), 1, "hold reaches the next key");
+            near(e.at(150, 1), std::pow(.5, 8), "positive bend moves early"); near(e.at(250, 1), 1 - std::pow(.5, .125), "negative bend moves late");
+            near(e.at(325, 1), 1 - .5 * std::pow(.5, 8), "s-curve eases out of the key"); near(e.at(350, 1), .5, "s-curve crosses the midpoint");
+            near(e.at(375, 1), .5 * std::pow(.5, 8), "s-curve eases into the key");
+            for (auto shape : {CurveShape::Curve, CurveShape::SCurve}) {
+                Envelope straight{{{0, 0, shape, 0}, {10, 1}}}; near(straight.at(3, 1), .3, "zero bend is linear");
+            }
         }}
     };
     for (const auto& [name, test] : tests) {

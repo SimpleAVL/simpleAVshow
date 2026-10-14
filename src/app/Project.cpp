@@ -28,10 +28,10 @@ void retime(Clip& clip, Frame start, Frame duration, Frame offset) {
     if (offset - clip.offset == shift && shift != 0) for (int property = 0; property < 6; ++property) {
         auto* e = envelope(clip, property);
         if (e->points.empty()) continue;
-        const double atTrim = e->at(shift, propertyValue(clip, property));
+        Keyframe atTrim = cutPoint(*e, shift, propertyValue(clip, property)); atTrim.time = 0;
         for (auto& point : e->points) point.time -= shift;
         std::erase_if(e->points, [](const Keyframe& point) { return point.time < 0; });
-        if (e->points.empty() || e->points.front().time > 0) e->points.insert(e->points.begin(), {0, atTrim});
+        if (e->points.empty() || e->points.front().time > 0) e->points.insert(e->points.begin(), atTrim);
     }
     clip.start = start; clip.duration = duration; clip.offset = offset;
 }
@@ -56,6 +56,19 @@ const Envelope* envelope(const Clip& clip, int property) { return envelope(const
 double propertyValue(const Clip& clip, int property) {
     switch (property) { case 0: return clip.gain; case 1: return clip.pan; case 2: return clip.x;
         case 3: return clip.y; case 4: return clip.scale; default: return clip.opacity; }
+}
+std::pair<double, double> propertyRange(int property) {
+    switch (property) { case 0: return {0, 4}; case 1: return {-1, 1}; case 2: case 3: return {-2, 2};
+        case 4: return {.01, 8}; default: return {0, 1}; }
+}
+Keyframe cutPoint(const Envelope& e, Frame time, double fallback) {
+    Keyframe point{time, e.at(time, fallback)};
+    const auto right = std::upper_bound(e.points.begin(), e.points.end(), time, [](Frame t, const Keyframe& k) { return t < k.time; });
+    if (right != e.points.begin() && right != e.points.end()) { point.shape = (right - 1)->shape; point.bend = (right - 1)->bend; }
+    return point;
+}
+QString shapeName(CurveShape shape) {
+    switch (shape) { case CurveShape::Hold: return "hold"; case CurveShape::Curve: return "curve"; case CurveShape::SCurve: return "scurve"; default: return "linear"; }
 }
 Project newProject() {
     Project p;
@@ -97,7 +110,7 @@ Project demoProject() {
     };
     Clip ambience; ambience.id = newId().toStdString(); ambience.track = 3; ambience.assetId = tone("demo-ambience", "Ambient bed (generated)", 8, false);
     ambience.duration = frames(38); ambience.loop = true;
-    ambience.volume.points = {{0, 0}, {frames(2), 1}, {frames(12), 1}, {frames(16), 0}};
+    ambience.volume.points = {{0, 0, CurveShape::SCurve, .5}, {frames(2), 1}, {frames(12), 1, CurveShape::Curve, .5}, {frames(16), 0}};
     p.show.clips.push_back(ambience);
     Clip click; click.id = newId().toStdString(); click.track = 5; click.assetId = tone("demo-click", "Click · 120 BPM (generated)", 20, true);
     click.start = frames(18); click.duration = frames(20); p.show.clips.push_back(click);
@@ -126,8 +139,8 @@ void validate(const Project& p) {
     auto curve = [&](const Envelope& e, double min, double max) {
         Frame previous = -1;
         for (const auto& point : e.points) {
-            if (point.time < 0 || point.time > maxFrame || point.time <= previous || !std::isfinite(point.value) || point.value < min || point.value > max)
-                fail("Invalid automation keyframe");
+            if (point.time < 0 || point.time > maxFrame || point.time <= previous || !std::isfinite(point.value) || point.value < min || point.value > max ||
+                !std::isfinite(point.bend) || std::abs(point.bend) > 1) fail("Invalid automation keyframe");
             previous = point.time;
         }
     };
@@ -147,7 +160,7 @@ void validate(const Project& p) {
             !std::isfinite(c.x) || std::abs(c.x) > 2 || !std::isfinite(c.y) || std::abs(c.y) > 2 ||
             !std::isfinite(c.scale) || c.scale < .01 || c.scale > 8 || !std::isfinite(c.opacity) || c.opacity < 0 || c.opacity > 1)
             fail("Invalid clip transformation");
-        curve(c.volume, 0, 4); curve(c.balance, -1, 1); curve(c.positionX, -2, 2); curve(c.positionY, -2, 2); curve(c.size, .01, 8); curve(c.alpha, 0, 1);
+        for (int property = 0; property < 6; ++property) { const auto [min, max] = propertyRange(property); curve(*envelope(c, property), min, max); }
     }
     // An async picture's linked sound must keep playing with it, or the two drift apart at the first hold.
     std::set<std::string> asyncPictures;
@@ -172,17 +185,32 @@ void validate(const Project& p) {
 }
 namespace {
 QJsonArray curveJson(const Envelope& e) {
-    QJsonArray a; for (const auto& p : e.points) a.append(QJsonArray{static_cast<double>(p.time), p.value}); return a;
+    // Straight segments keep the original [time, value] pair; shaped ones add [shape, bend].
+    QJsonArray a;
+    for (const auto& p : e.points) {
+        QJsonArray point{static_cast<double>(p.time), p.value};
+        if (p.shape != CurveShape::Linear || p.bend != 0) { point.append(shapeName(p.shape)); point.append(p.bend); }
+        a.append(point);
+    }
+    return a;
 }
 Envelope readCurve(const QJsonValue& value) {
     Envelope e;
     if (!value.isArray()) throw std::runtime_error("Automation must be an array");
     for (auto point : value.toArray()) {
         const auto a = point.toArray();
-        if (a.size() != 2 || !a[0].isDouble() || !a[1].isDouble()) throw std::runtime_error("Invalid automation data");
+        if ((a.size() != 2 && a.size() != 4) || !a[0].isDouble() || !a[1].isDouble() || (a.size() == 4 && (!a[2].isString() || !a[3].isDouble())))
+            throw std::runtime_error("Invalid automation data");
         const double t = a[0].toDouble();
         if (!std::isfinite(t) || t < 0 || t > maxFrame || std::floor(t) != t) throw std::runtime_error("Invalid keyframe time");
-        e.points.push_back({static_cast<Frame>(t), a[1].toDouble()});
+        Keyframe k{static_cast<Frame>(t), a[1].toDouble()};
+        if (a.size() == 4) {
+            const auto name = a[2].toString(); bool known = false;
+            for (auto shape : {CurveShape::Linear, CurveShape::Hold, CurveShape::Curve, CurveShape::SCurve}) if (shapeName(shape) == name) { k.shape = shape; known = true; }
+            if (!known) throw std::runtime_error("Invalid automation shape");
+            k.bend = a[3].toDouble();
+        }
+        e.points.push_back(k);
     }
     return e;
 }

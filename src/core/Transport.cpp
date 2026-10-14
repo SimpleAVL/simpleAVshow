@@ -18,9 +18,7 @@ double level(const Envelope& envelope, Frame time, double fallback, std::size_t&
     if (!holds(key) && !holds(++key)) key = static_cast<std::size_t>(std::upper_bound(p.begin(), p.end(), time,
         [](Frame t, const Keyframe& k) { return t < k.time; }) - p.begin());
     if (key == p.size()) return p.back().value;
-    const auto& a = p[key - 1]; const auto& b = p[key];
-    const double t = static_cast<double>(time - a.time) / (b.time - a.time);
-    return a.value + t * (b.value - a.value);
+    return segment(p[key - 1], p[key], time);
 }
 // An async picture clip is clocked by its video, even when the video carries sound.
 Frame sourceLength(const Clip& clip) noexcept { return clip.videoLength > 0 ? clip.videoLength : clip.audio->length(); }

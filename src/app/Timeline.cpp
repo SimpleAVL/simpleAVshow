@@ -7,6 +7,9 @@
 #include <QDropEvent>
 #include <QPainterPath>
 #include <QWheelEvent>
+#include <QApplication>
+#include <QContextMenuEvent>
+#include <QMenu>
 #include <cmath>
 #include <limits>
 
@@ -84,10 +87,53 @@ void Timeline::refresh() {
     verticalScrollBar()->setRange(0, static_cast<int>(std::clamp(height, std::int64_t{0}, static_cast<std::int64_t>(std::numeric_limits<int>::max()))));
     verticalScrollBar()->setPageStep(std::max(1, viewport()->height() - ruler)); autoScroll_ = was;
     playhead_ = c_.position(); drawnState_ = c_.transport.state();
+    if (curveClip_ >= 0 && static_cast<std::size_t>(curveClip_) >= c_.project.show.clips.size()) { curveDrag_ = CurveDrag::None; curveClip_ = -1; dragging_ = false; }
     selectedTrack = std::clamp(selectedTrack, 0, static_cast<int>(c_.project.show.tracks.size()) - 1);
     if (!selectedClip.isEmpty() && std::none_of(c_.project.show.clips.begin(), c_.project.show.clips.end(), [this](const Clip& clip) { return clip.id == selectedClip.toStdString(); })) selectedClip.clear();
     if (!selectedMarker.isEmpty() && std::none_of(c_.project.show.markers.begin(), c_.project.show.markers.end(), [this](const Marker& m) { return m.id == selectedMarker.toStdString(); })) selectedMarker.clear();
     viewport()->update();
+}
+void Timeline::setCurveProperty(int property) { if (property != curveProperty_) { curveProperty_ = property; viewport()->update(); } }
+int Timeline::curvePropertyFor(const Clip& clip) const {
+    const auto& clips = c_.project.show.clips;
+    if (curveDrag_ != CurveDrag::None && curveClip_ >= 0 && static_cast<std::size_t>(curveClip_) < clips.size() && &clips[curveClip_] == &clip) return curveEdit_;
+    const bool visual = c_.project.show.tracks[clip.track].visual;
+    if (clip.id == selectedClip.toStdString() && curveProperty_ >= 0 && (curveProperty_ >= 2) == visual) return curveProperty_;
+    return visual ? 5 : 0;
+}
+std::pair<double, double> Timeline::curveRange(const Clip& clip, int property) const {
+    auto range = propertyRange(property);
+    // Volume and scale show zero to unity, extended to fit larger values.
+    if (property == 0 || property == 4) {
+        range = {0, std::max(1., propertyValue(clip, property))};
+        for (const auto& k : envelope(clip, property)->points) range.second = std::max(range.second, k.value);
+    }
+    return range;
+}
+double Timeline::curveY(const QRectF& band, double low, double high, double value) const {
+    return band.bottom() - (value - low) / (high - low) * band.height();
+}
+Timeline::CurveHit Timeline::curveHit(const Clip& clip, QPointF pos) const {
+    CurveHit hit; const QRectF rect = clipRect(clip); if (!rect.contains(pos)) return hit;
+    const int property = curvePropertyFor(clip); const auto& points = envelope(clip, property)->points;
+    const auto [low, high] = curveRange(clip, property); const QRectF band = curveBand(rect);
+    double best = 7;
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        const double d = std::hypot(rect.left() + seconds(points[i].time) * zoom_ - pos.x(), curveY(band, low, high, points[i].value) - pos.y());
+        if (d < best) { best = d; hit.point = static_cast<int>(i); }
+    }
+    if (hit.point >= 0) return hit;
+    const Frame local = frames((pos.x() - rect.left()) / zoom_);
+    hit.segment = static_cast<int>(std::upper_bound(points.begin(), points.end(), local, [](Frame t, const Keyframe& k) { return t < k.time; }) - points.begin()) - 1;
+    hit.line = std::abs(curveY(band, low, high, envelope(clip, property)->at(local, propertyValue(clip, property))) - pos.y()) <= 5;
+    return hit;
+}
+int Timeline::clipAt(QPointF pos) const {
+    for (int i = static_cast<int>(c_.project.show.clips.size()) - 1; i >= 0; --i) if (clipRect(c_.project.show.clips[i]).contains(pos)) return i;
+    return -1;
+}
+void Timeline::commitCurve(const std::string& id, int property, const Envelope& curve) {
+    c_.edit([=](Project& p) { for (auto& c : p.show.clips) if (c.id == id) *envelope(c, property) = curve; });
 }
 void Timeline::resizeEvent(QResizeEvent* event) { QAbstractScrollArea::resizeEvent(event); refresh(); }
 double Timeline::xAt(Frame t) const { return header + seconds(t) * zoom_ - horizontalScrollBar()->value() * scrollScale_; }
@@ -213,16 +259,45 @@ void Timeline::paintEvent(QPaintEvent* event) {
                 p.drawLine(QPointF(x, rect.bottom() - 14 - height), QPointF(x, rect.bottom() - 14 + height));
             }
         }
-        const auto& curve = track.visual ? clip.alpha : clip.volume;
-        if (!curve.points.empty()) {
-            p.setPen(QPen(QColor("#e7c982"), 1.5)); QPainterPath path;
-            const double maximum = track.visual ? 1 : std::max(1., std::max_element(curve.points.begin(), curve.points.end(), [](const Keyframe& a, const Keyframe& b) { return a.value < b.value; })->value);
-            for (std::size_t i = 0; i < curve.points.size(); ++i) {
-                const QPointF point(rect.left() + seconds(curve.points[i].time) * zoom_, rect.bottom() - 4 - curve.points[i].value / maximum * 20);
-                if (i == 0) path.moveTo(point); else path.lineTo(point);
-                p.setBrush(QColor("#e7c982")); p.drawEllipse(point, 2.5, 2.5);
+        const int property = curvePropertyFor(clip);
+        const bool editing = curveDrag_ != CurveDrag::None && curveClip_ == static_cast<int>(index);
+        const auto& curve = editing ? curve_ : *envelope(clip, property);
+        if (!curve.points.empty() || (selected && c_.canEdit(false))) {
+            const auto [low, high] = editing ? std::pair{curveLow_, curveHigh_} : curveRange(clip, property);
+            const QRectF band = curveBand(rect);
+            const auto x = [&](Frame t) { return rect.left() + seconds(t) * zoom_; };
+            const auto y = [&](double v) { return curveY(band, low, high, v); };
+            const double left = std::max<double>(header, area.left()) - 2, right = std::min<double>(viewport()->width(), area.right()) + 2;
+            const auto& points = curve.points; QPainterPath path;
+            if (points.empty()) {
+                // The base value, so a first keyframe can be clicked onto the line.
+                p.setPen(QPen(QColor(231, 201, 130, 120), 1, Qt::DashLine));
+                p.drawLine(QPointF(rect.left(), y(propertyValue(clip, property))), QPointF(rect.right(), y(propertyValue(clip, property))));
+            } else {
+                path.moveTo(std::min(rect.left(), x(points.front().time)), y(points.front().value)); path.lineTo(x(points.front().time), y(points.front().value));
+                for (std::size_t i = 0; i + 1 < points.size(); ++i) {
+                    const auto& a = points[i]; const auto& b = points[i + 1]; const double xa = x(a.time), xb = x(b.time);
+                    if (a.shape == CurveShape::Hold) path.lineTo(xb, y(a.value));
+                    else if (a.shape != CurveShape::Linear && xb > left && xa < right)
+                        for (double px = std::max(xa, left); px < std::min(xb, right); px += 2) path.lineTo(px, y(segment(a, b, a.time + frames((px - xa) / zoom_))));
+                    path.lineTo(xb, y(b.value));
+                }
+                path.lineTo(std::max(rect.right(), x(points.back().time)), y(points.back().value));
+                p.setPen(QPen(QColor("#e7c982"), 1.5)); p.setBrush(Qt::NoBrush); p.drawPath(path);
+                p.setPen(selected ? QPen(QColor("#1b2330"), 1) : Qt::NoPen);
+                for (std::size_t i = 0; i < points.size(); ++i) {
+                    const bool active = editing && curvePoint_ == static_cast<int>(i);
+                    p.setBrush(active ? QColor("#fff1cc") : QColor("#e7c982")); p.drawEllipse(QPointF(x(points[i].time), y(points[i].value)), selected ? 3.5 : 2.5, selected ? 3.5 : 2.5);
+                }
+                if (editing && dragging_ && curvePoint_ >= 0 && static_cast<std::size_t>(curvePoint_) < points.size()) {
+                    const auto& k = points[curvePoint_];
+                    const QString label = curveDrag_ == CurveDrag::Bend ? QString("bend %1").arg(k.bend, 0, 'f', 2)
+                        : QString("%1 s · %2").arg(seconds(k.time), 0, 'f', 2).arg(k.value, 0, 'f', 2);
+                    QFont small = p.font(); small.setPointSize(9); small.setBold(false); p.setFont(small); p.setPen(QColor("#fff1cc"));
+                    const double lx = std::min(x(k.time) + 8, rect.right() - 110);
+                    p.drawText(QRectF(lx, rect.top() + 2, 110, 16), Qt::AlignRight | Qt::AlignVCenter, label);
+                }
             }
-            p.setBrush(Qt::NoBrush); p.drawPath(path);
         }
         p.restore();
     }
@@ -289,6 +364,29 @@ void Timeline::mousePressEvent(QMouseEvent* event) {
         }
     }
     if (press_.y() < ruler) { c_.seek(snap(dragTime_)); return; }
+    // Keyframes: grab a point on any clip; on the selected clip, click its line to add one or Alt-drag a segment to bend it.
+    if (const int index = clipAt(press_); index >= 0 && c_.canEdit(false)) {
+        const auto hit = curveHit(c_.project.show.clips[index], press_);
+        const bool selected = c_.project.show.clips[index].id == selectedClip.toStdString();
+        if (hit.point >= 0 || (selected && hit.line)) {
+            const int property = curvePropertyFor(c_.project.show.clips[index]);
+            if (!selected) { selectClip(QString::fromStdString(c_.project.show.clips[index].id)); emit curvePropertyRequested(property); }
+            const auto& clip = c_.project.show.clips[index];
+            curveClip_ = index; curveEdit_ = property; curve_ = *envelope(clip, property); std::tie(curveLow_, curveHigh_) = curveRange(clip, property);
+            curveInserted_ = false; curveDrag_ = CurveDrag::Point; auto& points = curve_.points;
+            if (hit.point >= 0) curvePoint_ = hit.point;
+            else if ((event->modifiers() & Qt::AltModifier) && hit.segment >= 0 && static_cast<std::size_t>(hit.segment) + 1 < points.size()) {
+                auto& k = points[hit.segment]; if (k.shape == CurveShape::Linear || k.shape == CurveShape::Hold) k.shape = CurveShape::Curve;
+                curveDrag_ = CurveDrag::Bend; curvePoint_ = hit.segment; curveBend_ = k.bend;
+            } else {
+                const Frame local = std::clamp(snap(dragTime_) - clip.start, Frame{0}, clip.duration);
+                const auto at = std::lower_bound(points.begin(), points.end(), local, [](const Keyframe& k, Frame t) { return k.time < t; });
+                curvePoint_ = static_cast<int>(at - points.begin());
+                if (at == points.end() || at->time != local) { points.insert(at, cutPoint(curve_, local, propertyValue(clip, property))); curveInserted_ = true; }
+            }
+            curveOrigin_ = points[curvePoint_].time; viewport()->update(); return;
+        }
+    }
     for (int i = static_cast<int>(c_.project.show.clips.size()) - 1; i >= 0; --i) {
         const auto& clip = c_.project.show.clips[i]; const QRectF rect = clipRect(clip);
         if (!rect.contains(press_)) continue;
@@ -303,6 +401,38 @@ void Timeline::mousePressEvent(QMouseEvent* event) {
     selectedClip.clear(); selectedMarker.clear(); emit selectionChanged(); c_.seek(snap(dragTime_));
 }
 void Timeline::mouseMoveEvent(QMouseEvent* event) {
+    const QPointF pos = event->position();
+    if (curveDrag_ != CurveDrag::None && (event->buttons() & Qt::LeftButton)) {
+        if ((pos.toPoint() - press_).manhattanLength() < 3 && !dragging_) return;
+        if (!c_.canEdit(false) || static_cast<std::size_t>(curveClip_) >= c_.project.show.clips.size()) return;
+        dragging_ = true; const auto& clip = c_.project.show.clips[curveClip_]; auto& points = curve_.points; auto& k = points[curvePoint_];
+        if (curveDrag_ == CurveDrag::Bend) {
+            // Dragging up bows the segment upwards, whichever way it runs.
+            const double direction = points[curvePoint_ + 1].value < k.value ? -1 : 1;
+            k.bend = std::clamp(curveBend_ + (press_.y() - pos.y()) / 60. * direction, -1., 1.);
+        } else {
+            const Frame moved = timeAt(pos.x()) - dragTime_;
+            if (!(event->modifiers() & Qt::ShiftModifier) && moved != 0) {
+                const Frame low = curvePoint_ > 0 ? points[curvePoint_ - 1].time + 1 : 0;
+                const Frame high = static_cast<std::size_t>(curvePoint_) + 1 < points.size() ? points[curvePoint_ + 1].time - 1 : clip.duration;
+                k.time = std::clamp(snap(clip.start + curveOrigin_ + moved) - clip.start, low, std::max(low, high));
+            } else if (event->modifiers() & Qt::ShiftModifier) k.time = curveOrigin_;
+            const auto [minimum, maximum] = propertyRange(curveEdit_); const QRectF band = curveBand(clipRect(clip));
+            k.value = std::clamp(curveLow_ + (band.bottom() - pos.y()) / band.height() * (curveHigh_ - curveLow_), minimum, maximum);
+        }
+        viewport()->update(); return;
+    }
+    if (!event->buttons()) {
+        // Show what a press would grab.
+        Qt::CursorShape shape = Qt::ArrowCursor;
+        if (const int index = clipAt(pos); index >= 0 && c_.canEdit(false)) {
+            const auto& clip = c_.project.show.clips[index]; const auto hit = curveHit(clip, pos);
+            if (hit.point >= 0) shape = Qt::SizeAllCursor;
+            else if (hit.line && clip.id == selectedClip.toStdString()) shape = event->modifiers() & Qt::AltModifier ? Qt::SizeVerCursor : Qt::CrossCursor;
+        }
+        if (viewport()->cursor().shape() != shape) viewport()->setCursor(shape);
+        return;
+    }
     if ((event->buttons() & Qt::LeftButton) && dragMarker_ >= 0 && c_.canEdit(false)) {
         if ((event->position().toPoint() - press_).manhattanLength() < 4 && !dragging_) return;
         dragging_ = true; const auto& marker = c_.project.show.markers[dragMarker_];
@@ -331,6 +461,14 @@ void Timeline::mouseMoveEvent(QMouseEvent* event) {
     viewport()->update();
 }
 void Timeline::mouseReleaseEvent(QMouseEvent*) {
+    if (curveDrag_ != CurveDrag::None) {
+        const bool changed = (dragging_ || curveInserted_) && static_cast<std::size_t>(curveClip_) < c_.project.show.clips.size();
+        const auto id = changed ? c_.project.show.clips[curveClip_].id : std::string();
+        if (curveInserted_) { lastInsertedClip_ = id; lastInsertedTime_ = curve_.points[curvePoint_].time; inserted_.start(); }
+        curveDrag_ = CurveDrag::None; curveClip_ = -1; curvePoint_ = -1; dragging_ = false;
+        if (changed) commitCurve(id, curveEdit_, curve_);
+        viewport()->update(); return;
+    }
     if (dragging_ && dragMarker_ >= 0) {
         const int index = dragMarker_; const Frame time = dragStart_; dragging_ = false; dragMarker_ = -1;
         c_.edit([=](Project& p) { p.show.markers[index].time = time; }); emit selectionChanged();
@@ -345,7 +483,46 @@ void Timeline::mouseReleaseEvent(QMouseEvent*) {
     }
     dragging_ = false; dragClip_ = -1; dragMarker_ = -1; viewport()->update();
 }
-void Timeline::mouseDoubleClickEvent(QMouseEvent* event) { if (event->position().x() >= header && !c_.showMode) c_.seek(snap(timeAt(event->position().x()))); }
+void Timeline::mouseDoubleClickEvent(QMouseEvent* event) {
+    if (const int index = clipAt(event->position()); index >= 0 && event->button() == Qt::LeftButton && c_.canEdit(false)) {
+        const auto& clip = c_.project.show.clips[index];
+        if (const auto hit = curveHit(clip, event->position()); hit.point >= 0) {
+            const int property = curvePropertyFor(clip); Envelope curve = *envelope(clip, property);
+            // The first click of a double-click on the line added this point; keep it.
+            const bool justAdded = clip.id == lastInsertedClip_ && curve.points[hit.point].time == lastInsertedTime_ &&
+                inserted_.isValid() && !inserted_.hasExpired(QApplication::doubleClickInterval());
+            lastInsertedClip_.clear();
+            if (!justAdded) { curve.points.erase(curve.points.begin() + hit.point); commitCurve(clip.id, property, curve); }
+            return;
+        }
+    }
+    if (event->position().x() >= header && !c_.showMode) c_.seek(snap(timeAt(event->position().x())));
+}
+void Timeline::contextMenuEvent(QContextMenuEvent* event) {
+    const int index = clipAt(event->pos()); if (index < 0 || !c_.canEdit(false)) return;
+    const auto& clip = c_.project.show.clips[index]; const auto hit = curveHit(clip, event->pos());
+    if (hit.point < 0 && !(hit.line && clip.id == selectedClip.toStdString())) return;
+    const auto id = clip.id; const int property = curvePropertyFor(clip); Envelope curve = *envelope(clip, property);
+    const int segment = hit.point >= 0 ? hit.point : hit.segment;
+    QMenu menu(this); QAction* remove = hit.point >= 0 ? menu.addAction("Delete point") : nullptr;
+    std::vector<std::pair<QAction*, CurveShape>> shapes; QAction* straighten = nullptr;
+    if (segment >= 0 && static_cast<std::size_t>(segment) + 1 < curve.points.size()) {
+        const auto& k = curve.points[segment]; menu.addSection("Segment to next point");
+        for (const auto& [shape, name] : {std::pair{CurveShape::Linear, "Linear"}, {CurveShape::Hold, "Hold"}, {CurveShape::Curve, "Curve"}, {CurveShape::SCurve, "S-curve"}}) {
+            auto* action = menu.addAction(name); action->setCheckable(true); action->setChecked(k.shape == shape); shapes.push_back({action, shape});
+        }
+        if (k.bend != 0 && (k.shape == CurveShape::Curve || k.shape == CurveShape::SCurve)) straighten = menu.addAction("Reset bend");
+    }
+    if (menu.isEmpty()) return;
+    auto* chosen = menu.exec(event->globalPos()); if (!chosen || !c_.canEdit(false)) return;
+    if (chosen == remove) curve.points.erase(curve.points.begin() + hit.point);
+    else if (chosen == straighten) curve.points[segment].bend = 0;
+    else for (const auto& [action, shape] : shapes) if (action == chosen) {
+        auto& k = curve.points[segment]; k.shape = shape;
+        if (shape == CurveShape::Linear || shape == CurveShape::Hold) k.bend = 0; else if (k.bend == 0) k.bend = .5;
+    }
+    commitCurve(id, property, curve);
+}
 void Timeline::dragEnterEvent(QDragEnterEvent* event) { if (event->mimeData()->hasFormat("application/x-simpleavshow-asset") && c_.canEdit(false)) event->acceptProposedAction(); }
 void Timeline::dragMoveEvent(QDragMoveEvent* event) { if (event->mimeData()->hasFormat("application/x-simpleavshow-asset") && c_.canEdit(false)) event->acceptProposedAction(); }
 void Timeline::dropEvent(QDropEvent* event) {
