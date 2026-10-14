@@ -96,6 +96,8 @@ struct Clip {
     double gain = 1., pan = 0., x = 0., y = 0., scale = 1., opacity = 1.;
     Envelope volume, balance, positionX, positionY, size, alpha;
     std::shared_ptr<const AudioData> audio;
+    // Runtime only, set when arming picture clips: a video's source length, which clocks an async picture clip.
+    Frame videoLength = 0;
     Frame end() const noexcept { return start + duration; }
     bool contains(Frame time) const noexcept { return time >= start && time < end(); }
 };

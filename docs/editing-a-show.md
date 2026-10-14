@@ -20,16 +20,16 @@ To create a clip, drag an asset onto a compatible track at the desired time. Alt
 | --- | --- |
 | Still image or video | Picture layer. |
 | Audio file | Audio or async audio track. |
-| Video with prepared embedded audio | Picture layer creates linked picture/sound when a synchronous audio track exists; placing it on an audio track uses its audio. |
+| Video with prepared embedded audio | Picture layer creates linked picture/sound when a synchronous audio track exists (an async audio track for an async picture layer); placing it on an audio track uses its audio. |
 | Text | Created directly with **+ Text**, rather than imported into Media. |
 
 The app can extend the project to accommodate a newly placed asset. Picture clips cannot overlap on the same layer; use another layer for simultaneous pictures or crossfades. Audio clips can overlap and their levels add.
 
 ## Select and manage tracks
 
-Click a track header to show its inspector. Rename it in **Name**. **Mute / hide track** silences audio or hides a picture layer. Audio tracks also have routing, gain, pan, and **Keep playing through pauses / holds**; see [chapter 3](audio-and-outputs.md).
+Click a track header to show its inspector. Rename it in **Name**. **Mute / hide track** silences audio or hides a picture layer. **Keep playing through pauses / holds** makes the track async. Audio tracks also have routing, gain, and pan; see [chapter 3](audio-and-outputs.md).
 
-Use **Project → Add track → Picture layer / Audio / Async audio** to add a track. New audio tracks route to outputs 1/2 by default, so route them deliberately before a show.
+Use **Project → Add track → Picture layer / Async picture layer / Audio / Async audio** to add a track. New audio tracks route to outputs 1/2 by default, so route them deliberately before a show.
 
 Picture tracks compose in timeline order: Background is underneath later picture tracks. To blend two pictures, put them on separate layers and automate the upper clip's opacity.
 

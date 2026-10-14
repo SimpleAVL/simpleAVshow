@@ -27,6 +27,11 @@ public:
     State state() const noexcept { return publishedState_.load(std::memory_order_acquire); }
     int heldMarker() const noexcept { return publishedMarker_.load(); }
     int asyncVoices() const noexcept { return publishedVoices_.load(); }
+    // An async picture clip's next source frame, or one of these states.
+    static constexpr Frame dormantSource = -1, finishedSource = -2;
+    Frame asyncSource(std::size_t clip) const noexcept {
+        return clip < publishedSourceCount_ ? publishedSources_[clip].load(std::memory_order_acquire) : dormantSource;
+    }
     float peak() const noexcept { return publishedPeak_.load(); }
     bool clipped() const noexcept { return clipped_.load(); }
     bool eventOverflow() const noexcept { return overflow_.load(); }
@@ -49,7 +54,9 @@ private:
     std::shared_ptr<const Show> show_;
     std::vector<Voice> voices_;
     std::vector<Release> releases_;
-    std::vector<std::size_t> starts_, markers_, active_, releasing_;
+    std::vector<std::size_t> starts_, markers_, active_, releasing_, pictures_;
+    std::unique_ptr<std::atomic<Frame>[]> publishedSources_;
+    std::size_t publishedSourceCount_ = 0;
     std::size_t nextStart_ = 0, nextMarker_ = 0;
     std::vector<std::unique_ptr<AudioBuffer>> buffers_;
     std::thread audioWorker_;

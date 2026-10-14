@@ -58,7 +58,7 @@ void Controller::discardAutosave() { QFile::remove(autosavePath()); }
 bool Controller::canEdit(bool reportFailure) {
     const bool allowed = !showMode && !busy && transport.state() != State::Playing && transport.state() != State::Held &&
         transport.asyncVoices() == 0;
-    if (!allowed && reportFailure) report(showMode ? "Leave show mode to edit" : "Use Stop All before editing; async audio may still be playing");
+    if (!allowed && reportFailure) report(showMode ? "Leave show mode to edit" : "Use Stop All before editing; async audio or video may still be playing");
     return allowed;
 }
 bool Controller::edit(const std::function<void(Project&)>& mutation) {
@@ -77,7 +77,7 @@ void Controller::replace(Project next, QString projectPath) {
     videos_.clear(); lastPicture_ = {};
     project = std::move(next); path = std::move(projectPath); dirty = false; playbackProblem.clear();
     undo_.clear(); redo_.clear();
-    arm(0); report("Project ready. Space plays or pauses; Stop All silences async audio."); emit changed();
+    arm(0); report("Project ready. Space plays or pauses; Stop All stops async audio and video."); emit changed();
 }
 void Controller::undo() {
     if (!canEdit() || undo_.empty()) return;
@@ -95,7 +95,13 @@ void Controller::arm(Frame position) {
     const bool keep = configured_ && device.running();
     if (keep) device.pause(); else device.close();
     videos_.clear(); videoErrors_.clear(); lastPicture_ = {}; lastComposed_ = -1; lateFrames = 0;
-    armed_ = std::make_shared<Show>(project.show); transport.configure(armed_, position);
+    auto armed = std::make_shared<Show>(project.show);
+    for (auto& clip : armed->clips) {
+        if (!armed->tracks[clip.track].visual) continue;
+        const auto asset = project.assets.constFind(QString::fromStdString(clip.assetId));
+        if (asset != project.assets.cend() && asset->video && !asset->offline) clip.videoLength = frames(asset->duration);
+    }
+    armed_ = std::move(armed); transport.configure(armed_, position);
     if (keep && device.resume()) stall_.restart();
     else if (configured_) {
         QString error;
@@ -312,15 +318,24 @@ QImage Controller::compose() {
             videos_[clip.id]->imageAt(seconds(clip.offset));
         }
     }
+    // Async videos keep their own clock through pauses and holds; their pictures change while show time stands still.
+    std::vector<Frame> clocks;
+    for (std::size_t i = 0; i < project.show.clips.size(); ++i) {
+        const auto& clip = project.show.clips[i]; const auto& track = project.show.tracks[clip.track];
+        if (!track.visual || !track.async || track.muted || !clip.contains(position)) continue;
+        const Frame source = transport.asyncSource(i);
+        clocks.push_back(source < 0 ? source : static_cast<Frame>(std::floor(seconds(source) * project.fps)));
+    }
     const Frame frame = static_cast<Frame>(std::floor(seconds(position) * project.fps));
-    if (frame == lastComposed_ && !lastPicture_.isNull()) return lastPicture_;
+    if (frame == lastComposed_ && clocks == lastClocks_ && !lastPicture_.isNull()) return lastPicture_;
     QImage picture(project.width, project.height, QImage::Format_RGB32); picture.fill(Qt::black);
     QPainter painter(&picture); painter.setRenderHint(QPainter::SmoothPixmapTransform); painter.setRenderHint(QPainter::TextAntialiasing);
     bool waiting = false;
     // Track 0 is the background; successive visual tracks are composited over it.
     for (std::size_t track = 0; track < project.show.tracks.size(); ++track) {
         if (!project.show.tracks[track].visual || project.show.tracks[track].muted) continue;
-        for (const auto& c : project.show.clips) {
+        for (std::size_t index = 0; index < project.show.clips.size(); ++index) {
+            const auto& c = project.show.clips[index];
             if (c.track != static_cast<int>(track) || !c.contains(position)) continue;
             const Frame local = position - c.start;
             const double opacity = c.alpha.at(local, c.opacity);
@@ -340,6 +355,12 @@ QImage Controller::compose() {
                 if (a.video) {
                     double time = seconds(c.offset + local);
                     if (c.loop) time = seconds(c.offset) + std::fmod(seconds(local), std::max(.001, a.duration - seconds(c.offset)));
+                    if (project.show.tracks[track].async) {
+                        // A finished one-shot keeps its last frame until show time leaves the clip.
+                        const Frame source = transport.asyncSource(index);
+                        if (source == Transport::finishedSource) time = a.duration;
+                        else if (source >= 0) time = seconds(source);
+                    }
                     auto it = videos_.find(c.id);
                     if (it != videos_.end()) {
                         it->second->setLoop(c.loop ? seconds(c.offset) : -1, a.duration);
@@ -368,7 +389,7 @@ QImage Controller::compose() {
         if (!lastPicture_.isNull()) return lastPicture_;
         return picture;
     }
-    lastComposed_ = frame; lastPicture_ = picture; return picture;
+    lastComposed_ = frame; lastClocks_ = std::move(clocks); lastPicture_ = picture; return picture;
 }
 QString Controller::mediaDirectory(const QString& target) {
     return QFileInfo(target).absolutePath() + "/" + QFileInfo(target).completeBaseName() + ".media";

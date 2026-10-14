@@ -77,6 +77,7 @@ private:
     std::set<std::string> videoErrors_;
     QImage lastPicture_;
     Frame lastComposed_ = -1;
+    std::vector<Frame> lastClocks_;
     std::deque<Project> undo_, redo_;
     void arm(Frame position);
     void startMidiThread();

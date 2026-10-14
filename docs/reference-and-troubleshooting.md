@@ -84,7 +84,7 @@ Counters describe software events; they do not establish physical audio/video/MI
 | “A track needs more output channels” | Open enough channels on the interface or route/disconnect the offending track. Muting unused audio tracks also excludes their routes from the check. |
 | No Guide/Click sound | They start Off. Route to intended physical channels, open those channels, check mute/gain/source timing, and inspect the cabling. |
 | Stereo content loses a side on a mono feed | Exactly one connected leg sums stereo to mono. Verify the other leg is Off and check phase cancellation in the source. |
-| Sound continues after Pause or at a hold | Check **Keep playing through pauses / holds** and async count. This is expected for async sources. Stop All silences them. |
+| Sound or video continues after Pause or at a hold | Check **Keep playing through pauses / holds** and async count. This is expected for async sources. Stop All stops them. |
 | Cannot edit/save/test MIDI | Stop All, leave Show mode, and wait for media preparation. Paused async voices still lock editing. |
 | Outputs/Audience display button is disabled | Leave Show mode or wait for preparation. In edit-mode playback, Outputs opens for inspection but connection controls stay locked. |
 | Space types a space or changes a control | Move focus out of text/spin/combo/cell editors, then use Space or the transport button. |

@@ -891,6 +891,39 @@ private slots:
         for (Frame i = 0; i < frames(.05); ++i) peak = std::max(peak, std::abs(sampleAt(*reloaded.assets.first().audio, i)));
         QVERIFY(peak > .1);
     }
+    void asyncVideoKeepsPlayingThroughHolds() {
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
+        QTemporaryDir dir; const auto source = dir.filePath("change.mkv");
+        QProcess process; process.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=red:s=320x180:r=24:d=1",
+            "-vf", "drawbox=x=0:y=0:w=iw:h=ih:color=blue:t=fill:enable='gte(t,0.5)'", "-c:v", "ffv1", source});
+        QVERIFY(process.waitForFinished(15000)); QCOMPARE(process.exitCode(), 0);
+        for (const bool async : {true, false}) {
+            Project p = newProject(); p.width = 320; p.height = 240; p.show.tracks[1].async = async;
+            auto asset = loadMedia(source); QVERIFY(asset.video); p.assets.insert(asset.id, asset);
+            Clip picture; picture.id = newId().toStdString(); picture.assetId = asset.id.toStdString(); picture.track = 1; picture.duration = frames(1);
+            p.show.clips.push_back(picture); p.show.markers.push_back({newId().toStdString(), "Hold", frames(.1), true});
+            Controller c; c.replace(p);
+            QVERIFY(c.transport.command({Action::Play})); c.transport.render(nullptr, static_cast<unsigned>(frames(.75)), 0);
+            QCOMPARE(c.transport.state(), State::Held); QCOMPARE(c.position(), frames(.1));
+            QCOMPARE(c.transport.asyncVoices(), async ? 1 : 0);
+            if (async) QTRY_VERIFY_WITH_TIMEOUT(c.compose().pixelColor(160, 120).blue() > 200, 3000);
+            else QTRY_VERIFY_WITH_TIMEOUT(c.compose().pixelColor(160, 120).red() > 200, 3000);
+            c.transport.render(nullptr, static_cast<unsigned>(frames(1)), 0);
+            QCOMPARE(c.transport.asyncSource(0), async ? Transport::finishedSource : Transport::dormantSource);
+            if (async) QTRY_VERIFY_WITH_TIMEOUT(c.compose().pixelColor(160, 120).blue() > 200, 3000); // A finished one-shot keeps its last frame.
+        }
+    }
+    void asyncPictureLayersNeedAsyncLinkedSound() {
+        Project p = newProject(); p.show.tracks[1].async = true;
+        MediaAsset video; video.id = "video"; video.name = "Clip.mov"; video.video = true; video.duration = 4; video.path = "/nonexistent/clip.mov";
+        video.audio = std::make_shared<AudioData>(AudioData{std::vector<float>(static_cast<std::size_t>(frames(4)) * 2)});
+        p.assets.insert(video.id, video);
+        Clip picture; picture.id = "picture"; picture.assetId = "video"; picture.track = 1; picture.duration = frames(4); picture.link = "L";
+        Clip sound = picture; sound.id = "sound"; sound.track = 2; p.show.clips = {picture, sound}; bindAudio(p);
+        QVERIFY_THROWS_EXCEPTION(std::runtime_error, validate(p));
+        p.show.clips[1].track = 3; validate(p); // Ambience is async.
+        p.show.tracks[1].async = false; validate(p);
+    }
     void malformedProjectsAreRejected() {
         QTemporaryDir dir; Controller c; c.replace(demoProject()); const QString path = dir.filePath("show.savshow"); c.save(path);
         QFile input(path); QVERIFY(input.open(QIODevice::ReadOnly)); auto root = QJsonDocument::fromJson(input.readAll()).object(); input.close();

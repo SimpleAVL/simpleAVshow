@@ -52,11 +52,11 @@ With two connected legs, track and clip/automated pan combine and are clamped to
 
 **CLIPPING** means the summed signal exceeded full scale or contained non-finite samples. The output is clamped; lower gains and rehearse the loudest overlaps. Stop All resets the clipping indicator.
 
-## Synchronous and async audio
+## Synchronous and async audio and video
 
-An ordinary audio track follows timeline time. An async track has **Keep playing through pauses / holds** checked. Ambience uses this setting by default; you can change it on any audio track while editing.
+An ordinary track follows timeline time. An async track has **Keep playing through pauses / holds** checked. Ambience uses this setting by default; you can change it on any audio track or picture layer while editing.
 
-| Event | Ordinary audio | Already-running async audio |
+| Event | Ordinary audio or video | Already-running async audio or video |
 | --- | --- | --- |
 | Playback advances | Follows show time. | Source advances independently. |
 | Hold or manual pause | Stops sounding; picture/show time freeze. | Source continues; automation freezes at current show time. |
@@ -68,6 +68,12 @@ An ordinary audio track follows timeline time. An async track has **Keep playing
 Clip intervals include Start and exclude End. Seeking into an inactive async clip does not start it while paused; playback starts it at `Source in + (sought time − Start)`. A non-looping async source can finish during a long hold and stays finished when you Continue. A looping async source keeps repeating from Source in to source end.
 
 At the same held show time, an async source may have played for minutes. Its fade remains at the hold's value until Continue. This is the intended way to sustain ambience beneath an unpredictable stage wait, then fade it as the next action begins.
+
+### Async video
+
+An async picture layer applies the same rules to its videos: a running video keeps advancing through holds and pauses while show time and the rest of the picture stand still. Its opacity, position, and scale automation freezes with show time. A looping video keeps repeating; a one-shot video that ends during a hold keeps showing its last frame until show time leaves the clip. Still images and text on an async layer behave as on any other layer.
+
+The audio engine clocks async video, so the audio device must be running, just as for async audio. A video's linked sound must be on an async audio track; otherwise the two would drift apart at the first hold, and the edit is rejected. Placing a video with sound on an async layer links its sound to the first async audio track. Add one first if the project has none.
 
 Stop All clears voice state. Edits/device changes can rebuild it too. Use actual playback to rehearse the source phase and fades; seeking alone cannot reproduce elapsed async playback.
 

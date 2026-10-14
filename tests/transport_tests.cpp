@@ -164,6 +164,27 @@ int main() {
             auto p = show(); p->tracks[0].muted = true;
             Transport t; t.configure(p); play(t); std::vector<float> out; render(t, 3, out); expect(t.asyncVoices() == 1, "muted source still advances"); near(out[0], 0, "mute is silent");
         }},
+        {"async picture clips keep a silent source clock through holds", [] {
+            auto p = show(false); p->tracks.push_back({"v", "Video", true, true}); p->markers.push_back({"hold", "Hold", 3, true});
+            Clip picture; picture.id = "picture"; picture.track = 1; picture.duration = 20; picture.offset = 2; picture.videoLength = 8; p->clips.push_back(picture);
+            Transport t; t.configure(p); expect(t.asyncSource(1) == Transport::dormantSource, "dormant before play");
+            play(t); std::vector<float> out; render(t, 5, out);
+            near(out[0], .1, "the picture clock adds no sound"); near(out[4], .3, "only the audio clip is mixed");
+            expect(t.state() == State::Held && t.position() == 3 && t.asyncSource(1) == 7, "picture source advances while held");
+            expect(t.asyncVoices() == 1, "a running picture counts as async activity");
+            render(t, 2, out); expect(t.asyncSource(1) == Transport::finishedSource && t.asyncVoices() == 0, "one-shot picture finishes at source end");
+            play(t); render(t, 1, out); expect(t.asyncSource(1) == Transport::finishedSource, "a finished picture does not restart on resume");
+        }},
+        {"async picture loops survive seeks and clear on Stop All", [] {
+            auto p = show(false); p->tracks.push_back({"v", "Video", true, true}); p->markers.push_back({"hold", "Hold", 3, true});
+            Clip picture; picture.id = "picture"; picture.track = 1; picture.duration = 20; picture.offset = 2; picture.videoLength = 8; picture.loop = true; p->clips.push_back(picture);
+            Transport t; t.configure(p); play(t); std::vector<float> out; render(t, 10, out);
+            expect(t.asyncSource(1) == 6, "picture loop wraps to its source-in point");
+            t.command({Action::Seek, 10}); render(t, 0, out); expect(t.asyncSource(1) == 6, "an interior seek keeps the picture clock");
+            t.command({Action::StopAll}); render(t, 0, out); expect(t.asyncSource(1) == Transport::dormantSource && t.asyncVoices() == 0, "Stop All clears it");
+            p->tracks[1].async = false; t.configure(p); play(t); render(t, 4, out);
+            expect(t.asyncSource(1) == Transport::dormantSource && t.asyncVoices() == 0, "ordinary picture layers have no clock");
+        }},
         {"mixing overload remains bounded on a held async track", [] {
             auto p = show(); p->clips[0].gain = 4; p->markers.push_back({"hold", "Hold", 3, true});
             Transport t; t.configure(p); play(t); std::vector<float> out; render(t, 5, out);

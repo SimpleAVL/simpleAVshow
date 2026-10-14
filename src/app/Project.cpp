@@ -134,7 +134,6 @@ void validate(const Project& p) {
         if (t.id.empty() || !ids.insert(t.id).second) fail("Duplicate or missing track ID");
         if (t.left < -1 || t.right < -1 || t.left == std::numeric_limits<int>::max() || t.right == std::numeric_limits<int>::max() || !std::isfinite(t.gain) || t.gain < 0 || t.gain > 4 ||
             !std::isfinite(t.pan) || std::abs(t.pan) > 1) fail("Invalid audio track routing or gain");
-        if (t.visual && t.async) fail("Async playback is only supported on audio tracks");
     }
     ids.clear();
     auto curve = [&](const Envelope& e, double min, double max) {
@@ -163,6 +162,12 @@ void validate(const Project& p) {
             fail("Invalid clip transformation");
         for (int property = 0; property < 6; ++property) { const auto [min, max] = propertyRange(property); curve(*envelope(c, property), min, max); }
     }
+    // An async picture's linked sound must keep playing with it, or the two drift apart at the first hold.
+    std::set<std::string> asyncPictures;
+    for (const auto& clip : p.show.clips) if (!clip.link.empty() && p.show.tracks[clip.track].visual && p.show.tracks[clip.track].async) asyncPictures.insert(clip.link);
+    for (const auto& clip : p.show.clips)
+        if (!p.show.tracks[clip.track].visual && !p.show.tracks[clip.track].async && asyncPictures.contains(clip.link))
+            fail("A video on an async picture layer needs its linked sound on an async audio track");
     // Check each layer in timeline order, rather than comparing every clip pair.
     std::vector<const Clip*> pictures;
     for (const auto& clip : p.show.clips) if (p.show.tracks[clip.track].visual) pictures.push_back(&clip);

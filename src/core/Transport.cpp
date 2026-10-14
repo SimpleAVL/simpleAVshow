@@ -20,9 +20,11 @@ double level(const Envelope& envelope, Frame time, double fallback, std::size_t&
     if (key == p.size()) return p.back().value;
     return segment(p[key - 1], p[key], time);
 }
+// An async picture clip is clocked by its video, even when the video carries sound.
+Frame sourceLength(const Clip& clip) noexcept { return clip.videoLength > 0 ? clip.videoLength : clip.audio->length(); }
 // The source frame to play, wrapping loops to the source-in point; -1 once a one-shot source ends.
 Frame wrap(const Clip& clip, Frame source) noexcept {
-    const Frame length = clip.audio->length();
+    const Frame length = sourceLength(clip);
     if (source < length) return source;
     return clip.loop && length > clip.offset ? clip.offset + (source - clip.offset) % (length - clip.offset) : -1;
 }
@@ -54,7 +56,7 @@ void Transport::locate(Frame position) noexcept {
 Frame Transport::entry(std::size_t i, Frame position) const noexcept {
     const auto& c = show_->clips[i];
     Frame source = c.offset + (c.contains(position) ? position - c.start : 0);
-    if (source >= c.audio->length()) source = c.loop ? c.offset + (source - c.offset) % std::max(Frame{1}, c.audio->length() - c.offset) : c.offset;
+    if (source >= sourceLength(c)) source = c.loop ? c.offset + (source - c.offset) % std::max(Frame{1}, sourceLength(c) - c.offset) : c.offset;
     return source;
 }
 // Point every disk source at the frame it will play next, so clips that already
@@ -88,12 +90,20 @@ void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
     commands_.clear(); midi_.reset(std::max(std::size_t{1024}, show_->markers.size()));
     voices_.assign(show_->clips.size(), {}); releases_.assign(show_->clips.size(), {});
     releasing_.clear(); releasing_.reserve(show_->clips.size());
-    starts_.clear(); active_.clear(); active_.reserve(show_->clips.size());
+    starts_.clear(); pictures_.clear(); active_.clear(); active_.reserve(show_->clips.size());
+    publishedSources_ = std::make_unique<std::atomic<Frame>[]>(show_->clips.size()); publishedSourceCount_ = show_->clips.size();
+    for (std::size_t i = 0; i < publishedSourceCount_; ++i) publishedSources_[i].store(dormantSource);
     buffers_.clear(); buffers_.resize(show_->clips.size());
     position_ = std::clamp(position, Frame{0}, show_->duration);
     for (std::size_t i = 0; i < show_->clips.size(); ++i) {
         const auto& c = show_->clips[i];
-        if (!c.audio || c.track < 0 || static_cast<std::size_t>(c.track) >= show_->tracks.size() || show_->tracks[c.track].visual) continue;
+        if (c.track < 0 || static_cast<std::size_t>(c.track) >= show_->tracks.size()) continue;
+        if (show_->tracks[c.track].visual) {
+            // An async video gets a silent voice: the same clock as async audio, without mixing.
+            if (show_->tracks[c.track].async && c.videoLength > c.offset) { starts_.push_back(i); pictures_.push_back(i); }
+            continue;
+        }
+        if (!c.audio) continue;
         starts_.push_back(i);
         if (c.audio->storage) {
             const Frame from = entry(i, position_); bool resident = false;
@@ -214,7 +224,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                     if (state_ != State::Playing || !clip.contains(position_)) continue;
                     source = clip.offset + position_ - clip.start;
                 }
-                const Frame length = clip.audio->length();
+                const Frame length = sourceLength(clip);
                 if (length <= 0) continue;
                 if (source >= length) {
                     if (clip.loop) source = clip.offset + (source - clip.offset) % std::max(Frame{1}, length - clip.offset);
@@ -222,7 +232,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 }
                 if (source < 0 || source >= length) continue;
                 if (track.async) voice.source = source; // Keep loops' cursors bounded, including long holds.
-                if (track.muted) continue;
+                if (track.muted || track.visual) continue;
                 if (buffers_[i]) {
                     if (!buffers_[i]->sample(source, voice.left, voice.right)) { ready = false; continue; }
                 } else {
@@ -283,6 +293,11 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
 void Transport::publish(float peak) noexcept {
     int active = 0;
     for (const auto i : active_) active += show_->tracks[show_->clips[i].track].async && voices_[i].state == VoiceState::Running;
+    for (const auto i : pictures_) {
+        const auto& voice = voices_[i];
+        publishedSources_[i].store(voice.state == VoiceState::Running ? voice.source : voice.state == VoiceState::Finished ? finishedSource : dormantSource,
+            std::memory_order_release);
+    }
     publishedPosition_.store(position_, std::memory_order_release);
     publishedState_.store(state_, std::memory_order_release);
     publishedMarker_.store(heldMarker_); publishedVoices_.store(active); publishedPeak_.store(peak);
