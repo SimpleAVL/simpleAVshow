@@ -8,13 +8,57 @@ on:
     branches: [main]
   workflow_dispatch:
 concurrency:
-  group: native-build-${{ github.ref }}
-  # Newer pushes cancel superseded pull request runs; every push to main gets a complete run.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: native-build-${{ github.event_name }}-${{ github.ref }}
+  # Cancel outdated PR/main runs; tags and manual runs have separate groups and finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 permissions:
   contents: read
 jobs:
+  changes:
+    name: Classify changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.filter.outputs.build }}
+      package: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Decide whether native builds are needed
+        id: filter
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          # Tags/manual runs always validate and package, including docs-only releases.
+          # If the comparison is unavailable (e.g. a new branch), build conservatively.
+          build=true
+          if [[ "$EVENT_NAME" != workflow_dispatch && "$REF" != refs/tags/v* && -n "$BASE_SHA" && "$BASE_SHA" != 0000000000000000000000000000000000000000 ]]; then
+            revisions=("$BASE_SHA" "$HEAD_SHA")
+            if [[ "$EVENT_NAME" == pull_request ]]; then
+              revisions=("$BASE_SHA...$HEAD_SHA")
+            fi
+            if git diff --name-only --no-renames -z "${revisions[@]}" > "$RUNNER_TEMP/changed-files"; then
+              build=false
+              while IFS= read -r -d '' path; do
+                case "$path" in
+                  README.md|CONTRIBUTING.md|docs/*.md|docs/*.png|docs/*.jpg|docs/*.jpeg|docs/*.svg|docs/*.gif|docs/*.webp|development/*.md) ;;
+                  *) build=true; break ;;
+                esac
+              done < "$RUNNER_TEMP/changed-files"
+            else
+              echo 'Unable to compare revisions; running all native checks.'
+            fi
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
   core:
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
+    timeout-minutes: 10
     strategy:
       fail-fast: true
       matrix:
@@ -24,9 +68,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: cmake -S . -B build-core -DSAV_BUILD_APP=OFF
       - run: cmake --build build-core --config Release
-      - run: ctest --test-dir build-core -C Release --output-on-failure
+      - run: ctest --test-dir build-core -C Release --output-on-failure --timeout 120
   tsan:
     name: core (ThreadSanitizer)
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
+    timeout-minutes: 10
     runs-on: ubuntu-24.04
     env:
       TSAN_OPTIONS: halt_on_error=1 second_deadlock_stack=1
@@ -36,11 +83,12 @@ jobs:
       - run: sudo sysctl -w vm.mmap_rnd_bits=28
       - run: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSAV_BUILD_APP=OFF -DSAV_TSAN=ON
       - run: cmake --build build-tsan --parallel 4
-      - run: ctest --test-dir build-tsan --output-on-failure
+      - run: ctest --test-dir build-tsan --output-on-failure --timeout 120
   macos:
-    needs: core
-    if: github.event_name != 'pull_request'
+    needs: [changes, core]
+    if: needs.changes.outputs.build == 'true' && github.event_name != 'pull_request'
     runs-on: macos-15
+    timeout-minutes: 30
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
       MACOSX_DEPLOYMENT_TARGET: '15.0'
@@ -49,8 +97,9 @@ jobs:
       - run: brew install qtbase ffmpeg rtaudio rtmidi libarchive pkgconf ninja
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix)"
       - run: cmake --build build --parallel 4
-      - run: ctest --test-dir build --output-on-failure
+      - run: ctest --test-dir build --output-on-failure --timeout 300
       - name: Bundle runtime dependencies and sign ad-hoc
+        if: needs.changes.outputs.package == 'true'
         run: |
           mkdir -p dist artifacts
           cp -R build/simpleavshow.app dist/
@@ -62,6 +111,7 @@ jobs:
           cp packaging/README.txt README.md LICENSE dist/
           cp -R docs dist/
       - name: Verify the packaged macOS bundle version
+        if: needs.changes.outputs.package == 'true'
         run: |
           version=$(sed -nE 's/^project\(SimpleAVShow VERSION ([0-9.]+).*/\1/p' CMakeLists.txt)
           test -n "$version"
@@ -73,21 +123,29 @@ jobs:
             fi
           done
       - name: Smoke test the packaged app
+        if: needs.changes.outputs.package == 'true'
         run: QT_QPA_PLATFORM=offscreen dist/simpleavshow.app/Contents/MacOS/simpleavshow --demo --preview-time 6 --screenshot artifacts/editor.png
       - name: Archive
+        if: needs.changes.outputs.package == 'true'
         run: ditto -c -k --sequesterRsrc dist artifacts/SimpleAVShow-macos-arm64.zip
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: needs.changes.outputs.package == 'true'
         with:
+          retention-days: 1
           name: macos-arm64-release
           path: artifacts/SimpleAVShow-macos-arm64.zip
           if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: needs.changes.outputs.package == 'true'
         with:
+          retention-days: 1
           name: macos-arm64-preview
           path: artifacts/editor.png
   linux:
-    needs: core
+    needs: [changes, core]
+    if: needs.changes.outputs.build == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: sudo apt-get update && sudo apt-get install -y qt6-base-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev librtmidi-dev libasound2-dev libarchive-dev pkg-config ninja-build ffmpeg
@@ -103,9 +161,9 @@ jobs:
           sudo ldconfig
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build --parallel 4
-      - run: ctest --test-dir build --output-on-failure
+      - run: ctest --test-dir build --output-on-failure --timeout 300
       - name: Build AppImage
-        if: github.event_name != 'pull_request'
+        if: needs.changes.outputs.package == 'true'
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
           QMAKE: /usr/bin/qmake6
@@ -129,18 +187,21 @@ jobs:
           /tmp/linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage
           mv SimpleAVShow-linux-x86_64.AppImage artifacts/
       - name: Smoke test the packaged app
-        if: github.event_name != 'pull_request'
+        if: needs.changes.outputs.package == 'true'
         run: QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 artifacts/SimpleAVShow-linux-x86_64.AppImage --demo --preview-time 6 --screenshot artifacts/editor.png
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: github.event_name != 'pull_request'
+        if: needs.changes.outputs.package == 'true'
         with:
+          retention-days: 1
           name: linux-x86_64-release
           path: artifacts/SimpleAVShow-linux-x86_64.AppImage
           if-no-files-found: error
   windows:
-    # Windows is the show platform: build and test it on pull requests too; package only on main.
-    needs: core
+    # Windows is the show platform: build/test code changes on PRs too; package on tags/manual runs.
+    needs: [changes, core]
+    if: needs.changes.outputs.build == 'true'
     runs-on: windows-2022
+    timeout-minutes: 45
     env:
       VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/vcpkg-cache,readwrite"
     steps:
@@ -192,11 +253,11 @@ jobs:
         run: |
           Copy-Item "$env:FFMPEG_ROOT/bin/*.dll" build/Release/
           $env:PATH = "$env:FFMPEG_ROOT/bin;$env:PATH"
-          ctest --test-dir build -C Release --output-on-failure
+          ctest --test-dir build -C Release --output-on-failure --timeout 300
       - run: cmake --install build --config Release --prefix "$pwd/dist"
-        if: github.event_name != 'pull_request'
+        if: needs.changes.outputs.package == 'true'
       - name: Package and smoke test
-        if: github.event_name != 'pull_request'
+        if: needs.changes.outputs.package == 'true'
         shell: pwsh
         run: |
           python packaging/collect_licenses.py windows dist/licenses --vcpkg build/vcpkg_installed/x64-windows --qt $env:QT_ROOT_DIR --ffmpeg $env:FFMPEG_ROOT
@@ -219,22 +280,26 @@ jobs:
           if ($process.ExitCode -ne 0 -or !(Test-Path artifacts/editor.png)) { throw 'Packaged app smoke test failed' }
           Compress-Archive -Path dist/* -DestinationPath artifacts/SimpleAVShow-windows-x86_64.zip
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: github.event_name != 'pull_request'
+        if: needs.changes.outputs.package == 'true'
         with:
+          retention-days: 1
           name: windows-x86_64-release
           path: artifacts/SimpleAVShow-windows-x86_64.zip
           if-no-files-found: error
   ci:
     name: CI
-    needs: [core, tsan, linux, macos, windows]
+    needs: [changes, core, tsan, linux, macos, windows]
     # A required check must fail when a dependency fails or is unexpectedly skipped.
     if: always()
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - name: Verify required jobs passed
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          BUILD_REQUIRED: ${{ needs.changes.outputs.build }}
           CORE_RESULT: ${{ needs.core.result }}
           TSAN_RESULT: ${{ needs.tsan.result }}
           LINUX_RESULT: ${{ needs.linux.result }}
@@ -242,11 +307,20 @@ jobs:
           WINDOWS_RESULT: ${{ needs.windows.result }}
         run: |
           echo "core=$CORE_RESULT tsan=$TSAN_RESULT linux=$LINUX_RESULT macos=$MACOS_RESULT windows=$WINDOWS_RESULT"
-          if [[ "$CORE_RESULT" != success || "$TSAN_RESULT" != success || "$LINUX_RESULT" != success || "$WINDOWS_RESULT" != success ]]; then
-            echo 'Core, ThreadSanitizer, Linux, and Windows builds/tests must pass.' >&2
+          if [[ "$CHANGES_RESULT" != success || ( "$BUILD_REQUIRED" != true && "$BUILD_REQUIRED" != false ) ]]; then
+            echo 'Change classification must succeed and return a build decision.' >&2
             exit 1
           fi
           expected=success
+          if [[ "$BUILD_REQUIRED" == false ]]; then
+            expected=skipped
+          fi
+          for result in "$CORE_RESULT" "$TSAN_RESULT" "$LINUX_RESULT" "$WINDOWS_RESULT"; do
+            if [[ "$result" != "$expected" ]]; then
+              echo "Core, ThreadSanitizer, Linux, and Windows must report $expected." >&2
+              exit 1
+            fi
+          done
           if [[ "$EVENT_NAME" == pull_request ]]; then
             expected=skipped
           fi
@@ -258,6 +332,7 @@ jobs:
     name: Release
     # Runs only for version tags, after every build/test job (and the CI gate) succeeded.
     needs: ci
+    timeout-minutes: 10
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
