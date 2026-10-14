@@ -1,0 +1,152 @@
+{
+    "backend": "software mixer; no device loopback",
+    "buffer_frames": 0,
+    "channels": 16,
+    "checks": [
+        {
+            "detail": "",
+            "name": "real media loaded",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "save/reopen preserves show",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "portable package reopens",
+            "passed": true
+        },
+        {
+            "detail": "Lighthouse MIDI Logger",
+            "name": "native MIDI destination connected",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "each hold reached once",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "hold 1 freezes show time",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "hold 1 freezes picture",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "hold 1 sustains async bed",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "async one-shot did not restart",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "manual pause freezes timeline",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "manual pause sustains async sea",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "each hold reached once",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "hold 2 freezes show time",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "hold 2 freezes picture",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "hold 2 sustains async bed",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "each hold reached once",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "hold 3 freezes show time",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "hold 3 freezes picture",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "hold 3 sustains async bed",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "full show reached end",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "three stage holds completed",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "project end clears async voices",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "no clipping",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "no source read failure",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "no MIDI queue overflow",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "software render blocks advanced",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "no unresolved playback problem",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "Stop All clears async voices",
+            "passed": true
+        }
+    ],
+    "device": "",
+    "passed": true,
+    "rendered_frames": 3844096,
+    "scenario": "show",
+    "wall_seconds": 84.028427542
+}

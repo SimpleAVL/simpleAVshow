@@ -1,0 +1,32 @@
+{
+  "input_overflows": 0,
+  "queue_overflows": 0,
+  "frames": 4294144,
+  "relay_errors": [],
+  "start_monotonic": 4220747.447768958,
+  "backend": "independent native CoreAudio app through float32 pipe",
+  "duration_seconds": 89.46133333333333,
+  "wall_seconds": 89.96319141704589,
+  "native": {
+    "audio_start_monotonic": 4220747.776771166,
+    "backend": "independent native CoreAudio input app",
+    "frames": 4294144,
+    "input_device": {
+      "buffer_frames": 512,
+      "channels": 16,
+      "name": "Existential Audio Inc.: BlackHole 16ch",
+      "sample_rate": 48000
+    },
+    "input_overflows": 0,
+    "queue_overflows": 0,
+    "write_failed": false
+  },
+  "input_device": {
+    "buffer_frames": 512,
+    "channels": 16,
+    "name": "Existential Audio Inc.: BlackHole 16ch",
+    "sample_rate": 48000
+  },
+  "audio_start_monotonic": 4220747.776771166,
+  "write_failed": false
+}

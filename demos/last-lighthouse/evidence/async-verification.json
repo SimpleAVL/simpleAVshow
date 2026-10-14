@@ -1,0 +1,74 @@
+{
+  "passed": true,
+  "scenario": "async",
+  "backend": "software mixer; no device loopback",
+  "hardware_audio_verified": false,
+  "checks": [
+    {
+      "name": "native runner passed",
+      "passed": true
+    },
+    {
+      "name": "unused channels 9-16 are silent",
+      "passed": true,
+      "peak": 0.0
+    },
+    {
+      "name": "pause: sea continues, click/finished bell silent",
+      "passed": true,
+      "rms": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.030248485505580902,
+        0.025816427543759346,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "inside seek: sea continues, click/finished bell silent",
+      "passed": true,
+      "rms": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.023711886256933212,
+        0.03236177936196327,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "exact-end and paused re-entry remain silent",
+      "passed": true
+    },
+    {
+      "name": "seeks emit no MIDI",
+      "passed": true,
+      "received": []
+    },
+    {
+      "name": "Stop All captured as silence on every channel",
+      "passed": true
+    }
+  ]
+}

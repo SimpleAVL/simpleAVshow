@@ -1,0 +1,517 @@
+{
+  "passed": true,
+  "scenario": "show",
+  "backend": "native ASIO output",
+  "hardware_audio_verified": false,
+  "device_loopback_verified": true,
+  "virtual_device": true,
+  "checks": [
+    {
+      "name": "native runner passed",
+      "passed": true
+    },
+    {
+      "name": "independent input has no dropped blocks",
+      "passed": true,
+      "statistics": {
+        "input_overflows": 0,
+        "queue_overflows": 0,
+        "frames": 4368384,
+        "relay_errors": [],
+        "start_monotonic": 27372.7355394,
+        "meters_visible": true,
+        "input_device": {
+          "name": "VB-Matrix VASIO-64B",
+          "index": 51,
+          "hostapi": 2,
+          "max_input_channels": 64,
+          "max_output_channels": 64,
+          "default_low_input_latency": 0.011609977324263039,
+          "default_low_output_latency": 0.011609977324263039,
+          "default_high_input_latency": 0.011609977324263039,
+          "default_high_output_latency": 0.011609977324263039,
+          "default_samplerate": 44100.0
+        },
+        "backend": "independent ASIO input via PortAudio",
+        "audio_start_monotonic": 27372.969816633336,
+        "duration_seconds": 91.008,
+        "wall_seconds": 91.30208270000003
+      }
+    },
+    {
+      "name": "native input transfer completed",
+      "passed": true
+    },
+    {
+      "name": "unused channels 9-16 are silent",
+      "passed": true,
+      "peak": 0.0
+    },
+    {
+      "name": "hold 1: synchronous score/guide/click silent",
+      "passed": true,
+      "rms": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.02210770919919014,
+        0.03404882550239563,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "hold 1: async sea audible on 5-6",
+      "passed": true
+    },
+    {
+      "name": "hold 1: completed one-shot/effects silent",
+      "passed": true
+    },
+    {
+      "name": "hold 2: synchronous score/guide/click silent",
+      "passed": true,
+      "rms": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.02262260764837265,
+        0.03359224274754524,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "hold 2: async sea audible on 5-6",
+      "passed": true
+    },
+    {
+      "name": "hold 2: completed one-shot/effects silent",
+      "passed": true
+    },
+    {
+      "name": "hold 3: synchronous score/guide/click silent",
+      "passed": true,
+      "rms": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.028038371354341507,
+        0.02846413105726242,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "hold 3: async sea audible on 5-6",
+      "passed": true
+    },
+    {
+      "name": "hold 3: completed one-shot/effects silent",
+      "passed": true
+    },
+    {
+      "name": "all MIDI bytes received exactly once in cue order",
+      "passed": true,
+      "expected": [
+        [
+          192,
+          4
+        ],
+        [
+          176,
+          7,
+          90
+        ],
+        [
+          144,
+          60,
+          80
+        ],
+        [
+          160,
+          60,
+          44
+        ],
+        [
+          128,
+          60,
+          0
+        ],
+        [
+          176,
+          1,
+          30
+        ],
+        [
+          192,
+          5
+        ],
+        [
+          224,
+          0,
+          80
+        ],
+        [
+          224,
+          0,
+          64
+        ],
+        [
+          208,
+          36
+        ],
+        [
+          176,
+          1,
+          100
+        ],
+        [
+          240,
+          125,
+          1,
+          2,
+          3,
+          247
+        ],
+        [
+          176,
+          64,
+          127
+        ],
+        [
+          176,
+          64,
+          0
+        ],
+        [
+          176,
+          11,
+          50
+        ],
+        [
+          192,
+          8
+        ],
+        [
+          176,
+          11,
+          110
+        ],
+        [
+          176,
+          123,
+          0
+        ],
+        [
+          176,
+          7,
+          0
+        ]
+      ],
+      "received": [
+        [
+          192,
+          4
+        ],
+        [
+          176,
+          7,
+          90
+        ],
+        [
+          144,
+          60,
+          80
+        ],
+        [
+          160,
+          60,
+          44
+        ],
+        [
+          128,
+          60,
+          0
+        ],
+        [
+          176,
+          1,
+          30
+        ],
+        [
+          192,
+          5
+        ],
+        [
+          224,
+          0,
+          80
+        ],
+        [
+          224,
+          0,
+          64
+        ],
+        [
+          208,
+          36
+        ],
+        [
+          176,
+          1,
+          100
+        ],
+        [
+          240,
+          125,
+          1,
+          2,
+          3,
+          247
+        ],
+        [
+          176,
+          64,
+          127
+        ],
+        [
+          176,
+          64,
+          0
+        ],
+        [
+          176,
+          11,
+          50
+        ],
+        [
+          192,
+          8
+        ],
+        [
+          176,
+          11,
+          110
+        ],
+        [
+          176,
+          123,
+          0
+        ],
+        [
+          176,
+          7,
+          0
+        ]
+      ]
+    },
+    {
+      "name": "actor-resume received after Continue only",
+      "passed": true,
+      "delay_seconds": 0.0055632000003242865
+    },
+    {
+      "name": "signal-go received after Continue only",
+      "passed": true,
+      "delay_seconds": 0.005084000000351807
+    },
+    {
+      "name": "reply-go received after Continue only",
+      "passed": true,
+      "delay_seconds": 0.0016173000003618654
+    },
+    {
+      "name": "manual pause: async audible and sync silent",
+      "passed": true,
+      "rms": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.03532451018691063,
+        0.02093292959034443,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "Stop All captured as silence on every channel",
+      "passed": true
+    },
+    {
+      "name": "OBS recording contains video and six independent audio tracks",
+      "passed": true,
+      "streams": [
+        {
+          "index": 0,
+          "codec": "h264",
+          "type": "video",
+          "channels": null
+        },
+        {
+          "index": 1,
+          "codec": "aac",
+          "type": "audio",
+          "channels": 2
+        },
+        {
+          "index": 2,
+          "codec": "aac",
+          "type": "audio",
+          "channels": 2
+        },
+        {
+          "index": 3,
+          "codec": "aac",
+          "type": "audio",
+          "channels": 2
+        },
+        {
+          "index": 4,
+          "codec": "aac",
+          "type": "audio",
+          "channels": 2
+        },
+        {
+          "index": 5,
+          "codec": "aac",
+          "type": "audio",
+          "channels": 2
+        },
+        {
+          "index": 6,
+          "codec": "aac",
+          "type": "audio",
+          "channels": 2
+        }
+      ]
+    },
+    {
+      "name": "OBS video contains visible changing native editor frames",
+      "passed": true,
+      "frame_standard_deviations": [
+        83.7756651659473,
+        83.85469257637078,
+        83.72121947668691
+      ],
+      "first_last_difference": 4.642175925925926
+    },
+    {
+      "name": "OBS MIDI logger and live input meters are visible and changing",
+      "passed": true,
+      "frame_standard_deviations": [
+        90.60808834565476,
+        90.42085184597134,
+        90.36983175385937
+      ],
+      "first_last_difference": 1.0932407407407407
+    },
+    {
+      "name": "OBS audio track 1 contains live signal",
+      "passed": true,
+      "peak": 0.7555786371231079
+    },
+    {
+      "name": "OBS audio track 2 contains live signal",
+      "passed": true,
+      "peak": 0.13689085841178894
+    },
+    {
+      "name": "OBS audio track 3 contains live signal",
+      "passed": true,
+      "peak": 0.6571104526519775
+    },
+    {
+      "name": "OBS audio track 4 contains live signal",
+      "passed": true,
+      "peak": 0.1441859006881714
+    },
+    {
+      "name": "OBS audio track 5 contains live signal",
+      "passed": true,
+      "peak": 0.08878836035728455
+    },
+    {
+      "name": "OBS audio track 6 contains live signal",
+      "passed": true,
+      "peak": 0.18789152801036835
+    },
+    {
+      "name": "OBS isolated tracks are distinct signals, not duplicate mixes",
+      "passed": true,
+      "pairwise_absolute_correlations": [
+        [
+          0.0,
+          0.0002491757129344294,
+          0.017489596603128463,
+          0.0011224785193989114,
+          0.0038148967343686127
+        ],
+        [
+          0.0002491757129344294,
+          0.0,
+          0.005802081144626707,
+          0.001425950830145767,
+          0.007560973419720628
+        ],
+        [
+          0.01748959660312846,
+          0.005802081144626706,
+          0.0,
+          0.0223085220553161,
+          0.001864641920760181
+        ],
+        [
+          0.0011224785193989114,
+          0.001425950830145767,
+          0.0223085220553161,
+          0.0,
+          0.015740720709975148
+        ],
+        [
+          0.0038148967343686127,
+          0.007560973419720628,
+          0.001864641920760181,
+          0.01574072070997515,
+          0.0
+        ]
+      ]
+    }
+  ]
+}

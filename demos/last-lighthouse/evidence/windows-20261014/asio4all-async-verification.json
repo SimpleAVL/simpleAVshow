@@ -1,0 +1,108 @@
+{
+  "passed": true,
+  "scenario": "async",
+  "backend": "native ASIO output",
+  "hardware_audio_verified": false,
+  "device_loopback_verified": true,
+  "virtual_device": true,
+  "checks": [
+    {
+      "name": "native runner passed",
+      "passed": true
+    },
+    {
+      "name": "independent input has no dropped blocks",
+      "passed": true,
+      "statistics": {
+        "input_overflows": 0,
+        "queue_overflows": 0,
+        "frames": 709120,
+        "relay_errors": [],
+        "start_monotonic": 27356.4787375,
+        "meters_visible": true,
+        "input_device": {
+          "name": "VB-Matrix VASIO-64B",
+          "index": 51,
+          "hostapi": 2,
+          "max_input_channels": 64,
+          "max_output_channels": 64,
+          "default_low_input_latency": 0.011609977324263039,
+          "default_low_output_latency": 0.011609977324263039,
+          "default_high_input_latency": 0.011609977324263039,
+          "default_high_output_latency": 0.011609977324263039,
+          "default_samplerate": 44100.0
+        },
+        "backend": "independent ASIO input via PortAudio",
+        "audio_start_monotonic": 27356.680715533334,
+        "duration_seconds": 14.773333333333333,
+        "wall_seconds": 14.982719199997518
+      }
+    },
+    {
+      "name": "native input transfer completed",
+      "passed": true
+    },
+    {
+      "name": "unused channels 9-16 are silent",
+      "passed": true,
+      "peak": 0.0
+    },
+    {
+      "name": "pause: sea continues, click/finished bell silent",
+      "passed": true,
+      "rms": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.030356664210557938,
+        0.02568499743938446,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "inside seek: sea continues, click/finished bell silent",
+      "passed": true,
+      "rms": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.023330649361014366,
+        0.03278845548629761,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "exact-end and paused re-entry remain silent",
+      "passed": true
+    },
+    {
+      "name": "seeks emit no MIDI",
+      "passed": true,
+      "received": []
+    },
+    {
+      "name": "Stop All captured as silence on every channel",
+      "passed": true
+    }
+  ]
+}

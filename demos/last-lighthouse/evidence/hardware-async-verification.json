@@ -1,0 +1,120 @@
+{
+  "passed": true,
+  "scenario": "async",
+  "backend": "native CoreAudio output",
+  "hardware_audio_verified": true,
+  "checks": [
+    {
+      "name": "native runner passed",
+      "passed": true
+    },
+    {
+      "name": "independent input has no dropped blocks",
+      "passed": true,
+      "statistics": {
+        "input_overflows": 0,
+        "queue_overflows": 0,
+        "frames": 641536,
+        "relay_errors": [],
+        "start_monotonic": 4220267.746341916,
+        "backend": "independent native CoreAudio app through float32 pipe",
+        "duration_seconds": 13.365333333333334,
+        "wall_seconds": 13.842217708937824,
+        "native": {
+          "audio_start_monotonic": 4220268.059885958,
+          "backend": "independent native CoreAudio input app",
+          "frames": 641536,
+          "input_device": {
+            "buffer_frames": 512,
+            "channels": 16,
+            "name": "Existential Audio Inc.: BlackHole 16ch",
+            "sample_rate": 48000
+          },
+          "input_overflows": 0,
+          "queue_overflows": 0,
+          "write_failed": false
+        },
+        "input_device": {
+          "buffer_frames": 512,
+          "channels": 16,
+          "name": "Existential Audio Inc.: BlackHole 16ch",
+          "sample_rate": 48000
+        },
+        "audio_start_monotonic": 4220268.059885958,
+        "write_failed": false
+      }
+    },
+    {
+      "name": "native input transfer completed",
+      "passed": true
+    },
+    {
+      "name": "all native input frames reached the WAV recorder",
+      "passed": true,
+      "native_frames": 641536,
+      "wav_frames": 641536
+    },
+    {
+      "name": "unused channels 9-16 are silent",
+      "passed": true,
+      "peak": 0.0
+    },
+    {
+      "name": "pause: sea continues, click/finished bell silent",
+      "passed": true,
+      "rms": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.030206603929400444,
+        0.0258730947971344,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "inside seek: sea continues, click/finished bell silent",
+      "passed": true,
+      "rms": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.023526553064584732,
+        0.032513637095689774,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "exact-end and paused re-entry remain silent",
+      "passed": true
+    },
+    {
+      "name": "seeks emit no MIDI",
+      "passed": true,
+      "received": []
+    },
+    {
+      "name": "Stop All captured as silence on every channel",
+      "passed": true
+    }
+  ]
+}

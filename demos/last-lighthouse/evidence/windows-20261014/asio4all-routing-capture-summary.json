@@ -1,0 +1,24 @@
+{
+  "input_overflows": 0,
+  "queue_overflows": 0,
+  "frames": 640000,
+  "relay_errors": [],
+  "start_monotonic": 27341.6657248,
+  "meters_visible": true,
+  "input_device": {
+    "name": "VB-Matrix VASIO-64B",
+    "index": 51,
+    "hostapi": 2,
+    "max_input_channels": 64,
+    "max_output_channels": 64,
+    "default_low_input_latency": 0.011609977324263039,
+    "default_low_output_latency": 0.011609977324263039,
+    "default_high_input_latency": 0.011609977324263039,
+    "default_high_output_latency": 0.011609977324263039,
+    "default_samplerate": 44100.0
+  },
+  "backend": "independent ASIO input via PortAudio",
+  "audio_start_monotonic": 27341.775245833334,
+  "duration_seconds": 13.333333333333334,
+  "wall_seconds": 13.51912369999991
+}

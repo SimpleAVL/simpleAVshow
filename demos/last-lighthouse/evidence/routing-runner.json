@@ -1,0 +1,52 @@
+{
+    "backend": "software mixer; no device loopback",
+    "buffer_frames": 0,
+    "channels": 16,
+    "checks": [
+        {
+            "detail": "",
+            "name": "real media loaded",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "routing show reached end",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "no clipping",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "no source read failure",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "no MIDI queue overflow",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "software render blocks advanced",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "no unresolved playback problem",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "Stop All clears async voices",
+            "passed": true
+        }
+    ],
+    "device": "",
+    "passed": true,
+    "rendered_frames": 505344,
+    "scenario": "routing",
+    "wall_seconds": 11.329311625
+}

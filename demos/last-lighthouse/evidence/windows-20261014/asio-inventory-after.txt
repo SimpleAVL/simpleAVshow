@@ -1,0 +1,7 @@
+********* Start testing of AppTests *********
+Config: Using QtTest library 6.8.3, Qt 6.8.3 (x86_64-little_endian-llp64 shared (dynamic) release build; by MSVC 2022), windows 11
+PASS   : AppTests::initTestCase()
+PASS   : AppTests::connectedAsioDeviceRemainsAvailableWhileStreamIsOpen()
+PASS   : AppTests::cleanupTestCase()
+Totals: 3 passed, 0 failed, 0 skipped, 0 blacklisted, 1127ms
+********* Finished testing of AppTests *********

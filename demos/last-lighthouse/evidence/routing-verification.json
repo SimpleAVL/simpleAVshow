@@ -1,0 +1,83 @@
+{
+  "passed": true,
+  "scenario": "routing",
+  "backend": "software mixer; no device loopback",
+  "hardware_audio_verified": false,
+  "checks": [
+    {
+      "name": "native runner passed",
+      "passed": true
+    },
+    {
+      "name": "unused channels 9-16 are silent",
+      "passed": true,
+      "peak": 0.0
+    },
+    {
+      "name": "routing signal captured",
+      "passed": true
+    },
+    {
+      "name": "211 Hz reaches channel 1 only",
+      "passed": true,
+      "wanted_amplitude": 0.11993800103664398,
+      "max_wrong_channel_amplitude": 2.916390440077521e-05
+    },
+    {
+      "name": "307 Hz reaches channel 2 only",
+      "passed": true,
+      "wanted_amplitude": 0.11993800103664398,
+      "max_wrong_channel_amplitude": 2.9163687941036187e-05
+    },
+    {
+      "name": "419 Hz reaches channel 3 only",
+      "passed": true,
+      "wanted_amplitude": 0.11993800848722458,
+      "max_wrong_channel_amplitude": 2.9163875296944752e-05
+    },
+    {
+      "name": "557 Hz reaches channel 4 only",
+      "passed": true,
+      "wanted_amplitude": 0.11993798613548279,
+      "max_wrong_channel_amplitude": 2.9163953513489105e-05
+    },
+    {
+      "name": "683 Hz reaches channel 5 only",
+      "passed": true,
+      "wanted_amplitude": 0.11993800103664398,
+      "max_wrong_channel_amplitude": 2.9164011721150018e-05
+    },
+    {
+      "name": "809 Hz reaches channel 6 only",
+      "passed": true,
+      "wanted_amplitude": 0.11993798613548279,
+      "max_wrong_channel_amplitude": 2.9164313673391007e-05
+    },
+    {
+      "name": "947 Hz reaches channel 7 only",
+      "passed": true,
+      "wanted_amplitude": 0.11993800103664398,
+      "max_wrong_channel_amplitude": 2.916478661063593e-05
+    },
+    {
+      "name": "1103 Hz reaches channel 8 only",
+      "passed": true,
+      "wanted_amplitude": 0.11993800103664398,
+      "max_wrong_channel_amplitude": 2.916366429417394e-05
+    },
+    {
+      "name": "channel line-check impulses aligned",
+      "passed": true,
+      "offsets": [
+        15886,
+        15886,
+        15886,
+        15886,
+        15886,
+        15886,
+        15886,
+        15886
+      ]
+    }
+  ]
+}

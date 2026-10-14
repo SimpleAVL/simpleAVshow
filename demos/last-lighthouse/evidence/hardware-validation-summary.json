@@ -1,0 +1,33 @@
+{
+  "passed": true,
+  "backend": "BlackHole 16ch CoreAudio output and independent native CoreAudio input",
+  "sample_rate": 48000,
+  "output_buffer_frames": 512,
+  "recording": "artifacts/last-lighthouse/lighthouse-combined.mp4",
+  "scenarios": [
+    {
+      "scenario": "routing",
+      "passed": true,
+      "hardware_audio_verified": true,
+      "evidence": "hardware-routing-verification.json"
+    },
+    {
+      "scenario": "async",
+      "passed": true,
+      "hardware_audio_verified": true,
+      "evidence": "hardware-async-verification.json"
+    },
+    {
+      "scenario": "long-hold",
+      "passed": true,
+      "hardware_audio_verified": true,
+      "evidence": "hardware-long-hold-verification.json"
+    },
+    {
+      "scenario": "show",
+      "passed": true,
+      "hardware_audio_verified": true,
+      "evidence": "hardware-show-verification.json"
+    }
+  ]
+}

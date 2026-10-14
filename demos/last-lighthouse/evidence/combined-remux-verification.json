@@ -1,0 +1,15 @@
+{
+  "passed": true,
+  "source": "Original OBS MKV in combined-validation/show",
+  "output": "lighthouse-combined.mp4",
+  "streams": [
+    "0,v,SHA256=08b2aaf998f0840d6bed8f1401877753a9f37818a422145c7d3dcb81b99f0414",
+    "1,a,SHA256=15935f0fe58c1bd823dd743698d02b9e7d97165bec4d18cb6b6f3af6eb7d4051",
+    "2,a,SHA256=0cf583e4b06daa445ccb9bd3a8909a6fe4c30ae11ff2a6a440a1ca97cdd9006f",
+    "3,a,SHA256=29de52f8ecbc9212899c759ddace088f6f8589ac32270ca63cc9d8b7402aefdc",
+    "4,a,SHA256=a1fe8f104edba3e362bdfe8aa18612397427b4f15169852e7de449e42dbff4dd",
+    "5,a,SHA256=199e35282ac7e21cbe20c6eb1abd8fd83b4710d1523820ca219f402c45f7b922",
+    "6,a,SHA256=a5052fd81adae1fba8fd8babb48f353ef359cd11e2c478d2c434bad055baddc8"
+  ],
+  "all_encoded_streams_preserved": true
+}
