@@ -94,6 +94,9 @@ Use `--scenario routing`, `--scenario async`, `--scenario show`, or `--scenario 
 
 Every scenario writes a native-runner summary, JSONL transport telemetry, MIDI reception log, WAV, screenshots and a fail-closed `verification.json`. The show additionally writes a native `.savpack`, save/reopen round trip, OBS recording metadata/probe and relay logs. The suite's `validation-summary.json` succeeds only when the selected runner and analyses pass.
 
+For the corresponding Windows ASIO, loopMIDI and OBS workflow, see
+[Windows device-loopback rehearsal](WINDOWS-VALIDATION.md).
+
 ## Run the logger during a manual rehearsal
 
 After the build/environment setup above, double-click **[Launch Lighthouse Logger.command](../../tools/demo/Launch%20Lighthouse%20Logger.command)** in Finder, or run from the repository root:
