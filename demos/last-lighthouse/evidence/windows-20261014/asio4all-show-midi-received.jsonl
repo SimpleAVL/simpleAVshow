@@ -1,0 +1,19 @@
+{"wall_seconds": 6.7530587000001105, "monotonic": 27379.4885992, "bytes": [192, 4], "hex": "C0 04", "delta": 0.0}
+{"wall_seconds": 6.7533182999977726, "monotonic": 27379.488858, "bytes": [176, 7, 90], "hex": "B0 07 5A", "delta": 0.0}
+{"wall_seconds": 11.745979100000113, "monotonic": 27384.4815189, "bytes": [144, 60, 80], "hex": "90 3C 50", "delta": 4.993}
+{"wall_seconds": 12.747043200000917, "monotonic": 27385.4825829, "bytes": [160, 60, 44], "hex": "A0 3C 2C", "delta": 1.0010000000000001}
+{"wall_seconds": 13.749769899997773, "monotonic": 27386.4853097, "bytes": [128, 60, 0], "hex": "80 3C 00", "delta": 1.0030000000000001}
+{"wall_seconds": 18.75262550000116, "monotonic": 27391.4881652, "bytes": [176, 1, 30], "hex": "B0 01 1E", "delta": 5.002}
+{"wall_seconds": 22.914111199999752, "monotonic": 27395.649651, "bytes": [192, 5], "hex": "C0 05", "delta": 4.162}
+{"wall_seconds": 28.907080900000437, "monotonic": 27401.6426205, "bytes": [224, 0, 80], "hex": "E0 00 50", "delta": 5.993}
+{"wall_seconds": 29.910297499998705, "monotonic": 27402.6458372, "bytes": [224, 0, 64], "hex": "E0 00 40", "delta": 1.0030000000000001}
+{"wall_seconds": 30.912928800000373, "monotonic": 27403.6484684, "bytes": [208, 36], "hex": "D0 24", "delta": 1.0030000000000001}
+{"wall_seconds": 36.9932564999981, "monotonic": 27409.7287964, "bytes": [176, 1, 100], "hex": "B0 01 64", "delta": 6.08}
+{"wall_seconds": 47.08361619999778, "monotonic": 27419.8191559, "bytes": [240, 125, 1, 2, 3, 247], "hex": "F0 7D 01 02 03 F7", "delta": 10.09}
+{"wall_seconds": 51.08394309999858, "monotonic": 27423.819483, "bytes": [176, 64, 127], "hex": "B0 40 7F", "delta": 4.001}
+{"wall_seconds": 52.075755599998956, "monotonic": 27424.8112953, "bytes": [176, 64, 0], "hex": "B0 40 00", "delta": 0.992}
+{"wall_seconds": 60.0757483999987, "monotonic": 27432.8112882, "bytes": [176, 11, 50], "hex": "B0 0B 32", "delta": 8.0}
+{"wall_seconds": 64.25650569999925, "monotonic": 27436.9920457, "bytes": [192, 8], "hex": "C0 08", "delta": 4.18}
+{"wall_seconds": 69.249835300001, "monotonic": 27441.985375, "bytes": [176, 11, 110], "hex": "B0 0B 6E", "delta": 4.994}
+{"wall_seconds": 83.25240829999893, "monotonic": 27455.9879479, "bytes": [176, 123, 0], "hex": "B0 7B 00", "delta": 14.002}
+{"wall_seconds": 84.2577409000005, "monotonic": 27456.9932808, "bytes": [176, 7, 0], "hex": "B0 07 00", "delta": 1.006}

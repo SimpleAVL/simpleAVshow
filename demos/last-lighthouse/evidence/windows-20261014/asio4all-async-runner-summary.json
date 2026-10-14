@@ -1,0 +1,87 @@
+{
+    "backend": "native ASIO output",
+    "buffer_frames": 512,
+    "channels": 8,
+    "checks": [
+        {
+            "detail": "",
+            "name": "real media loaded",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "pause freezes timeline",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "one-shot ends during pause",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "inside seek preserves running loop",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "end seek stops async voices",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "paused seek does not start inactive voices",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "play starts loop at sought offset",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "Stop All stops transport",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "no clipping",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "no source read failure",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "no MIDI queue overflow",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "audio callbacks advanced",
+            "passed": true
+        },
+        {
+            "detail": "0",
+            "name": "no driver underruns",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "no unresolved playback problem",
+            "passed": true
+        },
+        {
+            "detail": "",
+            "name": "Stop All clears async voices",
+            "passed": true
+        }
+    ],
+    "device": "ASIO4ALL v2",
+    "passed": true,
+    "rendered_frames": 0,
+    "scenario": "async",
+    "wall_seconds": 13.2509757
+}

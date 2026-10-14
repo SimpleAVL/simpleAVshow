@@ -50,3 +50,5 @@ MIDI reception and the selected transport behavior. `--virtual-device` keeps
 external MIDI equipment and production latency still require a separate test
 with that equipment connected. Autologon configuration is separate from this
 workflow and is not verified by a rehearsal.
+
+Recorded results and remaining limits: [WINDOWS-RESULTS.md](WINDOWS-RESULTS.md).

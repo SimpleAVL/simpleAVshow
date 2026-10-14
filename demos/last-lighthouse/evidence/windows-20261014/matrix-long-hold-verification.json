@@ -1,0 +1,101 @@
+{
+  "passed": true,
+  "scenario": "long-hold",
+  "backend": "native ASIO output",
+  "hardware_audio_verified": false,
+  "device_loopback_verified": true,
+  "virtual_device": true,
+  "checks": [
+    {
+      "name": "native runner passed",
+      "passed": true
+    },
+    {
+      "name": "independent input has no dropped blocks",
+      "passed": true,
+      "statistics": {
+        "input_overflows": 0,
+        "queue_overflows": 0,
+        "frames": 15347200,
+        "relay_errors": [],
+        "start_monotonic": 26740.2872288,
+        "meters_visible": true,
+        "input_device": {
+          "name": "VB-Matrix VASIO-64B",
+          "index": 51,
+          "hostapi": 2,
+          "max_input_channels": 64,
+          "max_output_channels": 64,
+          "default_low_input_latency": 0.011609977324263039,
+          "default_low_output_latency": 0.011609977324263039,
+          "default_high_input_latency": 0.011609977324263039,
+          "default_high_output_latency": 0.011609977324263039,
+          "default_samplerate": 44100.0
+        },
+        "backend": "independent ASIO input via PortAudio",
+        "audio_start_monotonic": 26740.494795833336,
+        "duration_seconds": 319.73333333333335,
+        "wall_seconds": 319.9547910000001
+      }
+    },
+    {
+      "name": "native input transfer completed",
+      "passed": true
+    },
+    {
+      "name": "unused channels 9-16 are silent",
+      "passed": true,
+      "peak": 0.0
+    },
+    {
+      "name": "hold 1: synchronous score/guide/click silent",
+      "passed": true,
+      "rms": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.02822386659681797,
+        0.02831851877272129,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "name": "hold 1: async sea audible on 5-6",
+      "passed": true
+    },
+    {
+      "name": "hold 1: completed one-shot/effects silent",
+      "passed": true
+    },
+    {
+      "name": "actor hold lasts at least five wall-clock minutes",
+      "passed": true,
+      "wall_seconds": 300.0166513
+    },
+    {
+      "name": "every sampled hold state retains the same show time",
+      "passed": true,
+      "samples": 2742
+    },
+    {
+      "name": "sea is audible throughout every five-second hold window",
+      "passed": true,
+      "windows": 59,
+      "minimum_rms": 0.024594297632575035
+    },
+    {
+      "name": "Stop All captured as silence on every channel",
+      "passed": true
+    }
+  ]
+}

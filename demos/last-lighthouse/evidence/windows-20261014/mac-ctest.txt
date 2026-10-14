@@ -1,0 +1,11 @@
+Test project /Users/timschweikert/.t3/projects/simpleavshow/build
+    Start 1: transport
+1/3 Test #1: transport ........................   Passed    2.73 sec
+    Start 2: mcp
+2/3 Test #2: mcp ..............................   Passed    0.76 sec
+    Start 3: app
+3/3 Test #3: app ..............................   Passed   17.09 sec
+
+100% tests passed out of 3
+
+Total Test time (real) =  20.58 sec

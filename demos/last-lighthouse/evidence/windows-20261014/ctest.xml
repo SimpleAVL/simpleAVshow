@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="(empty)"
+	tests="3"
+	failures="0"
+	disabled="0"
+	skipped="0"
+	hostname=""
+	time="34"
+	timestamp="2026-10-14T06:27:06"
+	>
+	<testcase name="transport" classname="transport" time="5.94467" status="run">
+		<properties/>
+		<system-out>PASS async clip beginning exactly at a hold starts on arrival
+PASS hold freezes show time, not async source or automation value
+PASS normal audio stops at hold, resumes at the same sample
+PASS manual pause preserves async source
+PASS seek inside active async clip preserves its source, outside stops it
+PASS seek to exclusive clip end stops paused async voice
+PASS looping and non-looping ambience survive an arbitrarily long hold
+PASS arrival and resume MIDI fire once; seeks do not send
+PASS multiple same-time holds are consumed together
+PASS multichannel routes are synchronous and remain isolated
+PASS Stop All stops ambience without resetting show time
+PASS show end stops all voices
+PASS mixing clamps overload and reports clipping
+PASS final hold can resume into end of show
+PASS mono constant-power pan and a disconnected leg
+PASS muting an async track does not restart its source
+PASS mixing overload remains bounded on a held async track
+PASS large unsorted timelines schedule boundaries without fixed capacities
+...
+[This part of the test output was removed since it exceeds the threshold of 1024 bytes.]
+</system-out>
+	</testcase>
+	<testcase name="mcp" classname="mcp" time="1.09057" status="run">
+		<properties/>
+		<system-out>********* Start testing of McpTests *********
+Config: Using QtTest library 6.8.3, Qt 6.8.3 (x86_64-little_endian-llp64 shared (dynamic) release build; by MSVC 2022), windows 11
+PASS   : McpTests::initTestCase()
+PASS   : McpTests::protocolAndLocalAccess()
+PASS   : McpTests::atomicSharedEditsAndConflicts()
+PASS   : McpTests::heldAndAsyncPlaybackLocks()
+PASS   : McpTests::linkedTimingAndAutomation()
+PASS   : McpTests::asynchronousImportAndCommit()
+QWARN  : McpTests::operatorControlsAndPendingInspector() QFontDatabase: Cannot find font directory C:/dev/Qt/6.8.3/msvc2022_64/lib/fonts.
+Note that Qt no longer ships fonts. Deploy some (from https://dejavu-fonts.github.io/ for example) or switch to fontconfig.
+QWARN  : McpTests::operatorControlsAndPendingInspector() This plugin does not support propagateSizeHints()
+PASS   : McpTests::operatorControlsAndPendingInspector()
+PASS   : McpTests::cleanupTestCase()
+Totals: 8 passed, 0 failed, 0 skipped, 0 blacklisted, 304ms
+********* Finished testing of McpTests *********
+</system-out>
+	</testcase>
+	<testcase name="app" classname="app" time="27.4715" status="run">
+		<properties/>
+		<system-out>********* Start testing of AppTests *********
+Config: Using QtTest library 6.8.3, Qt 6.8.3 (x86_64-little_endian-llp64 shared (dynamic) release build; by MSVC 2022), windows 11
+PASS   : AppTests::initTestCase()
+PASS   : AppTests::audioSelectionRestoresByNameWithoutFallback()
+QWARN  : AppTests::midiEditorPreservesExistingMessages() QFontDatabase: Cannot find font directory C:/dev/Qt/6.8.3/msvc2022_64/lib/fonts.
+Note that Qt no longer ships fonts. Deploy some (from https://dejavu-fonts.github.io/ for example) or switch to fontconfig.
+PASS   : AppTests::midiEditorPreservesExistingMessages()
+QWARN  : AppTests::midiEditorUsesMusicalFieldsAndValidatesRawInput() This plugin does not support propagateSizeHints()
+QWARN  : AppTests::midiEditorUsesMusicalFieldsAndValidatesRawInput() This plugin does not support propagateSizeHints()
+QWARN  : AppTests::midiEditorUsesMusicalFieldsAndValidatesRawInput() This plugin does not support propagateSizeHints()
+QWARN  : AppTests::midiEditorUsesMusicalFieldsAndValidatesRawInput() Thi...
+[This part of the test output was removed since it exceeds the threshold of 1024 bytes.]
+</system-out>
+	</testcase>
+</testsuite>
