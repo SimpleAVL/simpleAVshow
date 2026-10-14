@@ -193,18 +193,6 @@ jobs:
           Copy-Item "$env:FFMPEG_ROOT/bin/*.dll" build/Release/
           $env:PATH = "$env:FFMPEG_ROOT/bin;$env:PATH"
           ctest --test-dir build -C Release --output-on-failure
-      - name: DIAGNOSTIC app tests per function
-        if: failure()
-        shell: pwsh
-        run: |
-          $env:PATH = "$env:FFMPEG_ROOT/bin;$env:PATH"; $env:QT_QPA_PLATFORM = "offscreen"
-          foreach ($f in (& build/Release/app_tests.exe -functions)) {
-            $name = $f -replace '\(\)$', ''
-            $sw = [Diagnostics.Stopwatch]::StartNew()
-            $out = & build/Release/app_tests.exe $name 2>$null
-            Write-Output "== $name exit=$LASTEXITCODE $([int]$sw.Elapsed.TotalSeconds)s"
-            if ($LASTEXITCODE -ne 0) { $out | Select-String -NotMatch 'inflate returned' | Write-Output }
-          }
       - run: cmake --install build --config Release --prefix "$pwd/dist"
         if: github.event_name != 'pull_request'
       - name: Package and smoke test
