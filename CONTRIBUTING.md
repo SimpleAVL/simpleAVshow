@@ -91,6 +91,21 @@ build\Release\app_tests.exe programOutputUsesSecondaryScreen
 
 It opens and reopens fullscreen output on the second display and checks that the editor stays on its original display. Run it in the signed-in desktop session; an SSH session alone does not provide that desktop.
 
+For a connected Windows ASIO device, use the native desktop platform (ASIO
+requires a single-threaded COM apartment) and run the stream-inventory regression:
+
+```powershell
+$env:QT_QPA_PLATFORM = 'windows'
+$env:SAV_TEST_ASIO_DEVICE = 'VB-Matrix VASIO-64A' # Or the intended ASIO interface
+build\Release\app_tests.exe connectedAsioDeviceRemainsAvailableWhileStreamIsOpen
+```
+
+It plays silence and verifies that the connected output remains available while
+running and paused, with callbacks continuing after enumeration and resume.
+The optional `SAV_TEST_AUDIO_DEVICE=1` heartbeat should also run on the native
+Windows desktop when the selected backend is ASIO. Keep other test processes
+from opening the same driver at the same time.
+
 The MCP suite (`mcp_tests`) exercises the local HTTP endpoint, authentication, protocol discovery, shared edits, revision conflicts, atomic rollback/undo, linked trimming, asynchronous media preparation, and the operator controls. It runs offscreen alongside the app tests and needs no external agent or service.
 
 Clang/GCC builds support `-DSAV_SANITIZE=ON` (AddressSanitizer + UBSan) or `-DSAV_TSAN=ON` (ThreadSanitizer); the two cannot be combined. CI runs the transport tests under ThreadSanitizer.

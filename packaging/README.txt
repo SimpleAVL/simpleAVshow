@@ -1,4 +1,4 @@
-SimpleAVShow 0.4.0 — development prerelease
+SimpleAVShow 0.4.1 — development prerelease
 
 Windows: extract the entire ZIP, then run bin/simpleavshow.exe.
 macOS 15 or newer, Apple Silicon: extract the ZIP, then drag simpleavshow.app
