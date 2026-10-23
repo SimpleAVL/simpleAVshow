@@ -1,6 +1,7 @@
 #pragma once
 #include "app/Controller.h"
 #include "app/McpServer.h"
+#include "app/RemoteServer.h"
 #include "app/Timeline.h"
 #include "app/ProgramView.h"
 #include <QMainWindow>
@@ -20,6 +21,7 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     Controller& controller() { return c_; }
     McpServer& mcpServer() { return mcp_; }
+    RemoteServer& remoteServer() { return remote_; }
     void openPath(const QString& path);
     // Offers the untitled-show sidecar left by a crash; call once after startup.
     void offerUntitledRecovery();
@@ -31,13 +33,14 @@ protected:
 private:
     Controller c_;
     McpServer mcp_;
+    RemoteServer remote_;
     Timeline* timeline_ = nullptr;
     ProgramView* preview_ = nullptr;
     ProgramView* output_ = nullptr;
     QWidget* outputWindow_ = nullptr;
     QListWidget *library_ = nullptr, *cues_ = nullptr;
     QLabel *clock_ = nullptr, *state_ = nullptr, *next_ = nullptr, *health_ = nullptr, *hint_ = nullptr, *projectLabel_ = nullptr;
-    QPushButton *play_ = nullptr, *showButton_ = nullptr, *outputsButton_ = nullptr, *openOutputButton_ = nullptr, *agentButton_ = nullptr;
+    QPushButton *play_ = nullptr, *showButton_ = nullptr, *outputsButton_ = nullptr, *openOutputButton_ = nullptr, *agentButton_ = nullptr, *remoteButton_ = nullptr;
     QAction* outputsAction_ = nullptr;
     QAction* exportPackageAction_ = nullptr;
     QStackedWidget* inspector_ = nullptr;
@@ -92,6 +95,7 @@ private:
     void deleteSelection();
     void projectSettings();
     void agentSettings();
+    void remoteSettings();
     void outputSettings();
     void openOutput(int screen);
     void screensChanged();

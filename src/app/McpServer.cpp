@@ -183,10 +183,9 @@ QJsonObject McpServer::snapshot() const {
     auto project = projectJson(c_.project); QJsonArray assets;
     for (const auto& a : c_.project.assets) assets.append(assetInfo(a));
     project.insert("assets", assets);
-    const auto state = c_.transport.state();
     return {{"revision", static_cast<double>(revision_)}, {"sample_rate", sampleRate}, {"project", project},
         {"operator", QJsonObject{{"show_mode", c_.showMode}, {"busy", c_.busy}, {"dirty", c_.dirty}, {"path", c_.path},
-            {"position", static_cast<double>(c_.position())}, {"transport", state == State::Playing ? "playing" : state == State::Held ? "held" : state == State::Paused ? "paused" : state == State::Ended ? "ended" : "stopped"},
+            {"position", static_cast<double>(c_.position())}, {"transport", stateName(c_.transport.state())},
             {"async_voices", static_cast<int>(c_.transport.asyncVoices())}, {"editing_enabled", editing_},
             {"can_edit", editing_ && c_.canEdit(false)}, {"status", c_.status}}}};
 }

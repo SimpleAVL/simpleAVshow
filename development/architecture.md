@@ -52,6 +52,12 @@ The GUI owns the server and all controller access. Show snapshots use the same `
 
 Media preparation runs through QtConcurrent. One job is staged per server; failures discard the whole prepared batch. The operator can edit or rehearse during preparation. `commit_import` checks a fresh revision and editability before merging the staged assets as one undo step. Read-only access, Show mode, playback, async voices and busy operations all prohibit agent mutations. The local server does not expose save/open, device configuration, playback or direct MIDI sending. See the [connection guide](../docs/agent-collaboration.md) for the tools and request format.
 
+## Phone remote
+
+`RemoteServer` is an opt-in Qt Network server on all IPv4 interfaces, because phones reach the show computer through its network address. It serves one self-contained page (`src/app/remote.html`, compiled in as a Qt resource) and two JSON routes below a secret path segment: `GET /<key>/state` and `POST /<key>/command`. The key has 12 characters from an unambiguous 31-letter alphabet (about 59 bits) and is stored in QSettings so bookmarks survive restarts; Change link replaces it and aborts open connections. Unknown keys return 404. Responses send `no-store`, `no-referrer`, `nosniff` and frame denial, and the page has a restrictive CSP. Commands require JSON, so cross-site requests need a preflight that is never approved. Any `Origin` must match `Host`. Header, body, connection and time limits match the MCP server. Plain HTTP is a deliberate trade-off for a trusted show network.
+
+The page polls state every 250 ms (1 s when hidden) with a 1.5 s request timeout, and treats two seconds without a reply as disconnected. Commands express intent rather than toggling: `go` acts only when not playing and `pause` only while playing, so a delayed or repeated tap cannot reverse the operator's intent. `go`/`pause` call `Controller::toggle` and `stop` calls `Controller::stopAll`, the same paths as Space and the Stop All button, so Play's device and media checks apply and Show mode does not block them. Busy operations reject commands. Show-time readouts reuse `Controller::nextCue` and `countdown` with the editor transport bar. Peers that polled within three seconds count as connected devices.
+
 ## Roadmap
 
 1. Physical ASIO routing verification on Windows show hardware, including interface unplug/reconnect and full rehearsal runs.

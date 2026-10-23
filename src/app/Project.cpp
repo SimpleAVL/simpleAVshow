@@ -22,6 +22,11 @@ QString timecode(Frame position, double fps) {
     return QString("%1:%2:%3:%4").arg(whole / 3600, 2, 10, QChar('0')).arg(whole / 60 % 60, 2, 10, QChar('0'))
         .arg(whole % 60, 2, 10, QChar('0')).arg(frame, 2, 10, QChar('0'));
 }
+QString countdown(Frame duration) {
+    const auto total = static_cast<qint64>(std::ceil(seconds(std::max<Frame>(0, duration))));
+    return total >= 3600 ? QString("%1:%2:%3").arg(total / 3600).arg(total / 60 % 60, 2, 10, QChar('0')).arg(total % 60, 2, 10, QChar('0'))
+                         : QString("%1:%2").arg(total / 60).arg(total % 60, 2, 10, QChar('0'));
+}
 void retime(Clip& clip, Frame start, Frame duration, Frame offset) {
     // Left trims shift clip-relative automation with the source content.
     const Frame shift = start - clip.start;

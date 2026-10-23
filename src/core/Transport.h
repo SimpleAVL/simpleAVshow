@@ -9,6 +9,9 @@ namespace sav {
 static_assert(std::atomic<Frame>::is_always_lock_free && std::atomic<float>::is_always_lock_free,
     "The audio transport requires lock-free atomics");
 enum class State { Stopped, Playing, Paused, Held, Ended };
+inline const char* stateName(State state) noexcept {
+    return state == State::Playing ? "playing" : state == State::Held ? "held" : state == State::Paused ? "paused" : state == State::Ended ? "ended" : "stopped";
+}
 enum class Action { Play, Pause, Seek, StopAll };
 struct Command { Action action; Frame position = 0; };
 struct MidiEvent { int marker = -1; Frame time = 0; std::uint64_t epoch = 0; };
