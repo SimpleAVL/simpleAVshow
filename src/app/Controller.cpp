@@ -289,6 +289,12 @@ bool Controller::testMidi(const std::vector<unsigned char>& bytes) {
     if (!sent) { report(error); return false; }
     report("Test message sent to " + midi.name() + ". External devices may keep playing until they receive a stop message."); return true;
 }
+const Marker* Controller::nextCue() const {
+    const Frame now = position(); const bool held = transport.state() == State::Held; const Marker* upcoming = nullptr;
+    for (const auto& m : project.show.markers)
+        if ((m.time > now || (m.time == now && !held)) && (!upcoming || m.time < upcoming->time)) upcoming = &m;
+    return upcoming;
+}
 void Controller::setShowMode(bool enabled) { showMode = enabled; emit changed(); }
 QImage Controller::compose() {
     const Frame position = this->position();

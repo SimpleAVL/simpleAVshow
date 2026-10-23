@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#111720">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Show remote">
+<title>SimpleAVShow remote</title>
+<style>
+  :root { color-scheme: dark; --bg: #111720; --panel: #1b2737; --text: #dee7f3; --muted: #8499b5;
+    --playing: #7fd19b; --held: #e5c47d; --paused: #8fb4f0; --idle: #7d8ea6; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: -apple-system, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; -webkit-tap-highlight-color: transparent; }
+  body { display: flex; flex-direction: column; gap: 12px; user-select: none; -webkit-user-select: none;
+    padding: max(14px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+  header { display: flex; align-items: center; gap: 10px; }
+  .brand { font-size: 14px; font-weight: 600; letter-spacing: .5px; }
+  .brand span { color: #7ea6eb; }
+  #title { flex: 1; min-width: 0; color: var(--muted); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #link { width: 10px; height: 10px; border-radius: 50%; background: #c25b5b; flex: none; }
+  #link.online { background: var(--playing); }
+  .panel { background: var(--panel); border-radius: 12px; padding: 16px; text-align: center; transition: opacity .2s; }
+  .panel.stale { opacity: .4; }
+  #clock { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: clamp(30px, 11vw, 56px); letter-spacing: 2px; }
+  #state { margin-top: 4px; font-weight: 700; letter-spacing: 2px; color: var(--idle); }
+  #next { margin-top: 10px; color: #c9d6e8; font-size: 15px; overflow-wrap: anywhere; }
+  #left { margin-top: 4px; color: var(--muted); font-size: 13px; }
+  .banner { border-radius: 10px; padding: 12px 14px; font-weight: 600; overflow-wrap: anywhere; }
+  #hold { background: #3a3220; color: var(--held); }
+  #problem, #offline { background: #5a2523; color: #ffd7d2; }
+  #problem { font-weight: 500; }
+  .controls { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; gap: 14px; }
+  button { font: inherit; border: 1px solid; border-radius: 16px; touch-action: manipulation; cursor: pointer; }
+  button:disabled { opacity: .4; cursor: default; }
+  button:active:not(:disabled) { transform: scale(.98); }
+  #go { flex: 1; min-height: 140px; max-height: 320px; font-size: clamp(28px, 9vw, 44px); font-weight: 700; background: #5d84cf; border-color: #739aee; color: #fff; }
+  #go.pause { background: #263448; border-color: #34455d; color: var(--text); }
+  #go.continue { background: #8a6131; border-color: #e0b864; }
+  /* Kept apart from Play/Continue and armed by a first tap, so a hurried press cannot end the show. */
+  #stop { min-height: 72px; margin-top: 16px; font-size: 20px; font-weight: 600; background: #3b2630; border-color: #67414e; color: #e3adb3; }
+  #stop.armed { background: #a3313f; border-color: #ff8a96; color: #fff; }
+  footer { min-height: 1.3em; color: var(--muted); font-size: 12px; text-align: center; overflow-wrap: anywhere; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header><div class="brand">SIMPLE<span>AV</span>SHOW</div><div id="title"></div><div id="link" role="img" aria-label="Disconnected"></div></header>
+<div id="offline" class="banner" role="alert" hidden></div>
+<section id="panel" class="panel stale" aria-live="polite">
+  <div id="clock">--:--:--:--</div>
+  <div id="state">CONNECTING</div>
+  <div id="next"></div>
+  <div id="left"></div>
+</section>
+<div id="hold" class="banner" hidden></div>
+<div id="problem" class="banner" hidden></div>
+<div class="controls">
+  <button id="go" disabled>▶ Play</button>
+  <button id="stop" disabled>■ Stop All</button>
+</div>
+<footer id="footer"></footer>
+<script>
+'use strict';
+const base = location.pathname.replace(/\/+$/, '');
+const $ = id => document.getElementById(id);
+const labels = { playing: 'PLAYING', held: 'HOLDING', paused: 'PAUSED', ended: 'ENDED', stopped: 'STOPPED' };
+let show = null, lastSeen = 0, polled = false, revoked = false, sending = false, armTimer = 0;
+
+async function request(path, options = {}) {
+  // A stalled request must not freeze the display; the next poll retries.
+  const abort = new AbortController(), timer = setTimeout(() => abort.abort(), 1500);
+  try {
+    const response = await fetch(base + path, { cache: 'no-store', signal: abort.signal, ...options });
+    if (response.status === 404) revoked = true;
+    if (!response.ok) throw new Error(response.status);
+    lastSeen = Date.now(); revoked = false;
+    return await response.json();
+  } finally { clearTimeout(timer); }
+}
+
+function render() {
+  const online = show && Date.now() - lastSeen < 2000;
+  $('link').className = online ? 'online' : '';
+  $('link').setAttribute('aria-label', online ? 'Connected' : 'Disconnected');
+  $('panel').classList.toggle('stale', !online);
+  $('offline').hidden = online || !polled;
+  $('offline').textContent = revoked ? 'This link is no longer valid. Ask the operator for the new remote link.' : 'Connection lost. Reconnecting…';
+  $('go').disabled = !online || sending || show.busy;
+  $('stop').disabled = !online;
+  if (!show) return;
+  $('title').textContent = show.title;
+  $('clock').textContent = show.clock;
+  $('state').textContent = labels[show.state] || show.state.toUpperCase();
+  $('state').style.color = `var(--${show.state in { playing: 1, held: 1, paused: 1 } ? show.state : 'idle'})`;
+  $('next').textContent = show.next ? `NEXT  ${show.next.hold ? 'Ⅱ' : '◆'} ${show.next.name} · in ${show.next.in}` : 'No further cues';
+  $('left').textContent = `${show.left} left` + (show.async ? ` · ${show.async} async playing` : '');
+  $('hold').hidden = show.state !== 'held';
+  $('hold').textContent = `HOLD — ${show.hold || ''}`;
+  $('problem').hidden = !show.problem;
+  $('problem').textContent = `⚠  ${show.problem}`;
+  $('go').textContent = show.state === 'playing' ? 'Ⅱ  Pause' : show.state === 'held' ? '▶  Continue' : '▶  Play';
+  $('go').className = show.state === 'playing' ? 'pause' : show.state === 'held' ? 'continue' : '';
+  $('footer').textContent = (show.show_mode ? 'SHOW MODE  ·  ' : '') + show.status;
+  document.title = `${labels[show.state] || ''} ${show.clock} · ${show.title}`;
+}
+
+async function poll() {
+  try { show = await request('/state'); } catch (error) {}
+  polled = true; render();
+  setTimeout(poll, document.hidden ? 1000 : 250);
+}
+
+async function send(action) {
+  sending = true; render();
+  if (navigator.vibrate) navigator.vibrate(30);
+  try { await request('/command', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) }); } catch (error) {}
+  // The reply predates the transport applying the command; wait for a fresh poll before the next tap.
+  setTimeout(() => { sending = false; render(); }, 400);
+}
+
+function disarm() { clearTimeout(armTimer); $('stop').classList.remove('armed'); $('stop').textContent = '■ Stop All'; }
+$('go').addEventListener('click', () => { if (show) send(show.state === 'playing' ? 'pause' : 'go'); });
+$('stop').addEventListener('click', () => {
+  if ($('stop').classList.contains('armed')) { disarm(); send('stop'); return; }
+  $('stop').classList.add('armed'); $('stop').textContent = 'Tap again to Stop All';
+  if (navigator.vibrate) navigator.vibrate(15);
+  armTimer = setTimeout(disarm, 3000);
+});
+
+// Keep the screen awake where the browser allows it (secure contexts only).
+async function stayAwake() { try { if (navigator.wakeLock && !document.hidden) await navigator.wakeLock.request('screen'); } catch (error) {} }
+document.addEventListener('visibilitychange', stayAwake);
+stayAwake(); poll(); setInterval(render, 500);
+</script>
+</body>
+</html>

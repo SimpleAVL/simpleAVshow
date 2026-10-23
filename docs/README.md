@@ -18,6 +18,7 @@ This manual describes SimpleAVShow 0.4.1. Screenshots show the native editor on 
 | [6. Saving and recovery](saving-and-recovery.md) | Save projects, export portable packages, recover autosaves, and relink missing files. |
 | [7. Reference and troubleshooting](reference-and-troubleshooting.md) | Look up shortcuts, numeric ranges, health indicators, limitations, and fault recovery. |
 | [8. Agent collaboration](agent-collaboration.md) | Connect an MCP agent to build a show alongside the operator. |
+| [9. Phone remote](remote-control.md) | Run playback from a phone or tablet on the same network. |
 
 For a first session, follow chapter 1 and its demonstration exercise. For a performance, use the checklist in chapter 5. For an immediate problem, go to chapter 7.
 

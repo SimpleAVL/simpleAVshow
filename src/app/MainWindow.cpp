@@ -116,7 +116,7 @@ public:
 };
 }
 
-MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this) {
+MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), remote_(c_, this) {
     connect(&mcp_, &McpServer::aboutToEdit, this, &MainWindow::commitInspector);
     setWindowTitle("SimpleAVShow"); resize(1440, 960); setMinimumSize(1100, 720);
     setStyleSheet(R"(
@@ -206,6 +206,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this) {
     project->addAction("Project settings…", this, &MainWindow::projectSettings);
     auto* agentAction = project->addAction("Agent collaboration…", this, &MainWindow::agentSettings);
     agentAction->setObjectName("agentCollaborationAction");
+    auto* remoteAction = project->addAction("Phone remote…", this, &MainWindow::remoteSettings);
+    remoteAction->setObjectName("remoteControlAction");
     outputsAction_ = project->addAction("Outputs…", this, &MainWindow::outputSettings);
     outputsAction_->setObjectName("outputSettingsAction");
     auto* tracks = project->addMenu("Add track");
@@ -251,6 +253,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this) {
     connect(outputsButton_, &QPushButton::clicked, this, &MainWindow::outputSettings);
     showButton_ = button("Show mode", bar); showButton_->setCheckable(true);
     connect(showButton_, &QPushButton::clicked, this, &MainWindow::requestShowMode);
+    remoteButton_ = button("Remote · off", bar);
+    remoteButton_->setObjectName("remoteControlButton");
+    remoteButton_->setToolTip("Run playback from a phone or tablet on this network");
+    connect(remoteButton_, &QPushButton::clicked, this, &MainWindow::remoteSettings);
     agentButton_ = button("Agent · off", bar);
     agentButton_->setObjectName("agentCollaborationButton");
     connect(agentButton_, &QPushButton::clicked, this, &MainWindow::agentSettings);
@@ -460,6 +466,8 @@ void MainWindow::refresh() {
 void MainWindow::updatePlayback() {
     agentButton_->setText(!mcp_.running() ? "Agent · off" : !mcp_.editingEnabled() ? "Agent · read only" : c_.canEdit(false) ? "Agent · editing" : "Agent · locked");
     agentButton_->setToolTip("Connect an agent to help build this show through MCP");
+    const int remotes = remote_.clients();
+    remoteButton_->setText(!remote_.running() ? "Remote · off" : remotes ? QString("Remote · %1 connected").arg(remotes) : "Remote · on");
     exportPackageAction_->setEnabled(c_.canEdit(false));
     updateRoutingPresets();
     const bool outputsAvailable = !c_.showMode && !c_.busy;
@@ -474,16 +482,9 @@ void MainWindow::updatePlayback() {
     state_->setText(label);
     state_->setStyleSheet(QString("font-weight: 600; color: %1;").arg(state == State::Playing ? "#7fd19b" : state == State::Held ? "#e5c47d" : state == State::Paused ? "#8fb4f0" : "#7d8ea6"));
     // Operator readout: the next cue and the time left in the show.
-    const Frame now = c_.position(); const Marker* upcoming = nullptr;
-    for (const auto& m : c_.project.show.markers)
-        if ((m.time > now || (m.time == now && state != State::Held)) && (!upcoming || m.time < upcoming->time)) upcoming = &m;
-    const auto clockText = [](Frame frames) {
-        const auto total = static_cast<qint64>(std::ceil(seconds(std::max<Frame>(0, frames))));
-        return total >= 3600 ? QString("%1:%2:%3").arg(total / 3600).arg(total / 60 % 60, 2, 10, QChar('0')).arg(total % 60, 2, 10, QChar('0'))
-                             : QString("%1:%2").arg(total / 60).arg(total % 60, 2, 10, QChar('0'));
-    };
-    next_->setText((upcoming ? QString("NEXT  %1 %2 · in %3").arg(upcoming->hold ? "Ⅱ" : "◆", QString::fromStdString(upcoming->name), clockText(upcoming->time - now)) : QString("No further cues")) +
-        "   ·   " + clockText(c_.project.show.duration - now) + " left");
+    const Frame now = c_.position(); const Marker* upcoming = c_.nextCue();
+    next_->setText((upcoming ? QString("NEXT  %1 %2 · in %3").arg(upcoming->hold ? "Ⅱ" : "◆", QString::fromStdString(upcoming->name), countdown(upcoming->time - now)) : QString("No further cues")) +
+        "   ·   " + countdown(c_.project.show.duration - now) + " left");
     play_->setText(playing ? "Ⅱ  Pause" : state == State::Held ? "▶  Continue" : "▶  Play");
     QString async = c_.transport.asyncVoices() ? QString(" · %1 async playing").arg(c_.transport.asyncVoices()) : "";
     health_->setText((c_.device.running() ? QString("%1 ch · 48 kHz").arg(c_.device.channels()) : "Audio · connects on Play") + async +
@@ -1223,6 +1224,58 @@ void MainWindow::agentSettings() {
         status->setText("Connection configuration copied. Paste it into your agent's MCP server settings.");
     });
     connect(copyToken, &QPushButton::clicked, &dialog, [&] { QApplication::clipboard()->setText(mcp_.token()); status->setText("Bearer token copied."); });
+    auto* close = button("Close", layout); connect(close, &QPushButton::clicked, &dialog, &QDialog::accept);
+    refresh(); dialog.exec();
+}
+
+void MainWindow::remoteSettings() {
+    QDialog dialog(this); dialog.setObjectName("remoteControlDialog"); dialog.setWindowTitle("Phone remote"); dialog.resize(580, 380);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* hint = new QLabel("Run playback from a phone or tablet on the same network: Play, Pause, Continue holds and Stop All, with the clock and next cue. "
+        "Anyone who has the link can control playback, so use a trusted network.");
+    hint->setWordWrap(true); layout->addWidget(hint);
+    auto* enabled = new QCheckBox("Enable phone remote"); enabled->setObjectName("remoteEnabled"); layout->addWidget(enabled);
+    auto* form = new QFormLayout; layout->addLayout(form);
+    auto* port = intSpin(1024, 65535); port->setObjectName("remotePort"); form->addRow("Network port", port);
+    port->setValue(remote_.running() ? remote_.port() : QSettings().value("remote/port", 48124).toInt());
+    auto* links = new QTextEdit; links->setObjectName("remoteLinks"); links->setReadOnly(true); links->setMaximumHeight(96);
+    links->setStyleSheet("font-family: 'Menlo', 'Consolas'; font-size: 14px;"); form->addRow("Open on the phone", links);
+    auto* actions = new QHBoxLayout; layout->addLayout(actions);
+    auto* copy = button("Copy link", actions); copy->setObjectName("copyRemoteLink");
+    auto* change = button("Change link…", actions); change->setObjectName("changeRemoteLink");
+    change->setToolTip("Phones using the current link stop working until they open the new one");
+    actions->addStretch();
+    auto* status = new QLabel; status->setObjectName("remoteStatus"); status->setWordWrap(true); layout->addWidget(status);
+    auto* note = new QLabel("The link stays the same between sessions, so the page can be bookmarked or added to the home screen. "
+        "Keep the phone awake and charged; the page shows when its connection drops. Stop All needs two taps on the phone.");
+    note->setWordWrap(true); note->setStyleSheet("color: #88a0be; font-size: 11px;"); layout->addWidget(note);
+    layout->addStretch();
+    const auto updateStatus = [&] {
+        const int devices = remote_.clients();
+        status->setText(!remote_.running() ? "Disabled." : remote_.links().isEmpty() ? "No network connection found. Connect this computer to the phone's network." :
+            devices ? QString("%1 device%2 connected.").arg(devices).arg(devices == 1 ? "" : "s") : "Waiting for a phone to open the link.");
+    };
+    const auto refresh = [&] {
+        QSignalBlocker block(enabled);
+        enabled->setChecked(remote_.running()); port->setEnabled(!remote_.running());
+        const auto addresses = remote_.links();
+        links->setPlainText(addresses.join("\n")); links->setEnabled(remote_.running());
+        copy->setEnabled(!addresses.isEmpty()); change->setEnabled(true);
+        updateStatus();
+    };
+    connect(&remote_, &RemoteServer::stateChanged, &dialog, refresh);
+    connect(&c_, &Controller::tick, &dialog, updateStatus);
+    connect(enabled, &QCheckBox::toggled, &dialog, [&](bool on) {
+        if (!on) { remote_.stop(); c_.report("Phone remote disabled."); return; }
+        if (!remote_.start(static_cast<quint16>(port->value()))) { refresh(); status->setText("Cannot start the phone remote: " + remote_.errorString()); }
+    });
+    connect(copy, &QPushButton::clicked, &dialog, [&] {
+        if (const auto addresses = remote_.links(); !addresses.isEmpty()) { QApplication::clipboard()->setText(addresses.front()); status->setText("Link copied."); }
+    });
+    connect(change, &QPushButton::clicked, &dialog, [&] {
+        if (QMessageBox::question(&dialog, "Change remote link?", "Phones using the current link stop working until they open the new one.",
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) == QMessageBox::Yes) remote_.changeKey();
+    });
     auto* close = button("Close", layout); connect(close, &QPushButton::clicked, &dialog, &QDialog::accept);
     refresh(); dialog.exec();
 }

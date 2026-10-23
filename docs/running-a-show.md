@@ -65,6 +65,8 @@ Pause is useful when show time must wait without ending ambience. It is not sile
 
 In edit mode, Escape invokes Stop All outside editing controls; inside a field it can cancel editing. In Show mode, press **Escape twice within 600 ms** to Stop All. The first press prompts for the second. The Stop All button always takes one click. Held pictures remain at the current position after Stop All; it is not a blackout command.
 
+A phone or tablet can also play, pause, continue holds, and Stop All from its browser; see [Phone remote](remote-control.md).
+
 External MIDI equipment does not receive an automatic stop message. Stop/panic that equipment separately or use intentionally programmed MIDI cleanup cues.
 
 ## Respond to a problem

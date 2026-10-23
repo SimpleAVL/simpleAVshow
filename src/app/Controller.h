@@ -27,6 +27,8 @@ public:
     QString path, status = "Press Play to use your speakers. Choose show equipment in Outputs.", audioName;
     QString playbackProblem;
     Frame position() const { return transport.position(); }
+    // The operator's next cue: later than the playhead, or at it unless that hold is already holding.
+    const Marker* nextCue() const;
     bool canEdit(bool report = true);
     bool edit(const std::function<void(Project&)>& mutation);
     void undo();

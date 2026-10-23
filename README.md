@@ -39,6 +39,7 @@ The [illustrated user manual](docs/README.md) covers installation, timeline edit
 - [Clip automation](docs/editing-a-show.md#automation-and-fade-helpers) for volume, pan, position, scale, and opacity: edit keyframes on the timeline, shape segments with Linear/Hold/Curve/S-curve, and use fade helpers.
 - MIDI cues sent on arrival or on resume, with a guided editor for notes, controls, programs, pitch bend, and raw/SysEx messages.
 - Show mode with a preflight check, editing/seek lock, next-cue countdown, and confirmations before leaving or quitting.
+- [Phone remote](docs/remote-control.md): play, pause, continue holds, and Stop All from a phone's browser on the same network, with the clock and next cue.
 - Atomic saves, autosave recovery, relinking of missing media, and portable `.savpack` packages that open on any supported platform.
 - Opt-in [MCP agent collaboration](docs/agent-collaboration.md): build the same live show with an agent, with shared undo, conflict checks, and operator-controlled editing.
 

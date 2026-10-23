@@ -81,10 +81,11 @@ if(SAV_BUILD_APP)
   add_library(sav_desktop
     src/app/Project.cpp src/app/ProjectPackage.cpp src/app/Controller.cpp
     src/app/Timeline.cpp src/app/ProgramView.cpp src/app/MainWindow.cpp
-    src/app/MidiMessageEditor.cpp src/app/McpServer.cpp
+    src/app/MidiMessageEditor.cpp src/app/McpServer.cpp src/app/RemoteServer.cpp
     src/media/Media.cpp src/media/AudioSources.cpp src/media/AudioDevice.cpp src/media/MidiOutput.cpp
   )
   target_include_directories(sav_desktop PUBLIC src ${RTMIDI_HEADER_DIR} PRIVATE ${FFMPEG_INCLUDE_DIR})
+  qt_add_resources(sav_desktop remote PREFIX "/remote" BASE src/app FILES src/app/remote.html)
   target_link_libraries(sav_desktop PUBLIC sav_core Qt6::Widgets Qt6::Concurrent Qt6::Network ${SAV_RTAUDIO} ${SAV_RTMIDI} PRIVATE ${SAV_FFMPEG} LibArchive::LibArchive)
   if(MSVC)
     target_compile_options(sav_desktop PUBLIC /utf-8)
@@ -119,6 +120,10 @@ if(SAV_BUILD_APP)
   target_link_libraries(mcp_tests PRIVATE sav_desktop Qt6::Test)
   add_test(NAME mcp COMMAND mcp_tests)
   set_tests_properties(mcp PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+  add_executable(remote_tests tests/remote_tests.cpp)
+  target_link_libraries(remote_tests PRIVATE sav_desktop Qt6::Test)
+  add_test(NAME remote COMMAND remote_tests)
+  set_tests_properties(remote PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
   add_test(NAME app COMMAND app_tests)
   set_tests_properties(app PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
   # Keep the generated Info.plist in sync with --version and release tags.

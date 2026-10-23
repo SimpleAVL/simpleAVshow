@@ -37,6 +37,8 @@ void materializeProjectMedia(Project& project, const QString& directory);
 // Removes package extractions abandoned by crashed instances; call once at startup.
 void removeStalePackageDirectories();
 QString timecode(Frame position, double fps = 24);
+// Whole seconds remaining, rounded up: M:SS, or H:MM:SS from an hour.
+QString countdown(Frame duration);
 Envelope* envelope(Clip& clip, int property);
 // Sets a clip's timing; a left trim (start and offset moving together) shifts its automation.
 void retime(Clip& clip, Frame start, Frame duration, Frame offset);
