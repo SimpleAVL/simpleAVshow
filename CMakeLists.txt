@@ -87,6 +87,12 @@ if(SAV_BUILD_APP)
   )
   target_include_directories(sav_desktop PUBLIC src ${RTMIDI_HEADER_DIR} PRIVATE ${FFMPEG_INCLUDE_DIR})
   qt_add_resources(sav_desktop remote PREFIX "/remote" BASE src/app FILES src/app/remote.html)
+  qt_add_resources(sav_desktop docs PREFIX "/docs" BASE docs FILES
+    docs/README.md docs/getting-started.md docs/editing-a-show.md
+    docs/audio-and-outputs.md docs/cues-and-midi.md docs/running-a-show.md
+    docs/remote-control.md docs/saving-and-recovery.md docs/agent-collaboration.md
+    docs/reference-and-troubleshooting.md docs/hardware-validation.md
+  )
   target_link_libraries(sav_desktop PUBLIC sav_core Qt6::Widgets Qt6::Concurrent Qt6::Network ${SAV_RTAUDIO} ${SAV_RTMIDI} PRIVATE ${SAV_FFMPEG} LibArchive::LibArchive)
   if(MSVC)
     target_compile_options(sav_desktop PUBLIC /utf-8)

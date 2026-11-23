@@ -33,6 +33,8 @@ public:
     bool edit(const std::function<void(Project&)>& mutation);
     void undo();
     void redo();
+    std::size_t undoCount() const { return undo_.size(); }
+    std::size_t redoCount() const { return redo_.size(); }
     void replace(Project next, QString projectPath = {});
     void toggle();
     void seek(Frame position);

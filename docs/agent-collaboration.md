@@ -59,9 +59,9 @@ The top-bar button always tells you what the agent can do right now: **Agent · 
 
 ### What the agent can and cannot do
 
-- **Can read (always, when enabled):** Project settings, tracks, clips, automation curves, cues, media metadata, and current operator state—even during playback or Show mode.
-- **Can write (only when editing is allowed):** Update project settings; add, patch, or delete tracks/clips/cues; and import local audio, image, and video files. *(New audio tracks created by an agent start disconnected—check their routing before rehearsal.)*
-- **Operator-only controls:** The agent can **never** save or open files, export packages, control playback, enter/leave Show mode, open audience displays, configure audio/MIDI devices, or send MIDI directly.
+- **Can always read and advise (even during playback or Show mode):** Project settings, tracks, clips, automation curves, cues, media metadata, preflight checks, rendered preview frames, app/hardware environment (audio/MIDI/displays/remote), MIDI encoding, and the entire built-in user manual.
+- **Can edit and operate when editing is enabled (and Show mode is off):** Update project settings; add, patch, reorder, split, or delete tracks, clips, automation curves, cues, and unused assets; undo/redo; seek and select items on the timeline; browse, import, and relink local media; configure audio/MIDI/audience display outputs and the phone remote; save/export/open shows; and run rehearsal playback (`play`, `pause`, `continue`, `stop_all`, `seek`). *(New audio tracks created by an agent start disconnected—check their routing before rehearsal.)*
+- **Operator-only live guardrail:** **Show mode** stays strictly operator-only. An agent can never enter or leave Show mode, and all mutations, hardware/file changes, and transport controls are automatically blocked while Show mode is active.
 
 ### Built-in guardrails
 
@@ -80,10 +80,21 @@ The top-bar button always tells you what the agent can do right now: **Agent · 
 | `get_show` | Returns the full project snapshot, library metadata, operator state, and current `revision`. *(Also available as MCP resource `simpleavshow://show`.)* |
 | `get_preflight` | Runs Show-mode readiness checks and reports missing media, disconnected audio tracks containing clips, unused assets, next cue, and show summary. Safe during playback and Show mode. |
 | `render_preview` | Renders the composed program picture at any timeline frame (`time`, defaulting to the current playhead) as a PNG image plus active clip/marker metadata, without moving the playhead or disturbing playback. |
-| `apply_edits` | Atomically applies up to 256 `project`, `track`, `clip`, `marker`, `split_clip`, `delete_clip`, `delete_marker`, `delete_track`, or `delete_asset` operations. |
+| `get_environment` | Reports app version, OS, audio/MIDI settings and available devices (probed only while stopped), health counters, connected displays, phone remote status, undo/redo depth, and selection. *(Also exposed as `simpleavshow://environment`.)* |
+| `get_app_guide` | Reads any chapter of SimpleAVShow's built-in user manual (`topic`) or searches across all chapters (`query`) for rules, settings, shortcuts, and troubleshooting. *(Chapters are also exposed as `simpleavshow://docs/<topic>` resources.)* |
+| `encode_midi` | Converts musical MIDI parameters (Note On/Off, CC, Program Change, Pressure, Pitch Bend, or hex/SysEx) into validated byte arrays for cues. |
+| `apply_edits` | Atomically applies up to 256 `project`, `track`, `clip` (including all 6 automation curves with `linear`/`hold`/`curve`/`scurve` shapes and bend), `marker`, `split_clip`, `move_track`, `delete_clip`, `delete_marker`, `delete_track`, or `delete_asset` operations. |
+| `history` | Steps backward (`undo`) or forward (`redo`) through the shared 32-step undo history. |
+| `seek_and_select` | Jumps the playhead and/or selects a track, clip, or marker in the timeline and inspector (never sends MIDI). |
+| `list_media_files` | Lists supported audio, video, and image files in a local folder before importing. |
 | `import_media` | Starts background preparation for up to 64 absolute local file paths; returns a `job_id`. |
 | `get_import` | Polls an import job until `ready` or `failed`, returning prepared asset IDs and metadata. |
 | `commit_import` | Adds the staged assets to the Media library as one undo step using a fresh show `revision`. |
+| `relink_media` | Searches a local folder recursively by file name to relink offline assets in one undo step. |
+| `configure_outputs` | Configures audio driver/device/channels/buffer, MIDI output port, audience display, or sends a single test MIDI message (stopped, outside Show mode). |
+| `configure_remote` | Starts/stops the phone remote, sets its port, or rotates its secret key (outside Show mode). |
+| `project_action` | Saves `.savshow`, saves as, exports `.savpack`, creates a new show, opens the demo, or opens an existing show/package (refuses to discard unsaved edits unless `discard_unsaved: true`). |
+| `transport_control` | Rehearsal playback control (`play`, `pause`, `continue`, `stop_all`, `seek`); strictly blocked in Show mode. |
 
 ### Key conventions for agent callers
 

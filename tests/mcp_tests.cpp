@@ -60,7 +60,7 @@ private slots:
         const auto init = rpc(server, "initialize", {{"protocolVersion", "2025-11-25"}, {"clientInfo", QJsonObject{{"name", "test"}, {"version", "1"}}}, {"capabilities", QJsonObject{}}});
         QCOMPARE(init.status, 200); QCOMPARE(init.body["id"].toString(), "test");
         QCOMPARE(init.body["result"].toObject()["protocolVersion"].toString(), "2025-11-25");
-        QCOMPARE(rpc(server, "tools/list").body["result"].toObject()["tools"].toArray().size(), 7);
+        QCOMPARE(rpc(server, "tools/list").body["result"].toObject()["tools"].toArray().size(), 18);
         QCOMPARE(http(server, "{}", "POST", {{"Authorization", "Bearer wrong"}}).status, 401);
         QCOMPARE(http(server, "{}", "POST", {{"Origin", "https://example.com"}}).status, 403);
         QCOMPARE(http(server, "{}", "POST", {{"Host", "example.com"}}).status, 403);
@@ -277,6 +277,132 @@ private slots:
         QVERIFY(!c.project.assets.contains("demo-backdrop"));
         c.undo();
         QVERIFY(c.project.assets.contains("demo-backdrop"));
+        server.stop();
+    }
+    void knowledgeEnvironmentHistoryAndFullControlTools() {
+        MainWindow window;
+        window.controller().replace(demoProject());
+        window.show();
+        auto& server = window.mcpServer();
+        QVERIFY(server.start(0));
+
+        // 1. Embedded manual resources & get_app_guide (works read-only and in Show mode)
+        window.controller().setShowMode(true);
+        const auto resources = rpc(server, "resources/list").body["result"].toObject()["resources"].toArray();
+        QVERIFY(resources.size() >= 13);
+        const auto docRes = rpc(server, "resources/read", {{"uri", "simpleavshow://docs/audio-and-outputs"}}).body["result"].toObject();
+        QVERIFY(docRes["contents"].toArray().first().toObject()["text"].toString().contains("ASIO"));
+        const auto guideOverview = call(server, "get_app_guide")["structuredContent"].toObject();
+        QVERIFY(guideOverview["topics"].toArray().size() >= 11);
+        QVERIFY(guideOverview["content"].toString().contains("Seven rules"));
+        const auto guideSearch = call(server, "get_app_guide", {{"query", "ASIO"}})["structuredContent"].toObject();
+        QVERIFY(!guideSearch["matches"].toArray().isEmpty());
+        QVERIFY(call(server, "get_app_guide", {{"topic", "nonexistent"}})["isError"].toBool());
+
+        // 2. get_environment works read-only in Show mode without probing live audio/MIDI drivers
+        const auto envLocked = call(server, "get_environment")["structuredContent"].toObject();
+        QCOMPARE(envLocked["app"].toObject()["name"].toString(), QString("SimpleAVShow"));
+        QCOMPARE(envLocked["audio"].toObject()["probed"].toBool(), false);
+        QVERIFY(!envLocked["remote"].toObject().contains("links"));
+
+        // 3. encode_midi covers musical types and SysEx
+        const auto noteOn = call(server, "encode_midi", {{"type", "note_on"}, {"channel", 2}, {"note", 60}, {"velocity", 110}})["structuredContent"].toObject();
+        QCOMPARE(noteOn["bytes"].toArray(), QJsonArray({0x91, 60, 110}));
+        const auto pitch = call(server, "encode_midi", {{"type", "pitch_bend"}, {"channel", 1}, {"bend", 0}})["structuredContent"].toObject();
+        QCOMPARE(pitch["bytes"].toArray(), QJsonArray({0xE0, 0, 64}));
+        const auto sysex = call(server, "encode_midi", {{"type", "raw_hex"}, {"hex", "F0 7D 01 F7"}})["structuredContent"].toObject();
+        QCOMPARE(sysex["bytes"].toArray(), QJsonArray({0xF0, 0x7D, 0x01, 0xF7}));
+        QVERIFY(call(server, "encode_midi", {{"type", "raw_hex"}, {"hex", "F0 7D"}})["isError"].toBool());
+
+        // 4. Show mode blocks every mutating/control tool even when editing is enabled
+        server.setEditingEnabled(true);
+        QVERIFY(call(server, "transport_control", {{"action", "seek"}, {"time", frameJson(4)}})["isError"].toBool());
+        QVERIFY(call(server, "seek_and_select", {{"time", frameJson(4)}})["isError"].toBool());
+        QVERIFY(call(server, "configure_remote", {{"enabled", true}})["isError"].toBool());
+        QVERIFY(call(server, "project_action", {{"action", "new_show"}, {"discard_unsaved", true}})["isError"].toBool());
+        window.controller().setShowMode(false);
+
+        // Now stopped & out of Show mode: get_environment probes safely
+        const auto envUnlocked = call(server, "get_environment")["structuredContent"].toObject();
+        QCOMPARE(envUnlocked["audio"].toObject()["probed"].toBool(), true);
+        QVERIFY(envUnlocked["displays"].toObject()["screens"].toArray().size() >= 1);
+
+        // 5. move_track reorders tracks and remaps clip indices, and history undoes/redoes
+        const QString overlayId = QString::fromStdString(window.controller().project.show.tracks[1].id);
+        QVERIFY(!edits(server, {operation("move_track", overlayId, {{"index", 0}})})["isError"].toBool());
+        QCOMPARE(QString::fromStdString(window.controller().project.show.tracks[0].id), overlayId);
+        // Backdrop clip (originally on track 0) shifted to track 1; Title clip (originally on track 1) shifted to track 0.
+        QCOMPARE(window.controller().project.show.clips[0].track, 1);
+        QCOMPARE(window.controller().project.show.clips[1].track, 0);
+        const auto undone = call(server, "history", {{"expected_revision", revision(server)}, {"action", "undo"}});
+        QVERIFY(!undone["isError"].toBool());
+        QCOMPARE(QString::fromStdString(window.controller().project.show.tracks[1].id), overlayId);
+        const auto redone = call(server, "history", {{"expected_revision", revision(server)}, {"action", "redo"}});
+        QVERIFY(!redone["isError"].toBool());
+        QCOMPARE(QString::fromStdString(window.controller().project.show.tracks[0].id), overlayId);
+
+        // 6. seek_and_select and transport_control (seek / stop_all)
+        const QString firstClipId = QString::fromStdString(window.controller().project.show.clips.front().id);
+        const auto nav = call(server, "seek_and_select", {{"time", frameJson(5)}, {"clip_id", firstClipId}});
+        QVERIFY(!nav["isError"].toBool());
+        QCOMPARE(window.controller().position(), frames(5));
+        QCOMPARE(nav["structuredContent"].toObject()["selection"].toObject()["selected_clip"].toString(), firstClipId);
+        QVERIFY(!call(server, "transport_control", {{"action", "seek"}, {"time", frameJson(2)}})["isError"].toBool());
+        QCOMPARE(window.controller().position(), frames(2));
+        QVERIFY(!call(server, "transport_control", {{"action", "stop_all"}})["isError"].toBool());
+
+        // 7. list_media_files, relink_media, and project_action (save_as, export_package, open_project, new_show)
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QImage img(16, 16, QImage::Format_RGB32); img.fill(Qt::blue);
+        const QString imgPath = dir.filePath("stage.png");
+        QVERIFY(img.save(imgPath));
+        const auto listed = call(server, "list_media_files", {{"directory", dir.path()}});
+        QVERIFY(!listed["isError"].toBool());
+        QCOMPARE(listed["structuredContent"].toObject()["count"].toInt(), 1);
+        QCOMPARE(listed["structuredContent"].toObject()["files"].toArray().first().toObject()["kind"].toString(), QString("image"));
+
+        // Save, export package, refuse discard_unsaved=false when dirty, open_project, and relink offline asset
+        const QString showPath = dir.filePath("agent-show.savshow");
+        const QString packPath = dir.filePath("agent-show.savpack");
+        QVERIFY(!call(server, "project_action", {{"action", "save_as"}, {"path", showPath}})["isError"].toBool());
+        QVERIFY(QFileInfo::exists(showPath));
+        QVERIFY(!window.controller().dirty);
+        QVERIFY(!call(server, "project_action", {{"action", "export_package"}, {"path", packPath}})["isError"].toBool());
+        QVERIFY(QFileInfo::exists(packPath));
+        QVERIFY(!call(server, "project_action", {{"action", "new_show"}})["isError"].toBool());
+        QVERIFY(window.controller().project.show.clips.empty());
+        QVERIFY(!call(server, "project_action", {{"action", "open_project"}, {"path", showPath}})["isError"].toBool());
+        QCOMPARE(window.controller().project.title, QString("The opening scene"));
+
+        // Simulate an offline asset matching stage.png and relink via MCP
+        QVERIFY(window.controller().edit([&](Project& p) {
+            MediaAsset offline; offline.id = "off-1"; offline.name = "stage.png"; offline.path = "/missing/stage.png"; offline.offline = true; offline.problem = "Missing";
+            p.assets.insert(offline.id, offline);
+        }));
+        QVERIFY(call(server, "project_action", {{"action", "new_show"}})["isError"].toBool()); // Dirty without discard_unsaved
+        const auto relinked = call(server, "relink_media", {{"expected_revision", revision(server)}, {"directory", dir.path()}});
+        QVERIFY(!relinked["isError"].toBool());
+        QCOMPARE(relinked["structuredContent"].toObject()["relink"].toObject()["relinked"].toInt(), 1);
+        QVERIFY(!window.controller().project.assets["off-1"].offline);
+
+        // 8. configure_remote toggles the phone remote cleanly
+        QTcpServer probe;
+        QVERIFY(probe.listen(QHostAddress::LocalHost, 0));
+        const int freeRemotePort = probe.serverPort();
+        probe.close();
+        const auto remOn = call(server, "configure_remote", {{"enabled", true}, {"port", freeRemotePort}});
+        QVERIFY(!remOn["isError"].toBool());
+        QVERIFY(window.remoteServer().running());
+        const auto remOff = call(server, "configure_remote", {{"enabled", false}});
+        QVERIFY(!remOff["isError"].toBool());
+        QVERIFY(!window.remoteServer().running());
+
+        // 9. configure_outputs display guard (refuses covering editor unless allow_cover_editor=true) & midi off
+        QVERIFY(call(server, "configure_outputs", {{"display", QJsonObject{{"open", true}, {"screen", 0}}}})["isError"].toBool());
+        QVERIFY(!call(server, "configure_outputs", {{"midi", QJsonObject{{"port", "none"}}}})["isError"].toBool());
+
+        window.controller().dirty = false;
         server.stop();
     }
 };

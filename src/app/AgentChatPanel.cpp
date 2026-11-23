@@ -196,9 +196,9 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
     // Guardrails row: Allow edits + Undo + MCP Settings + Logs
     auto* guardRow = new QHBoxLayout;
     guardRow->setSpacing(6);
-    allowEditing_ = new QCheckBox("Allow show edits");
+    allowEditing_ = new QCheckBox("Allow edits & controls");
     allowEditing_->setObjectName("agentChatAllowEditing");
-    allowEditing_->setToolTip("Allow the agent to edit this show and import media. Every batch is a single Undo step.");
+    allowEditing_->setToolTip("Allow the agent to edit this show, import/relink media, configure outputs/remote, save/export, and run rehearsal playback. Locked in Show mode.");
     guardRow->addWidget(allowEditing_);
     guardRow->addStretch();
     undoButton_ = compactButton("Undo edit", guardRow);
@@ -606,11 +606,10 @@ QString AgentChatPanel::buildFirstTurnPrompt(const QString& userText) const {
     return QString(
         "[SimpleAVShow embedded assistant context]\n"
         "You are running inside SimpleAVShow's Agent Chat panel with the `simpleavshow` MCP server attached.\n"
-        "- Call `get_show` to inspect the open show, tracks, clips, cues, media assets, and revision.\n"
-        "- Call `get_preflight` to check show readiness, disconnected tracks, missing media, and unused assets.\n"
-        "- Call `render_preview` to visually inspect the composed program picture at any timeline frame.\n"
-        "- When the operator enables editing, use `apply_edits` (project, track, clip, marker, split_clip, delete_clip, delete_marker, delete_track, delete_asset) and `import_media` / `get_import` / `commit_import`.\n"
-        "- All timeline and automation times are 48,000 Hz audio frames (`seconds * 48000`). The operator controls playback, Show mode, outputs, and saving.\n"
+        "- Read & advise (always safe): `get_show`, `get_preflight`, `get_environment` (audio/MIDI/displays/remote/app settings), `get_app_guide` (built-in user manual chapters & search), `render_preview` (PNG frame at any time), and `encode_midi`.\n"
+        "- When asked about settings, routing, ASIO, MIDI, holds, automation, or troubleshooting, check `get_environment` and `get_app_guide` so your advice matches this computer and SimpleAVShow's exact behavior.\n"
+        "- When the operator enables editing/control (and Show mode is off): `apply_edits` (project, track, clip including all 6 automation curves `volume`/`balance`/`positionX`/`positionY`/`size`/`alpha` with `linear`/`hold`/`curve`/`scurve` shapes and bend, marker, `split_clip`, `move_track`, `delete_clip`/`delete_marker`/`delete_track`/`delete_asset`), `history` (undo/redo), `seek_and_select`, `list_media_files`, `import_media`/`get_import`/`commit_import`, `relink_media`, `configure_outputs`, `configure_remote`, `project_action` (save/save_as/export_package/new_show/open_demo/open_project), and `transport_control` (rehearsal play/pause/continue/stop_all/seek).\n"
+        "- All timeline and automation times are 48,000 Hz audio frames (`seconds * 48000`). Show mode stays strictly operator-only.\n"
         "- Keep replies concise and practical for a live-show operator.\n\n"
         "%1").arg(userText);
 }

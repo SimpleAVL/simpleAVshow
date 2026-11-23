@@ -103,7 +103,7 @@ private:
     void setAgentChatVisible(bool visible);
     void remoteSettings();
     void outputSettings();
-    void openOutput(int screen);
+    void openOutput(int screen, bool confirmEditorCover = true);
     void screensChanged();
     void requestShowMode(bool enabled);
     void save(bool as = false);

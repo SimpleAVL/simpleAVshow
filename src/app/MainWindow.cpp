@@ -120,6 +120,65 @@ public:
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), remote_(c_, this) {
     connect(&mcp_, &McpServer::aboutToEdit, this, &MainWindow::commitInspector);
+    McpHost host;
+    host.displayStatus = [this] {
+        QJsonArray screens;
+        const auto list = QGuiApplication::screens();
+        for (int i = 0; i < list.size(); ++i) {
+            screens.append(QJsonObject{{"index", i}, {"name", list[i]->name()},
+                {"width", list[i]->size().width()}, {"height", list[i]->size().height()},
+                {"is_editor", list[i] == screen()}});
+        }
+        return QJsonObject{{"screens", screens}, {"remembered_screen", QSettings().value("display/screen").toString()},
+            {"output_open", bool(outputWindow_ && outputWindow_->isVisible())},
+            {"output_screen", outputScreen_}};
+    };
+    host.openDisplay = [this](int index, bool allowCoverEditor, QString& error) {
+        const auto list = QGuiApplication::screens();
+        if (index < 0 || index >= list.size()) { error = "Display index out of range"; return false; }
+        if (list[index] == screen() && !allowCoverEditor) {
+            error = "That screen currently shows the editor. Choose another display or pass allow_cover_editor: true.";
+            return false;
+        }
+        openOutput(index, false);
+        return bool(outputWindow_ && outputWindow_->isVisible());
+    };
+    host.closeDisplay = [this] { if (outputWindow_) outputWindow_->hide(); };
+    host.remoteStatus = [this] {
+        QJsonArray links;
+        for (const auto& link : remote_.links()) links.append(link);
+        return QJsonObject{{"available", true}, {"running", remote_.running()},
+            {"port", remote_.running() ? static_cast<int>(remote_.port()) : QSettings().value("remote/port", 48124).toInt()},
+            {"clients", remote_.clients()}, {"links", links}};
+    };
+    host.configureRemote = [this](bool enable, int port, bool changeKey, QString& error) {
+        if (changeKey) remote_.changeKey();
+        if (!enable) {
+            if (remote_.running()) { remote_.stop(); c_.report("Phone remote disabled."); }
+            return true;
+        }
+        const quint16 targetPort = port >= 1024 && port <= 65535
+            ? static_cast<quint16>(port)
+            : static_cast<quint16>(remote_.running() ? remote_.port() : QSettings().value("remote/port", 48124).toInt());
+        if (remote_.running() && remote_.port() != targetPort) remote_.stop();
+        if (!remote_.running() && !remote_.start(targetPort)) { error = remote_.errorString(); return false; }
+        return true;
+    };
+    host.selectItem = [this](int track, const QString& clipId, const QString& markerId) {
+        if (!timeline_) return;
+        if (!clipId.isEmpty()) timeline_->selectClip(clipId);
+        else if (!markerId.isEmpty()) timeline_->selectMarker(markerId);
+        else if (track >= 0 && track < static_cast<int>(c_.project.show.tracks.size())) {
+            timeline_->selectedTrack = track; timeline_->selectedClip.clear(); timeline_->selectedMarker.clear();
+            updateInspector(); timeline_->update();
+        }
+    };
+    host.currentSelection = [this] {
+        return QJsonObject{{"selected_track", timeline_ ? timeline_->selectedTrack : -1},
+            {"selected_clip", timeline_ ? timeline_->selectedClip : QString()},
+            {"selected_marker", timeline_ ? timeline_->selectedMarker : QString()}};
+    };
+    mcp_.setHost(std::move(host));
     setWindowTitle("SimpleAVShow"); resize(1440, 960); setMinimumSize(1100, 720);
     setStyleSheet(R"(
       QMainWindow, QDialog { background: #111720; color: #dee7f3; }
@@ -979,7 +1038,7 @@ void MainWindow::outputSettings() {
     connect(stopForSettings, &QPushButton::clicked, &dialog, [&] { c_.stopAll(); updateConnections(); });
     updateConnections(); dialog.exec();
 }
-void MainWindow::openOutput(int index) {
+void MainWindow::openOutput(int index, bool confirmEditorCover) {
     const auto screens = QGuiApplication::screens(); if (index < 0 || index >= screens.size()) return;
     if (!outputWindow_) {
         outputWindow_ = new QWidget(this, Qt::Window | Qt::FramelessWindowHint); outputWindow_->setWindowTitle("SimpleAVShow — Program"); outputWindow_->setStyleSheet("background: black;");
@@ -987,7 +1046,7 @@ void MainWindow::openOutput(int index) {
         outputWindow_->setCursor(Qt::BlankCursor);
         auto* close = new QShortcut(QKeySequence::Close, outputWindow_); connect(close, &QShortcut::activated, outputWindow_, &QWidget::hide);
     }
-    if (screens[index] == screen() && QMessageBox::question(this, "Cover the editor?",
+    if (confirmEditorCover && screens[index] == screen() && QMessageBox::question(this, "Cover the editor?",
             "This display shows the editor. The program output will cover it until you press " + QKeySequence(QKeySequence::Close).toString(QKeySequence::NativeText) + " on the output.",
             QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Ok) return;
     output_->setPicture(c_.compose()); outputWindow_->hide(); outputWindow_->winId(); outputWindow_->windowHandle()->setScreen(screens[index]);
