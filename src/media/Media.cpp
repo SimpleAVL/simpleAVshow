@@ -87,7 +87,10 @@ public:
         const Frame output = std::max<Frame>(0, frame - start_ - preroll);
         // Resume on a resampling phase boundary, where output and input samples coincide exactly.
         target_ = output / stepOut_ * stepIn_; retries_ = 0;
-        if (target_ == 0 || !anchored_) restart(); else seekInput(target_);
+        const auto base = input_->format->streams[stream_]->time_base;
+        // A timestamp tick coarser than one input sample cannot tell us which sample we landed on.
+        if (target_ == 0 || !anchored_ || av_compare_ts(1, base, 1, {1, rate_}) > 0) restart();
+        else seekInput(target_);
     }
 private:
     QString path_;
@@ -147,7 +150,7 @@ private:
         start_ = frames(startTime);
     }
     // Decoding again from the start always matches; also the fallback when seeking cannot be trusted.
-    void restart() { open(); }
+    void restart() { target_ = 0; open(); }
     void seekInput(std::int64_t sample) {
         const auto base = input_->format->streams[stream_]->time_base;
         checked(av_seek_frame(input_->format, stream_, firstPts_ + av_rescale_q(sample - ptsOffset_, {1, rate_}, base), AVSEEK_FLAG_BACKWARD), "Seek audio");

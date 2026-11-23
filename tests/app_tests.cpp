@@ -36,6 +36,8 @@
 #include <QStandardPaths>
 #include <QUuid>
 #include <QtEndian>
+#include <bit>
+#include <chrono>
 #include <filesystem>
 #include <future>
 
@@ -1428,7 +1430,14 @@ private slots:
         // noise bands differ (inaudibly) after any seek; without it, placement must be exact.
         QTest::newRow("aac-48k-m4a") << QStringList{"-ar", "48000", "-c:a", "aac", "-aac_pns", "0", "-b:a", "192k", "x.m4a"};
         QTest::newRow("opus-ogg") << QStringList{"-c:a", "libopus", "-b:a", "128k", "x.opus"};
+        QTest::newRow("opus-webm-ms") << QStringList{"-c:a", "libopus", "-b:a", "128k", "x.webm"};
+        QTest::newRow("aac-mka-44k-ms") << QStringList{"-ar", "44100", "-c:a", "aac", "-aac_pns", "0", "x.mka"};
+        QTest::newRow("aac-adts-32k") << QStringList{"-ar", "32000", "-c:a", "aac", "-aac_pns", "0", "x.aac"};
+        QTest::newRow("mp3-22k-stereo") << QStringList{"-ar", "22050", "-c:a", "libmp3lame", "x.mp3"};
+        QTest::newRow("wav-32k-short-mono") << QStringList{"-t", "0.03", "-ar", "32000", "-ac", "1", "-c:a", "pcm_s16le", "x.wav"};
+        QTest::newRow("wav-22k-stereo") << QStringList{"-ar", "22050", "-c:a", "pcm_s16le", "x.wav"};
         QTest::newRow("vorbis-32k") << QStringList{"-ar", "32000", "-c:a", "libvorbis", "x.ogg"};
+        QTest::newRow("vorbis-native-44k") << QStringList{"-ar", "44100", "-c:a", "vorbis", "-strict", "experimental", "x.ogg"};
     }
     void streamedAudioMatchesPreparedCache() {
         QFETCH(QStringList, encode);
@@ -1447,16 +1456,21 @@ private slots:
         QCOMPARE(streamed->length(), prepared->length()); QCOMPARE(streamed->mono, prepared->mono); QCOMPARE(streamed->peaks, prepared->peaks);
         // Out of order: sequential continuation, forward skips, seeks back, and more places than decoders.
         const Frame length = streamed->length();
-        const std::vector<Frame> starts{0, 1000, 1512, 8191, frames(3) + 7, frames(7) + 12345, 400, frames(9), frames(2), frames(5) + 1, frames(11), length - 600, 30};
-        float worst = 0;
+        const std::vector<Frame> starts{0, 1000, 1512, 8191, frames(3) + 7, frames(7) + 12345, 400, frames(9), frames(2), frames(5) + 1, frames(11), length - 600, 30, length - 1};
         for (const Frame start : starts) {
+            if (start < 0 || start >= length) continue;
             const auto count = static_cast<std::size_t>(std::min<Frame>(512, length - start));
             std::vector<float> a(count * 2), b(count * 2);
             prepared->storage->read(start, a.data(), count); streamed->storage->read(start, b.data(), count);
-            for (std::size_t i = 0; i < a.size(); ++i) worst = std::max(worst, std::abs(a[i] - b[i]));
+            const auto diff = std::mismatch(a.begin(), a.end(), b.begin(), [](float x, float y) {
+                return std::bit_cast<quint32>(x) == std::bit_cast<quint32>(y);
+            });
+            if (diff.first != a.end()) {
+                const auto sample = diff.first - a.begin();
+                QFAIL(qPrintable(QString("read at %1: first mismatch at frame %2 channel %3 (%4 vs %5)")
+                    .arg(start).arg(start + sample / 2).arg(sample % 2).arg(*diff.first, 0, 'g', 9).arg(*diff.second, 0, 'g', 9)));
+            }
         }
-        // Same decoder, pre-roll and resampling phase: seeked output is bit-identical.
-        QCOMPARE(worst, 0.f);
         // Reopening reuses the waveform summary.
         QCOMPARE(loadMedia(file).audio->peaks, streamed->peaks);
         QCOMPARE(caches.entryList({"*.stream"}, QDir::Files).isEmpty(), false);
