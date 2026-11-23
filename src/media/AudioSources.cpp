@@ -29,7 +29,7 @@ namespace {
 constexpr qint64 stereoBytes = 2 * sizeof(float);
 constexpr qint64 legacyHeader = 8 + 8 + 1 + 32 + 32, metadataHeader = legacyHeader + 32;
 constexpr char legacyMagic[] = "SAVPCM01", cacheMagic[] = "SAVMETA2";
-constexpr char indexMagic[] = "SAVIDX01", waveMagic[] = "SAVWAV01", streamMagic[] = "SAVSTRM1";
+constexpr char indexMagic[] = "SAVIDX01", waveMagic[] = "SAVWAV01", streamMagic[] = "SAVSTRM2";
 constexpr qint64 staleAge = 7ll * 24 * 3600 * 1000;
 constexpr qint64 racyWindow = 2000; // Coarse (FAT: 2 s) timestamps can hide a rewrite during hashing.
 constexpr qsizetype maxIndexEntries = 4096;
@@ -336,10 +336,14 @@ std::optional<AudioSummary> StreamSummary::reuse(bool mono) const {
     AudioSummary summary;
     summary.length = qFromLittleEndian<qint64>(bytes.constData() + 40); summary.mono = bytes[48] != 0;
     const auto peakCount = (summary.length + AudioData::peakStride - 1) / AudioData::peakStride;
-    if (summary.length <= 0 || summary.length > maxFrame || summary.mono != mono ||
-        bytes.size() != header + peakCount * static_cast<qint64>(sizeof(float)) + 32) return {};
+    const qint64 peakBytes = peakCount * static_cast<qint64>(sizeof(float));
+    if (summary.length <= 0 || summary.length > maxFrame || summary.mono != mono || bytes.size() < header + peakBytes + 8 + 32) return {};
+    const qint64 points = qFromLittleEndian<qint64>(bytes.constData() + header + peakBytes);
+    if (points < 0 || points > summary.length || bytes.size() != header + peakBytes + 8 + points * 16 + 32) return {};
     summary.peaks.resize(static_cast<std::size_t>(peakCount));
     std::memcpy(summary.peaks.data(), bytes.constData() + header, summary.peaks.size() * sizeof(float));
+    for (const char* at = bytes.constData() + header + peakBytes + 8; summary.seekPoints.size() < static_cast<std::size_t>(points); at += 16)
+        summary.seekPoints.push_back({qFromLittleEndian<qint64>(at), qFromLittleEndian<qint64>(at + 8)});
     if (!std::all_of(summary.peaks.begin(), summary.peaks.end(), [](float value) { return std::isfinite(value) && value >= 0; })) return {};
     touch(path_); // Least-recently-used trimming.
     return summary;
@@ -354,6 +358,10 @@ void StreamSummary::save(const AudioSummary& summary) const {
     QByteArray bytes(streamMagic, 8); bytes += revisionId();
     char number[8]; qToLittleEndian<qint64>(summary.length, number); bytes.append(number, 8); bytes.append(char(summary.mono));
     bytes.append(reinterpret_cast<const char*>(summary.peaks.data()), static_cast<qsizetype>(summary.peaks.size() * sizeof(float)));
+    qToLittleEndian<qint64>(static_cast<qint64>(summary.seekPoints.size()), number); bytes.append(number, 8);
+    for (const auto& point : summary.seekPoints) {
+        qToLittleEndian<qint64>(point.pts, number); bytes.append(number, 8); qToLittleEndian<qint64>(point.sample, number); bytes.append(number, 8);
+    }
     bytes += QCryptographicHash::hash(bytes, QCryptographicHash::Sha256);
     // Concurrent imports of the same content write identical files; the last one wins.
     QSaveFile file(path_);
@@ -491,6 +499,12 @@ void trimAudioCache(qint64 maxBytes) {
         QFile::remove(directory.filePath(entry->key + ".meta"));
         total -= entry->bytes;
     }
+}
+
+qint64 audioCacheBytes() {
+    qint64 total = 0;
+    for (const auto& file : QDir(audioCacheDirectory()).entryInfoList(QDir::Files)) total += file.size();
+    return total;
 }
 
 std::shared_ptr<const AudioData> loadPcmWave(const QString& path) {

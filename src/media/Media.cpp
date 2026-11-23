@@ -7,6 +7,7 @@
 #include <atomic>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -67,8 +68,12 @@ public:
     // Seeks start this far early: codecs converge (MP3 bit reservoir, AAC/Opus overlap) and the
     // resampler fills its filter, so seeked output matches a decode from the start.
     static constexpr Frame preroll = sampleRate / 2;
-    explicit AudioDecoder(QString path) : path_(std::move(path)) { open(); }
+    using SeekPoints = std::shared_ptr<const std::vector<detail::SeekPoint>>;
+    explicit AudioDecoder(QString path, SeekPoints points = {}) : path_(std::move(path)), points_(std::move(points)) { open(); }
     bool mono() const noexcept { return mono_; }
+    // Record seek points for coarse timestamps during the coming linear decode (the import pass).
+    void record() { recording_ = true; }
+    std::vector<detail::SeekPoint> recorded() && { return std::move(recorded_); }
     // The next decoded run, frames [first, first + samples.size() / 2). False once the source ends.
     bool next(Frame& first, std::vector<float>& samples) {
         samples.clear();
@@ -87,13 +92,24 @@ public:
         const Frame output = std::max<Frame>(0, frame - start_ - preroll);
         // Resume on a resampling phase boundary, where output and input samples coincide exactly.
         target_ = output / stepOut_ * stepIn_; retries_ = 0;
-        const auto base = input_->format->streams[stream_]->time_base;
-        // A timestamp tick coarser than one input sample cannot tell us which sample we landed on.
-        if (target_ == 0 || !anchored_ || av_compare_ts(1, base, 1, {1, rate_}) > 0) restart();
-        else seekInput(target_);
+        if (target_ == 0 || !anchored_) { restart(); return; }
+        if (!coarse_) { seekInput(target_); return; }
+        // A timestamp tick coarser than one input sample cannot tell which sample a seek landed on;
+        // the import's seek points can. Without one before the target, decode from the start.
+        const auto* point = points_ ? &*std::upper_bound(points_->begin(), points_->end(), target_,
+            [](std::int64_t sample, const detail::SeekPoint& p) { return sample < p.sample; }) : nullptr;
+        if (!point || point == points_->data() || (--point)->sample <= 0) { restart(); return; }
+        landing_ = *point;
+        checked(av_seek_frame(input_->format, stream_, point->pts, AVSEEK_FLAG_BACKWARD), "Seek audio");
+        reset();
     }
 private:
     QString path_;
+    SeekPoints points_;
+    std::vector<detail::SeekPoint> recorded_;
+    std::optional<detail::SeekPoint> landing_; // The seek point a coarse seek aimed at.
+    std::int64_t nextPoint_ = 0;
+    bool coarse_ = false, recording_ = false;
     std::unique_ptr<Input> input_;
     int stream_ = -1, rate_ = 0, retries_ = 0;
     bool mono_ = false, started_ = false, aligned_ = false, finished_ = false, anchorTried_ = false, anchored_ = false;
@@ -118,6 +134,7 @@ private:
         if (rate_ <= 0) throw std::runtime_error("Audio has no sample rate");
         const auto common = std::gcd(rate_, sampleRate); stepIn_ = rate_ / common; stepOut_ = sampleRate / common;
         origin_ = mediaOrigin(input_->format);
+        coarse_ = av_compare_ts(1, input_->format->streams[stream_]->time_base, 1, {1, rate_}) > 0;
         // Any one-channel layout (including front-left) is centre mono; the transport pans it.
         AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO, mono = AV_CHANNEL_LAYOUT_MONO;
         checked(swr_alloc_set_opts2(&input_->resampler, &stereo, AV_SAMPLE_FMT_FLT, sampleRate,
@@ -125,7 +142,7 @@ private:
         checked(swr_init(input_->resampler), "Initialize resampling");
         // Video and other streams are never decoded here; skip their packets while demuxing.
         for (unsigned i = 0; i < input_->format->nb_streams; ++i) if (static_cast<int>(i) != stream_) input_->format->streams[i]->discard = AVDISCARD_ALL;
-        started_ = aligned_ = finished_ = false;
+        started_ = aligned_ = finished_ = false; landing_.reset();
     }
     // The next decoded frame into input_->frame; false once the decoder is drained.
     bool receive() {
@@ -154,9 +171,12 @@ private:
     void seekInput(std::int64_t sample) {
         const auto base = input_->format->streams[stream_]->time_base;
         checked(av_seek_frame(input_->format, stream_, firstPts_ + av_rescale_q(sample - ptsOffset_, {1, rate_}, base), AVSEEK_FLAG_BACKWARD), "Seek audio");
+        reset();
+    }
+    void reset() {
         avcodec_flush_buffers(input_->codec); swr_close(input_->resampler);
         checked(swr_init(input_->resampler), "Initialize resampling");
-        aligned_ = finished_ = false;
+        aligned_ = finished_ = recording_ = false;
     }
     // Returns the resampler's output count (0 once a flush is drained); samples get the part at or after frame 0.
     int convert(AVFrame* frame, Frame& first, std::vector<float>& samples) {
@@ -172,7 +192,12 @@ private:
                 anchorTried_ = true;
                 if (pts != AV_NOPTS_VALUE && firstPts_ != AV_NOPTS_VALUE) { ptsOffset_ = inputAt_ - implied(); anchored_ = true; }
             }
-            else if (!aligned_) {
+            else if (!aligned_ && landing_) {
+                // Frames before the seek point are dropped; the point itself carries its exact sample.
+                if (pts == AV_NOPTS_VALUE || pts > landing_->pts) { restart(); return 0; }
+                if (pts < landing_->pts) return 0;
+                inputAt_ = landing_->sample; landing_.reset();
+            } else if (!aligned_) {
                 // The first frame after a seek; its timestamp says where the decoder landed.
                 if (pts == AV_NOPTS_VALUE) { restart(); return 0; }
                 inputAt_ = implied() + ptsOffset_;
@@ -184,6 +209,7 @@ private:
                 }
             }
             if (!aligned_) { aligned_ = true; produced_ = target_ / stepIn_ * stepOut_; }
+            if (recording_ && coarse_ && pts != AV_NOPTS_VALUE && inputAt_ >= nextPoint_) { recorded_.push_back({pts, inputAt_}); nextPoint_ = inputAt_ + rate_; }
             const auto skip = static_cast<int>(std::clamp<std::int64_t>(target_ - inputAt_, 0, frame->nb_samples));
             inputAt_ += frame->nb_samples; count = frame->nb_samples - skip;
             if (!count) return 0;
@@ -217,7 +243,7 @@ private:
 // places continue sequentially instead of seeking for every block.
 class StreamStorage final : public AudioStorage {
 public:
-    StreamStorage(QString path, Frame length) : path_(std::move(path)), length_(length) {
+    StreamStorage(QString path, Frame length, AudioDecoder::SeekPoints points) : path_(std::move(path)), length_(length), points_(std::move(points)) {
         const QFileInfo info(path_); size_ = info.size(); modified_ = info.lastModified();
     }
     Frame length() const noexcept override { return length_; }
@@ -257,7 +283,7 @@ private:
     // Reading forward this far decodes through instead of seeking.
     static constexpr Frame continueWithin = 2 * sampleRate;
     struct Reader {
-        explicit Reader(const QString& path) : decoder(path) {}
+        Reader(const QString& path, AudioDecoder::SeekPoints points) : decoder(path, std::move(points)) {}
         AudioDecoder decoder;
         Frame first = 0;
         std::vector<float> samples;
@@ -265,6 +291,7 @@ private:
     };
     QString path_;
     Frame length_;
+    AudioDecoder::SeekPoints points_;
     qint64 size_ = 0;
     QDateTime modified_;
     mutable std::mutex mutex_;
@@ -278,7 +305,7 @@ private:
         }
         if (reader) return;
         if (readers_.size() < maxReaders) {
-            readers_.push_back(std::make_unique<Reader>(path_)); reader = readers_.back().get();
+            readers_.push_back(std::make_unique<Reader>(path_, points_)); reader = readers_.back().get();
             if (frame < continueWithin) return; // A fresh decoder starts at the beginning.
         } else reader = std::min_element(readers_.begin(), readers_.end(), [](const auto& a, const auto& b) { return a->used < b->used; })->get();
         reader->samples.clear(); reader->first = 0; reader->decoder.seek(frame);
@@ -303,13 +330,16 @@ std::shared_ptr<const AudioData> loadAudio(const QString& path) {
         detail::StreamSummary summary(path);
         auto known = summary.reuse(data->mono);
         if (!known) {
-            known = detail::AudioSummary{0, data->mono, {}};
+            known = detail::AudioSummary{0, data->mono, {}, {}};
+            decoder.record();
             while (decoder.next(first, samples)) { addPeaks(known->peaks, first, samples); known->length = first + static_cast<Frame>(samples.size() / 2); }
             if (known->length <= 0) throw std::runtime_error("Audio stream is empty");
+            known->seekPoints = std::move(decoder).recorded();
             summary.save(*known);
         }
         data->peaks = std::move(known->peaks);
-        data->storage = std::make_shared<StreamStorage>(path, known->length);
+        data->storage = std::make_shared<StreamStorage>(path, known->length,
+            std::make_shared<const std::vector<detail::SeekPoint>>(std::move(known->seekPoints)));
         return data;
     }
     detail::AudioCache prepared(path);

@@ -230,7 +230,7 @@ int main() {
             storage->delay.store(30);
             const Frame destination = frames(30 * 3600) + 123;
             t.command({Action::Seek, destination}); checkedRender(t, out, 1, 2);
-            expect(t.position() == destination && t.bufferWaits() == 1, "seek miss freezes sample clock");
+            expect(t.position() == destination && t.bufferWaits() == 0, "seek miss freezes sample clock without counting a wait");
             near(out[0], (PatternStorage::value(1) + .2) * (fade - 1) / fade, "all tracks wait together; only the old frames fade out");
             for (int i = 0; i < 1000 && t.position() == destination; ++i) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1)); checkedRender(t, out, 1, 2);
@@ -248,18 +248,25 @@ int main() {
             storage->delay.store(30);
             const Frame destination = frames(30 * 3600) + 123;
             t.command({Action::Seek, destination}); checkedRender(t, out, 1, 2);
-            expect(t.position() == destination + 1 && t.bufferWaits() == 0 && t.audioGaps() == 1, "a miss leaves a gap instead of freezing");
-            Frame elapsed = 1;
-            // The resident track keeps playing on time while the disk track is late.
-            for (int i = 0; i < 1000 && t.audioGaps() == static_cast<unsigned>(elapsed); ++i, ++elapsed) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1)); checkedRender(t, out, 1, 2);
-            }
-            expect(t.position() == destination + elapsed, "show time never waited");
+            expect(t.position() == destination + 1 && t.bufferWaits() == 0 && t.audioGaps() == 0, "a seek miss leaves an uncounted gap instead of freezing");
+            near(out[0], (PatternStorage::value(1) + .2) * (fade - 1) / fade + .1 * (1 + destination % 4) / fade, "the resident track keeps playing on time");
+            std::this_thread::sleep_for(std::chrono::milliseconds(200)); // The late block arrives.
             std::vector<float> after(fade * 2 * 2); checkedRender(t, after.data(), fade * 2, 2);
-            const Frame last = destination + elapsed + fade * 2 - 1;
+            const Frame last = destination + fade * 2;
             near(after[(fade * 2 - 1) * 2], PatternStorage::value(last) + .1 * (1 + last % 4), "the late track returns at show time, not where it stopped");
             t.setLateAudio(LateAudio::Freeze); expect(t.lateAudio() == LateAudio::Freeze, "policy switches live");
             expect(!storage->callbackReads.load(), "gaps never read disk on callback");
+        }},
+        {"late sources count as waits or gaps only outside the seek grace", [] {
+            for (const auto policy : {LateAudio::Freeze, LateAudio::Gap}) {
+                auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));
+                auto p = show(false); p->duration = storage->length(); p->clips[0].duration = p->duration; p->clips[0].audio = diskAudio(storage);
+                Transport t; t.setLateAudio(policy); t.configure(p); play(t);
+                // Playing faster than a slow disk reads drains the read-ahead during steady playback.
+                storage->delay.store(50); std::vector<float> out(AudioBuffer::blockFrames * 2);
+                for (int i = 0; i < 8 && !(t.bufferWaits() || t.audioGaps()); ++i) checkedRender(t, out.data(), AudioBuffer::blockFrames, 2);
+                expect(policy == LateAudio::Freeze ? t.bufferWaits() > 0 && !t.audioGaps() : t.audioGaps() > 0 && !t.bufferWaits(), "a steady-state miss is counted");
+            }
         }},
         {"disk async loop keeps offset through hold, pause, seek, and Stop All", [] {
             auto storage = std::make_shared<PatternStorage>(17003);

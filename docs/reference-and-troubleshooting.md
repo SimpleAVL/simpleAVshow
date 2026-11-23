@@ -92,7 +92,7 @@ The bottom-right readout summarizes engine status and turns **orange** whenever 
 | **disk retries** | Source file reads had to retry. Check drive stability, cables, or other apps locking the files. |
 | **video waits** | A video frame decoded late; the previous frame stayed on screen. Lower decode/layer load and rehearse with final media. |
 
-*Counters track software events and may reset when playback or devices rebuild—watch for increments during a full rehearsal rather than assuming zero guarantees physical alignment.*
+*Counters track software events and may reset when playback or devices rebuild—watch for increments during a full rehearsal rather than assuming zero guarantees physical alignment. Brief misses right after jumping on the timeline are normal and are not counted as audio waits or gaps.*
 
 ---
 
@@ -160,7 +160,7 @@ The bottom-right readout summarizes engine status and turns **orange** whenever 
 - **Other formats and sample rates:** Controlled by **Audio sources** in **Outputs** (see [Playback reliability](audio-and-outputs.md#playback-reliability)). Multichannel source files must still be split into separate mono/stereo stems beforehand.
   - **Stream from media files:** Decodes the original file during playback. Import still decodes each source once to draw its waveform and measure its exact length, then keeps only a small waveform file (~**30 KB per source hour**). Originals must stay available while the show plays.
   - **Prepared cache:** Decodes into a reusable 48 kHz stereo float PCM cache (~**1.29 GiB per source hour**).
-- **Cache location and cleanup:** Caches and waveform files share Qt's application cache directory under `audio-pcm-v1-le` (or `audio-pcm-v1-be`). They are local, never packed into `.savpack` files, and reused automatically when identical source content moves or arrives in a package (even a reused prepared cache can take time to validate for large files; missing or damaged entries rebuild). SimpleAVShow trims old unused caches on startup and after conversions (targeting at most 20 GiB, or less on tighter drives) while retaining in-use entries. With the app closed, you can safely remove that cache folder to reclaim disk space—sources needing preparation will prepare again next time you open them. Keep your originals and saved projects.
+- **Cache location and cleanup:** Caches and waveform files share Qt's application cache directory under `audio-pcm-v1-le` (or `audio-pcm-v1-be`). They are local, never packed into `.savpack` files, and reused automatically when identical source content moves or arrives in a package (even a reused prepared cache can take time to validate for large files; missing or damaged entries rebuild). SimpleAVShow trims old unused caches on startup and after conversions (targeting at most 20 GiB, or less on tighter drives) while retaining in-use entries. To reclaim disk space, use **Clear audio cache** in **Outputs**, or—with the app closed—remove that cache folder; sources needing preparation will prepare again next time you open them. Keep your originals and saved projects.
 - **Memory usage:** Playback streams through bounded read-ahead buffers instead of loading entire audio files into RAM. There is no hard cap on audio bytes, tracks, clips, cues, or 24-hour duration—practical limits depend on your show computer's disk speed, memory, simultaneous voice count, and video decoding load.
 
 ---

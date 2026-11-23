@@ -19,11 +19,17 @@ QString audioCacheDirectory();
 // streamed and direct sources only save work, so they are trimmed like unused caches.
 constexpr qint64 automaticAudioCacheBudget = -1;
 void trimAudioCache(qint64 maxBytes = automaticAudioCacheBudget);
+// Bytes in the audio cache directory: prepared caches plus waveform sidecars.
+qint64 audioCacheBytes();
 std::shared_ptr<const AudioData> loadPcmWave(const QString& path);
 
 // The decoded length and waveform of a streamed source. Keyed by content and decoder
 // revision like the prepared cache, so reopening or moving the file skips the decode pass.
-struct AudioSummary { Frame length = 0; bool mono = false; std::vector<float> peaks; };
+// An input sample position by packet timestamp, recorded about once a second while decoding a
+// stream whose timestamps are coarser than one sample (Matroska/WebM's milliseconds), where a
+// timestamp alone cannot say which sample a seek landed on.
+struct SeekPoint { std::int64_t pts = 0, sample = 0; };
+struct AudioSummary { Frame length = 0; bool mono = false; std::vector<float> peaks; std::vector<SeekPoint> seekPoints; };
 class StreamSummary {
 public:
     explicit StreamSummary(const QString& source);

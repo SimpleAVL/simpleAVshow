@@ -587,7 +587,10 @@ private slots:
     }
     void playbackSettingsInOutputs() {
         QSettings().setValue("audio/late", "gap");
-        MainWindow window; window.show(); bool shown = false;
+        QTemporaryDir dir; QDir caches(detail::audioCacheDirectory());
+        std::shared_ptr<const AudioData> held;
+        const auto unused = importCacheKey(dir.filePath("unused.wav"), 4410), inUse = importCacheKey(dir.filePath("held.wav"), 4420, &held);
+        MainWindow window; window.show(); bool shown = false, cleared = false;
         QTimer::singleShot(0, &window, [&] {
             auto* dialog = window.findChild<QDialog*>("outputSettingsDialog"); if (!dialog) return;
             auto* sources = dialog->findChild<QComboBox*>("audioSourcePreparation");
@@ -595,10 +598,17 @@ private slots:
             shown = sources && late && sources->currentData().toInt() == static_cast<int>(AudioPreparation::Prepared) &&
                 late->currentData().toInt() == static_cast<int>(LateAudio::Gap);
             if (late) { late->setCurrentIndex(late->findData(static_cast<int>(LateAudio::Freeze))); emit late->activated(late->currentIndex()); }
+            // Clearing keeps caches in use and reports what it freed.
+            if (auto* clear = dialog->findChild<QPushButton*>("clearAudioCache")) {
+                clear->click();
+                cleared = !QFileInfo::exists(caches.filePath(unused + ".pcm")) && QFileInfo::exists(caches.filePath(inUse + ".pcm")) &&
+                    clear->text().startsWith("Clear audio cache · ");
+            }
             dialog->reject();
         });
         window.findChild<QPushButton*>("outputSettingsButton")->click();
-        QVERIFY(shown); QCOMPARE(QSettings().value("audio/late").toString(), QString("freeze"));
+        QVERIFY(shown); QVERIFY(cleared); QCOMPARE(QSettings().value("audio/late").toString(), QString("freeze"));
+        QVERIFY(std::isfinite(sampleAt(*held, 100)));
     }
     void demoSaveReloadAndDecodedAudio() {
         QTemporaryDir dir; QVERIFY(dir.isValid());
@@ -1608,8 +1618,10 @@ private slots:
             std::this_thread::sleep_until(next); next += std::chrono::nanoseconds(block * 1000000000LL / sampleRate);
             transport.render(out.data(), block, 4); position += block;
         };
-        for (unsigned i = 0; i < 6; ++i) {
-            render(); QCOMPARE(transport.position(), position); QCOMPARE(transport.audioGaps(), i + 1);
+        // Gaps right after the seek are expected and uncounted; a source still late after seekGrace counts.
+        const unsigned graceBlocks = static_cast<unsigned>((Transport::seekGrace + block - 1) / block);
+        for (unsigned i = 0; i < graceBlocks + 6; ++i) {
+            render(); QCOMPARE(transport.position(), position); QCOMPARE(transport.audioGaps(), i + 1 > graceBlocks ? i + 1 - graceBlocks : 0u);
             for (unsigned f = 0; f < block; ++f) {
                 if (i || f >= Transport::fadeFrames) { QCOMPARE(out[4*f], 0.f); QCOMPARE(out[4*f + 1], 0.f); }
                 QCOMPARE(out[4*f + 2], .125f); QCOMPARE(out[4*f + 3], .125f);

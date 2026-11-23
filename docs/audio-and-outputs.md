@@ -42,7 +42,8 @@ The **Playback · audio reliability** group in **Outputs** holds two per-machine
 | | **Keep time and leave a short gap** | The show must stay on time with outside clocks such as a live band, timecode, or external video player. Only the late sound drops out briefly and fades back in at the correct place. |
 
 - **Same timeline alignment:** Both source modes place every sample at the same show frame, so switching moves nothing on the timeline. Click **Stop All** first—switching prepares or releases the open show's audio with a progress dialog. Compatible 48 kHz PCM WAV files always play directly from their source in either mode.
-- **Preflight and counters:** Show mode's preflight warns while audio still streams. Late audio is rare in either mode; the status bar counts **audio waits** (Freeze) and **audio gaps** (Gap) so you can spot it during rehearsals.
+- **Preflight and counters:** Show mode's preflight warns while audio still streams. Late audio is rare in either mode; the status bar counts **audio waits** (Freeze) and **audio gaps** (Gap) so you can spot it during rehearsals. Jumping on the timeline always starts reading the new place, so a brief wait or gap right after a jump is normal and not counted.
+- **Clear audio cache:** Shows how much disk space prepared audio and waveform files use and removes everything the open show is not using. Other shows prepare or measure their audio again the next time they open.
 
 ---
 

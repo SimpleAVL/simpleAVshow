@@ -120,7 +120,7 @@ void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
     locate(position_);
     state_ = State::Stopped; heldMarker_ = -1;
     epoch_.fetch_add(1);
-    clipped_.store(false); overflow_.store(false); bufferWaits_.store(0); readRetries_.store(0); audioGaps_.store(0);
+    clipped_.store(false); overflow_.store(false); bufferWaits_.store(0); readRetries_.store(0); audioGaps_.store(0); sinceSeek_ = seekGrace;
     if (std::any_of(buffers_.begin(), buffers_.end(), [](const auto& buffer) { return bool(buffer); })) {
         audioStop_.store(false);
         audioWorker_ = std::thread([this] {
@@ -163,7 +163,7 @@ void Transport::apply(Command command) noexcept {
             if (!show_->clips[i].contains(next)) { cut(i); voices_[i] = {}; }
             else if (voices_[i].audible && next != position_ && !show_->tracks[show_->clips[i].track].async) cut(i); // A normal source jumps.
         }
-        position_ = next; heldMarker_ = -1; locate(next);
+        position_ = next; heldMarker_ = -1; locate(next); sinceSeek_ = 0;
         if (state_ != State::Playing) state_ = State::Paused;
         epoch_.fetch_add(1);
         break;
@@ -182,7 +182,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
     Command command;
     while (commands_.pop(command)) apply(command);
     float peak = 0; bool waiting = false, gapped = false;
-    const bool gap = lateAudio_.load(std::memory_order_relaxed) == LateAudio::Gap;
+    const bool gap = lateAudio_.load(std::memory_order_relaxed) == LateAudio::Gap, counted = sinceSeek_ >= seekGrace;
     for (unsigned f = 0; f < count; ++f) {
         if (waiting && releasing_.empty()) break; // Remaining device samples stay silent; retry at the same show/source time.
         float* const frame = output ? output + static_cast<std::size_t>(f) * channels : nullptr;
@@ -248,7 +248,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 voice.missed = false;
                 voice.at = source; voice.ready = true;
             }
-            if (!ready) { bufferWaits_.fetch_add(1, std::memory_order_relaxed); waiting = true; }
+            if (!ready) { if (counted) bufferWaits_.fetch_add(1, std::memory_order_relaxed); waiting = true; }
             // Voices that stop sounding fade out. A miss fades every voice; normal voices fade back in once ready.
             for (const auto i : active_) if (waiting || !voices_[i].ready) cut(i);
             if (!waiting) for (const auto i : active_) {
@@ -295,7 +295,8 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
         }
         if (!waiting && state_ == State::Playing) ++position_;
     }
-    if (gapped) audioGaps_.fetch_add(1, std::memory_order_relaxed);
+    if (gapped && counted) audioGaps_.fetch_add(1, std::memory_order_relaxed);
+    sinceSeek_ = std::min(seekGrace, sinceSeek_ + static_cast<Frame>(count));
     publish(peak);
 }
 void Transport::publish(float peak) noexcept {

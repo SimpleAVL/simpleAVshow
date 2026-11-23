@@ -1,5 +1,6 @@
 #include "app/MainWindow.h"
 #include "app/MidiMessageEditor.h"
+#include "media/AudioSources.h"
 #include <limits>
 #include <QApplication>
 #include <QCheckBox>
@@ -15,6 +16,7 @@
 #include <QGroupBox>
 #include <QDirIterator>
 #include <QGuiApplication>
+#include <QLocale>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QHBoxLayout>
@@ -962,6 +964,16 @@ void MainWindow::outputSettings() {
     late->setToolTip("Freeze keeps every track, cue and hold aligned, but the show runs slightly late.\n"
         "Gap keeps the show on time with outside clocks (a band, timecode, external video); only the late sound drops out briefly.");
     playbackForm->addRow("Audio sources", sources); playbackForm->addRow("If audio is late", late);
+    auto* clearCache = button("Clear audio cache"); clearCache->setObjectName("clearAudioCache");
+    auto showCacheSize = [clearCache] { clearCache->setText("Clear audio cache · " + QLocale().formattedDataSize(detail::audioCacheBytes())); };
+    showCacheSize(); playbackForm->addRow(clearCache);
+    clearCache->setToolTip("Removes prepared audio and waveform files the open show is not using. Other shows prepare or measure their audio again when opened.");
+    connect(clearCache, &QPushButton::clicked, &dialog, [this, showCacheSize] {
+        const auto before = detail::audioCacheBytes(); detail::trimAudioCache(0); const auto after = detail::audioCacheBytes();
+        c_.report("Freed " + QLocale().formattedDataSize(std::max<qint64>(0, before - after)) + " of audio cache." +
+            (after > 0 ? " " + QLocale().formattedDataSize(after) + " stays in use by the open show." : QString()));
+        showCacheSize();
+    });
     connect(late, &QComboBox::activated, &dialog, [&] { c_.setLateAudio(static_cast<LateAudio>(late->currentData().toInt())); });
     connect(sources, &QComboBox::activated, &dialog, [&] {
         const auto chosen = static_cast<AudioPreparation>(sources->currentData().toInt());

@@ -45,8 +45,10 @@ public:
     // Safe at any time; applies from the next callback.
     void setLateAudio(LateAudio policy) noexcept { lateAudio_.store(policy); }
     LateAudio lateAudio() const noexcept { return lateAudio_.load(); }
+    // Health counters: callbacks in which Freeze waited for a late source, or Gap silenced one.
+    // A seek always reads its new place cold, so misses within seekGrace of one are not counted.
+    static constexpr Frame seekGrace = sampleRate / 4;
     unsigned bufferWaits() const noexcept { return bufferWaits_.load(); }
-    // Callbacks in which Gap silenced a late voice.
     unsigned audioGaps() const noexcept { return audioGaps_.load(); }
     unsigned readRetries() const noexcept { return readRetries_.load(); }
     bool audioReadFailed() const noexcept { return audioReadFailed_.load(); }
@@ -77,7 +79,7 @@ private:
     std::atomic<LateAudio> lateAudio_{LateAudio::Freeze};
     Queue<Command, 128> commands_;
     DynamicQueue<MidiEvent> midi_;
-    Frame position_ = 0;
+    Frame position_ = 0, sinceSeek_ = seekGrace; // Device frames rendered since the last seek, up to seekGrace.
     State state_ = State::Stopped;
     int heldMarker_ = -1;
     std::atomic<Frame> publishedPosition_{0};
