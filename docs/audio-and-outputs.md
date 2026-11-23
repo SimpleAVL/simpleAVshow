@@ -37,7 +37,7 @@ The **Playback · audio reliability** group in **Outputs** holds two per-machine
 | Setting | Choice | Use it when |
 | --- | --- | --- |
 | **Audio sources** | **Stream from media files · fast import** *(default)* | Building and iterating on a show. Compressed audio (MP3, AAC/M4A, FLAC, Ogg, video soundtracks, and WAV at other sample rates) decodes from the original file while it plays—imports skip the disk cache and reopen almost instantly. |
-| | **Prepared cache · steadiest playback** | Rehearsing and performing. Every compressed source is decoded once into a disk cache so playback only reads samples. Choose this on the show machine before rehearsing and performing. |
+| | **Prepared cache · steadiest playback** | Rehearsing and performing. Every compressed source is decoded once into a disk cache so playback only reads samples. Choose this on the show machine. |
 | **If audio is late** | **Freeze show time until it is ready** *(default)* | The show is self-contained. A late read pauses the whole show for that moment so every track, cue, and hold stays aligned; the show runs slightly late. |
 | | **Keep time and leave a short gap** | The show must stay on time with outside clocks such as a live band, timecode, or external video player. Only the late sound drops out briefly and fades back in at the correct place. |
 
