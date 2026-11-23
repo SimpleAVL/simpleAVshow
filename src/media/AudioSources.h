@@ -4,6 +4,7 @@
 #include <QString>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 class QLockFile;
@@ -12,6 +13,10 @@ class QTemporaryFile;
 namespace sav::detail {
 // Import/worker helpers only; none of these functions run in the callback.
 QString audioCacheDirectory();
+// The file system's identity of the file at path (device and inode, or volume and file index), which
+// changes when a save replaces the file rather than rewriting it; zero if it cannot be read.
+using FileIdentity = std::pair<quint64, quint64>;
+FileIdentity fileIdentity(const QString& path);
 // Least recently used caches are removed until the directory fits the budget;
 // automatic is min(20 GiB, a quarter of free space plus the cache). Caches being
 // prepared or used by any running instance are kept. Caches from another decoder

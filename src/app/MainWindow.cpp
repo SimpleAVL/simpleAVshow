@@ -813,7 +813,11 @@ void MainWindow::reloadAudio() {
     watcher->setFuture(QtConcurrent::run([paths]() {
         Reloaded result;
         for (const auto& path : paths) {
-            try { result.first.insert(path, loadMedia(path).audio); }
+            try {
+                auto audio = loadMedia(path).audio;
+                if (!audio) throw std::runtime_error("The file no longer contains audio");
+                result.first.insert(path, std::move(audio));
+            }
             catch (const std::exception& e) { result.second << QFileInfo(path).fileName() + ": " + QString::fromUtf8(e.what()); }
         }
         return result;

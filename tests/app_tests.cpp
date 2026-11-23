@@ -1433,24 +1433,33 @@ private slots:
     }
     void streamedAudioMatchesPreparedCache_data() {
         QTest::addColumn<QStringList>("encode");
-        QTest::newRow("flac-44k-stereo") << QStringList{"-ar", "44100", "-c:a", "flac", "x.flac"};
-        QTest::newRow("wav-44k-resampled") << QStringList{"-ar", "44100", "-c:a", "pcm_s16le", "x.wav"};
-        QTest::newRow("mp3-44k-mono") << QStringList{"-ar", "44100", "-ac", "1", "-c:a", "libmp3lame", "-b:a", "192k", "x.mp3"};
+        // Exact rows must match bit for bit after any seek. Some decoders depend on everything decoded before:
+        // AC-3 dithers quiet bands from a random generator (like AAC noise substitution), MP2 and IMA ADPCM
+        // carry predictor state across packets. Their rows must land on the same frames, within a small error.
+        QTest::addColumn<bool>("exact");
+        QTest::newRow("flac-44k-stereo") << QStringList{"-ar", "44100", "-c:a", "flac", "x.flac"} << true;
+        QTest::newRow("wav-44k-resampled") << QStringList{"-ar", "44100", "-c:a", "pcm_s16le", "x.wav"} << true;
+        QTest::newRow("mp3-44k-mono") << QStringList{"-ar", "44100", "-ac", "1", "-c:a", "libmp3lame", "-b:a", "192k", "x.mp3"} << true;
         // AAC noise substitution draws from a generator whose state depends on where decoding began, so
         // noise bands differ (inaudibly) after any seek; without it, placement must be exact.
-        QTest::newRow("aac-48k-m4a") << QStringList{"-ar", "48000", "-c:a", "aac", "-aac_pns", "0", "-b:a", "192k", "x.m4a"};
-        QTest::newRow("opus-ogg") << QStringList{"-c:a", "libopus", "-b:a", "128k", "x.opus"};
-        QTest::newRow("opus-webm-ms") << QStringList{"-c:a", "libopus", "-b:a", "128k", "x.webm"};
-        QTest::newRow("aac-mka-44k-ms") << QStringList{"-ar", "44100", "-c:a", "aac", "-aac_pns", "0", "x.mka"};
-        QTest::newRow("aac-adts-32k") << QStringList{"-ar", "32000", "-c:a", "aac", "-aac_pns", "0", "x.aac"};
-        QTest::newRow("mp3-22k-stereo") << QStringList{"-ar", "22050", "-c:a", "libmp3lame", "x.mp3"};
-        QTest::newRow("wav-32k-short-mono") << QStringList{"-t", "0.03", "-ar", "32000", "-ac", "1", "-c:a", "pcm_s16le", "x.wav"};
-        QTest::newRow("wav-22k-stereo") << QStringList{"-ar", "22050", "-c:a", "pcm_s16le", "x.wav"};
-        QTest::newRow("vorbis-32k") << QStringList{"-ar", "32000", "-c:a", "libvorbis", "x.ogg"};
-        QTest::newRow("vorbis-native-44k") << QStringList{"-ar", "44100", "-c:a", "vorbis", "-strict", "experimental", "x.ogg"};
+        QTest::newRow("aac-48k-m4a") << QStringList{"-ar", "48000", "-c:a", "aac", "-aac_pns", "0", "-b:a", "192k", "x.m4a"} << true;
+        QTest::newRow("opus-ogg") << QStringList{"-c:a", "libopus", "-b:a", "128k", "x.opus"} << true;
+        QTest::newRow("opus-webm-ms") << QStringList{"-c:a", "libopus", "-b:a", "128k", "x.webm"} << true;
+        QTest::newRow("aac-mka-44k-ms") << QStringList{"-ar", "44100", "-c:a", "aac", "-aac_pns", "0", "x.mka"} << true;
+        QTest::newRow("aac-adts-32k") << QStringList{"-ar", "32000", "-c:a", "aac", "-aac_pns", "0", "x.aac"} << true;
+        QTest::newRow("mp3-22k-stereo") << QStringList{"-ar", "22050", "-c:a", "libmp3lame", "x.mp3"} << true;
+        QTest::newRow("wav-32k-short-mono") << QStringList{"-t", "0.03", "-ar", "32000", "-ac", "1", "-c:a", "pcm_s16le", "x.wav"} << true;
+        QTest::newRow("wav-22k-stereo") << QStringList{"-ar", "22050", "-c:a", "pcm_s16le", "x.wav"} << true;
+        QTest::newRow("vorbis-32k") << QStringList{"-ar", "32000", "-c:a", "libvorbis", "x.ogg"} << true;
+        QTest::newRow("ac3-48k") << QStringList{"-c:a", "ac3", "x.ac3"} << false;
+        QTest::newRow("eac3-48k") << QStringList{"-c:a", "eac3", "x.eac3"} << false;
+        QTest::newRow("mp2-44k") << QStringList{"-ar", "44100", "-c:a", "mp2", "x.mp2"} << false;
+        QTest::newRow("ima-adpcm-mov") << QStringList{"-ar", "44100", "-c:a", "adpcm_ima_qt", "x.mov"} << false;
+        QTest::newRow("mp3-in-mpeg-ps") << QStringList{"-ar", "44100", "-c:a", "libmp3lame", "-f", "vob", "x.mpg"} << true;
+        QTest::newRow("vorbis-native-44k") << QStringList{"-ar", "44100", "-c:a", "vorbis", "-strict", "experimental", "x.ogg"} << true;
     }
     void streamedAudioMatchesPreparedCache() {
-        QFETCH(QStringList, encode);
+        QFETCH(QStringList, encode); QFETCH(bool, exact);
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
         QTemporaryDir dir; const QString file = dir.filePath(encode.takeLast()); QProcess process;
         // A sweep with noise exercises every band of the codec and resampler.
@@ -1472,6 +1481,13 @@ private slots:
             const auto count = static_cast<std::size_t>(std::min<Frame>(512, length - start));
             std::vector<float> a(count * 2), b(count * 2);
             prepared->storage->read(start, a.data(), count); streamed->storage->read(start, b.data(), count);
+            if (!exact) {
+                // Placement: no shift fits better than none; level: differences stay small.
+                const auto error = [&](int lag) { double e = 0; for (std::size_t i = 64; i + 64 < count; ++i) e += std::abs(a[i * 2] - b[(i + lag) * 2]); return e; };
+                for (int lag = -48; lag <= 48 && count > 256; ++lag) if (lag) QVERIFY2(error(lag) > error(0), qPrintable(QString("read at %1 fits shifted by %2").arg(start).arg(lag)));
+                for (std::size_t i = 0; i < a.size(); ++i) QVERIFY2(std::abs(a[i] - b[i]) < .1f, qPrintable(QString("read at %1 differs by %2").arg(start).arg(a[i] - b[i])));
+                continue;
+            }
             const auto diff = std::mismatch(a.begin(), a.end(), b.begin(), [](float x, float y) {
                 return std::bit_cast<quint32>(x) == std::bit_cast<quint32>(y);
             });
@@ -1540,33 +1556,36 @@ private slots:
             if (!transport.command({Action::Play})) throw std::runtime_error("Cannot queue Play");
             std::array<float, block*2> out;
             auto next = Clock::now();
-            unsigned seeks = 0, deadlineMisses = 0;
+            unsigned seeks = 0, deadlineMisses = 0, stalls = 0;
             bool audible = false;
             constexpr unsigned callbacks = 5 * sampleRate / block;
             for (unsigned i = 0; i < callbacks; ++i) {
                 std::this_thread::sleep_until(next); next += period;
+                Frame expected = transport.position() + block;
                 if (seekEvery && i && i % seekEvery == 0) {
                     const Frame destinations[] = {frames(12.2), frames(26.5), frames(6.4), frames(18.9)};
                     const Frame destination = cold ? destinations[seeks % std::size(destinations)] : transport.position() + 97;
                     if (!transport.command({Action::Seek, destination})) throw std::runtime_error("Cannot queue Seek");
-                    ++seeks;
+                    ++seeks; expected = destination + block;
                 }
                 transport.render(out.data(), block, 2);
+                // Freeze stops the clock on any miss, so position shows stalls the seek grace hides from the counters.
+                if (transport.position() != expected) ++stalls;
                 audible |= transport.peak() > 0.f;
                 if (Clock::now() > next) ++deadlineMisses;
             }
             if (transport.audioReadFailed() || transport.readRetries() || transport.clipped() || !audible)
                 throw std::runtime_error("Unhealthy stress fixture playback");
-            return std::array{transport.bufferWaits(), seeks, deadlineMisses};
+            return std::array{transport.bufferWaits(), seeks, deadlineMisses, stalls};
         };
         const auto baseline = run(32, 12, false);
-        QCOMPARE(baseline[0], 0u);
+        QCOMPARE(baseline[0], 0u); QCOMPARE(baseline[3], 0u);
         // Opt-in measurements. Cold jumps deliberately leave the four-block window.
         if (qEnvironmentVariableIsSet("SAV_MEASURE_STREAM_HEADROOM")) {
             const auto measure = [&](unsigned clips, unsigned interval, bool cold) {
                 const auto result = run(clips, interval, cold);
-                qInfo("stream load: %u clips, %s seeks, %u callbacks/seek, %u seeks, %u waits, %u callback deadlines missed",
-                    clips, cold ? "cold" : "warm", interval, result[1], result[0], result[2]);
+                qInfo("stream load: %u clips, %s seeks, %u callbacks/seek, %u seeks, %u waits, %u stalled callbacks, %u callback deadlines missed",
+                    clips, cold ? "cold" : "warm", interval, result[1], result[0], result[3], result[2]);
             };
             for (unsigned clips : {32, 64, 128, 256, 384, 512, 768, 1024}) measure(clips, 0, false);
             for (unsigned interval : {48, 12, 3, 1}) measure(32, interval, false);
@@ -1683,6 +1702,24 @@ private slots:
         setAudioPreparation(AudioPreparation::Prepared); const auto preparedOther = loadMedia(other).audio;
         QVERIFY(c.replaceAudio({{other, preparedOther}}));
         c.redo(); QCOMPARE(c.project.assets[added.id].audio, preparedOther);
+        // A snapshot the new audio would invalidate keeps its previous audio, so undo can still arm it.
+        QVERIFY(c.edit([](Project& p) { p.show.clips[0].offset = frames(1.5); p.show.clips[0].duration = frames(.4); }));
+        QVERIFY(c.edit([](Project& p) { p.show.clips.clear(); }));
+        const auto shorter = loadMedia([&] { const auto f = dir.filePath("short.wav"); writeBytes(f, waveBytes(16, 1, 2, 44100, false, 44100)); return f; }()).audio;
+        QVERIFY(c.replaceAudio({{streamed.path, shorter}}));
+        c.undo(); QCOMPARE(c.project.show.clips[0].offset, frames(1.5)); QCOMPARE(c.project.show.clips[0].audio, prepared);
+    }
+    void damagedStreamSidecarIsRejected() {
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; const auto path = dir.filePath("source.wav"); writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 + 77)); // Unique content, unique sidecar.
+        QDir caches(detail::audioCacheDirectory()); const auto before = caches.entryList({"*.stream"}, QDir::Files);
+        const auto first = loadMedia(path).audio;
+        auto created = caches.entryList({"*.stream"}, QDir::Files); for (const auto& name : before) created.removeAll(name);
+        QCOMPARE(created.size(), 1);
+        // Appended whole seek-point records no longer match the stored count; the file is rebuilt, not trusted.
+        QFile sidecar(caches.filePath(created.front())); QVERIFY(sidecar.open(QIODevice::Append)); QCOMPARE(sidecar.write(QByteArray(16 * 4096, '\x7f')), 16 * 4096); sidecar.close();
+        const auto reopened = loadMedia(path).audio;
+        QCOMPARE(reopened->peaks, first->peaks); QVERIFY(QFileInfo(sidecar.fileName()).size() < 16 * 4096);
     }
     void streamedAudioSurvivesTimestampJumps() {
         // A broadcast recording whose timestamps jump forward: positions follow counted samples, not timestamps.
@@ -1734,6 +1771,11 @@ private slots:
         setModified(replacement, time); QVERIFY(QFile::remove(path)); QVERIFY(QFile::rename(replacement, path));
         QCOMPARE(QFileInfo(path).size(), static_cast<qint64>(bytes.size())); QCOMPARE(QFileInfo(path).lastModified(), time.toLocalTime());
         QVERIFY_THROWS_EXCEPTION(AudioSourceChanged, asset.audio->storage->read(100, sample, 1));
+        // Reopening, as the error asks, must measure the replacement rather than reuse the old summary.
+        const auto copy = dir.filePath("copy.wav"); QVERIFY(QFile::copy(path, copy));
+        const auto reopened = loadMedia(path).audio, fresh = loadMedia(copy).audio;
+        QCOMPARE(reopened->peaks, fresh->peaks); QVERIFY(reopened->peaks != asset.audio->peaks);
+        QCOMPARE(sampleAt(*reopened, reopened->length() - 1), sampleAt(*fresh, fresh->length() - 1));
     }
     void diskAudioCacheHasBoundedMemoryAndPersists() {
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");

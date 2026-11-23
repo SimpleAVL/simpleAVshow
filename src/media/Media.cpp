@@ -5,11 +5,6 @@
 #include <QImageReader>
 #include <QTemporaryFile>
 #include <atomic>
-#ifdef Q_OS_WIN
-#include <windows.h>
-#else
-#include <sys/stat.h>
-#endif
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -83,9 +78,17 @@ public:
     bool next(Frame& first, std::vector<float>& samples) {
         samples.clear();
         while (!finished_) {
-            if (receive()) {
-                convert(input_->frame, first, samples); av_frame_unref(input_->frame);
-            } else if (convert(nullptr, first, samples) <= 0) finished_ = true; // Drains the resampler's delay line.
+            try {
+                if (receive()) {
+                    convert(input_->frame, first, samples); av_frame_unref(input_->frame);
+                } else if (landing_) { restart(); continue; } // Ended before the landing point.
+                else if (convert(nullptr, first, samples) <= 0) finished_ = true; // Drains the resampler's delay line.
+            } catch (const std::exception&) {
+                // Warm-up after a seek can start on data that only decodes in sequence (a packet split
+                // across a program-stream boundary); decoding from the start always works.
+                if (!landing_) throw;
+                restart(); continue;
+            }
             if (!samples.empty()) return true;
         }
         return false;
@@ -108,8 +111,8 @@ public:
         const auto after = std::upper_bound(points_->begin(), points_->end(), target_,
             [](std::int64_t sample, const detail::SeekPoint& p) { return sample < p.sample; });
         if (after - points_->begin() < 2) { restart(); return; }
+        if (av_seek_frame(input_->format, stream_, (after - 2)->pts, AVSEEK_FLAG_BACKWARD) < 0) { restart(); return; }
         landing_ = *(after - 1);
-        checked(av_seek_frame(input_->format, stream_, (after - 2)->pts, AVSEEK_FLAG_BACKWARD), "Seek audio");
         reset();
     }
 private:
@@ -226,30 +229,13 @@ private:
     }
 };
 
-// The file system's identity of the file at path (device and inode, or volume and file index), which
-// changes when a save replaces the file rather than rewriting it; zero if it cannot be read.
-std::pair<std::uint64_t, std::uint64_t> fileIdentity(const QString& path) {
-#ifdef Q_OS_WIN
-    const HANDLE file = CreateFileW(reinterpret_cast<const wchar_t*>(path.utf16()), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return {};
-    BY_HANDLE_FILE_INFORMATION info{};
-    const bool ok = GetFileInformationByHandle(file, &info); CloseHandle(file);
-    return ok ? std::pair<std::uint64_t, std::uint64_t>{info.dwVolumeSerialNumber, (std::uint64_t{info.nFileIndexHigh} << 32) | info.nFileIndexLow} : std::pair<std::uint64_t, std::uint64_t>{};
-#else
-    struct stat info{};
-    if (::stat(QFile::encodeName(path).constData(), &info)) return {};
-    return {static_cast<std::uint64_t>(info.st_dev), static_cast<std::uint64_t>(info.st_ino)};
-#endif
-}
-
 // Reads decode the original file. The transport's read-ahead worker calls read, never the
 // audio callback. A few decoders stay open so clips reading the same file at different
 // places continue sequentially instead of seeking for every block.
 class StreamStorage final : public AudioStorage {
 public:
     StreamStorage(QString path, Frame length, AudioDecoder::SeekPoints points) : path_(std::move(path)), length_(length), points_(std::move(points)) {
-        const QFileInfo info(path_); size_ = info.size(); modified_ = info.lastModified(); identity_ = fileIdentity(path_);
+        const QFileInfo info(path_); size_ = info.size(); modified_ = info.lastModified(); identity_ = detail::fileIdentity(path_);
     }
     Frame length() const noexcept override { return length_; }
     bool decodes() const noexcept override { return true; }
@@ -261,7 +247,7 @@ public:
         if (!info.exists()) throw std::runtime_error("Audio source is unavailable: " + path_.toStdString());
         // File identity also catches a replacement saved with the same size and modification time;
         // an in-place rewrite that keeps both is not detected.
-        if (info.size() != size_ || info.lastModified() != modified_ || fileIdentity(path_) != identity_) throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString());
+        if (info.size() != size_ || info.lastModified() != modified_ || detail::fileIdentity(path_) != identity_) throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString());
         const std::lock_guard lock(mutex_);
         Reader* reader = nullptr;
         try {
@@ -302,7 +288,7 @@ private:
     AudioDecoder::SeekPoints points_;
     qint64 size_ = 0;
     QDateTime modified_;
-    std::pair<std::uint64_t, std::uint64_t> identity_;
+    detail::FileIdentity identity_;
     mutable std::mutex mutex_;
     mutable std::vector<std::unique_ptr<Reader>> readers_;
     mutable std::uint64_t clock_ = 0;

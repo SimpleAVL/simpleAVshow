@@ -223,7 +223,12 @@ bool Controller::replaceAudio(const QMap<QString, std::shared_ptr<const AudioDat
     };
     try {
         Project next = project; swap(next); validate(next);
-        for (auto* history : {&undo_, &redo_}) for (auto& p : *history) swap(p);
+        // A history snapshot the new audio would invalidate (an offset beyond a shorter replacement)
+        // keeps its previous audio rather than becoming a state undo cannot arm.
+        for (auto* history : {&undo_, &redo_}) for (auto& p : *history) {
+            Project candidate = p; swap(candidate);
+            try { validate(candidate); p = std::move(candidate); } catch (const std::exception&) {}
+        }
         project = std::move(next); arm(std::min(position(), project.show.duration)); emit changed(); return true;
     } catch (const std::exception& e) { report(QString::fromUtf8(e.what())); return false; }
 }
