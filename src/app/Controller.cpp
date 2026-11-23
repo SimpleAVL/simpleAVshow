@@ -235,7 +235,9 @@ bool Controller::replaceAudio(const QMap<QString, std::shared_ptr<const AudioDat
 QStringList Controller::preflight() {
     QStringList problems;
     if (dirty) problems << "The show has unsaved changes.";
-    if (std::any_of(project.show.clips.begin(), project.show.clips.end(), [](const Clip& clip) { return clip.audio && clip.audio->storage && clip.audio->storage->decodes(); }))
+    // Picture clips carry their video's audio but never play it; only audio tracks stream.
+    if (std::any_of(project.show.clips.begin(), project.show.clips.end(), [this](const Clip& clip) {
+            return !project.show.tracks[clip.track].visual && clip.audio && clip.audio->storage && clip.audio->storage->decodes(); }))
         problems << "Audio streams from the original media files. For the steadiest playback, choose Prepared audio sources in Outputs.";
     for (const auto& missing : missingMedia()) problems << "Media is missing: " + missing;
     if (needsMidi() && !midi.connected()) {

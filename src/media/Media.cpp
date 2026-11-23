@@ -234,9 +234,11 @@ private:
 // places continue sequentially instead of seeking for every block.
 class StreamStorage final : public AudioStorage {
 public:
-    StreamStorage(QString path, Frame length, AudioDecoder::SeekPoints points) : path_(std::move(path)), length_(length), points_(std::move(points)) {
-        const QFileInfo info(path_); size_ = info.size(); modified_ = info.lastModified(); identity_ = detail::fileIdentity(path_);
-    }
+    // The file as it was before the import pass measured it; a later replacement is a change.
+    struct Version { qint64 size = 0; QDateTime modified; detail::FileIdentity identity; };
+    static Version version(const QString& path) { const QFileInfo info(path); return {info.size(), info.lastModified(), detail::fileIdentity(path)}; }
+    StreamStorage(QString path, Frame length, AudioDecoder::SeekPoints points, Version version)
+        : path_(std::move(path)), length_(length), points_(std::move(points)), size_(version.size), modified_(version.modified), identity_(version.identity) {}
     Frame length() const noexcept override { return length_; }
     bool decodes() const noexcept override { return true; }
     void read(Frame first, float* stereo, std::size_t count) const override {
@@ -317,6 +319,7 @@ void addPeaks(std::vector<float>& peaks, Frame first, const std::vector<float>& 
     }
 }
 std::shared_ptr<const AudioData> loadAudio(const QString& path) {
+    const auto version = StreamStorage::version(path);
     AudioDecoder decoder(path);
     auto data = std::make_shared<AudioData>(); data->mono = decoder.mono();
     Frame first = 0; std::vector<float> samples;
@@ -334,7 +337,7 @@ std::shared_ptr<const AudioData> loadAudio(const QString& path) {
         }
         data->peaks = std::move(known->peaks);
         data->storage = std::make_shared<StreamStorage>(path, known->length,
-            std::make_shared<const std::vector<detail::SeekPoint>>(std::move(known->seekPoints)));
+            std::make_shared<const std::vector<detail::SeekPoint>>(std::move(known->seekPoints)), version);
         return data;
     }
     detail::AudioCache prepared(path);

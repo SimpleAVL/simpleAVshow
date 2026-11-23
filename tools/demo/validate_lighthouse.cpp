@@ -106,6 +106,7 @@ int renderSoftwareAudio(const QString& path, const QString& out, const QString& 
             command(Action::Play); render(show->duration - frames(43) + block); expect(State::Ended, show->duration, 0);
         }
     }
+    const bool clipped = transport.clipped(); // Stop All clears it.
     command(Action::StopAll); render(frames(.5)); expect(State::Stopped, transport.position(), 0);
     const auto bytes = static_cast<quint32>(rendered * channels * sizeof(quint32));
     if (!wav.seek(0)) throw std::runtime_error("Cannot update float WAV header");
@@ -118,7 +119,7 @@ int renderSoftwareAudio(const QString& path, const QString& out, const QString& 
     std::cout << scenario.toStdString() << ' ' << sources.toStdString() << ": " << rendered << " frames, "
               << transport.bufferWaits() << " waits, " << transport.readRetries() << " retries\n";
     return transport.bufferWaits() || transport.readRetries() || transport.audioReadFailed() ||
-        transport.eventOverflow() || transport.clipped() ? 1 : 0;
+        transport.eventOverflow() || clipped ? 1 : 0;
 }
 }
 

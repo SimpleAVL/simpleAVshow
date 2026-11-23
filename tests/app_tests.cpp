@@ -1688,6 +1688,12 @@ private slots:
         c.replace(project);
         const auto streaming = [&] { return c.preflight().filter("Audio streams from the original media files").size() == 1; };
         QVERIFY(streaming());
+        {
+            // A video's sound on a picture layer never plays, so it is no reason to warn.
+            auto pictures = project; auto video = streamed; video.video = true; video.duration = 2; pictures.assets.insert(video.id, video);
+            pictures.show.tracks = {{"picture", "Picture", true}}; Controller other; other.replace(pictures);
+            QVERIFY(other.project.show.clips[0].audio); QVERIFY(other.preflight().filter("Audio streams from the original media files").isEmpty());
+        }
         QVERIFY(c.edit([](Project& p) { p.show.clips[0].gain = .5; }));
         QCOMPARE(c.audioSources(), QStringList{streamed.path});
         QVERIFY(c.replaceAudio({{streamed.path, prepared}}));
