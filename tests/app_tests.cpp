@@ -1495,6 +1495,151 @@ private slots:
         try { asset.audio->storage->read(10, sample, 1); QFAIL("missing source read"); }
         catch (const AudioSourceChanged&) { QFAIL("a missing source can come back"); } catch (const std::runtime_error&) {}
     }
+    void streamedAudioCallbackHeadroom() {
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
+        QTemporaryDir dir; QVERIFY(dir.isValid()); setAudioPreparation(AudioPreparation::Stream);
+        std::vector<std::shared_ptr<const AudioData>> sources;
+        for (int i = 0; i < 8; ++i) {
+            const QString path = dir.filePath(QString::number(i) + (i % 2 ? ".m4a" : ".mp3"));
+            const QStringList codec = i % 2 ? QStringList{"-c:a", "aac"} : QStringList{"-c:a", "libmp3lame"};
+            QProcess ff;
+            ff.start(ffmpeg, QStringList{"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                QString("aevalsrc=0.2*sin(2*PI*%1*t)|0.2*sin(2*PI*%2*t):s=48000:d=18").arg(211 + i*37).arg(547 + i*19),
+                "-ar", "44100"} + codec + QStringList{"-b:a", "160k", path});
+            QVERIFY(ff.waitForFinished(30000));
+            const auto errors = ff.readAllStandardError();
+            if (errors.contains("Unknown encoder")) QSKIP(qPrintable(QString::fromUtf8(errors)));
+            QVERIFY2(ff.exitStatus() == QProcess::NormalExit && ff.exitCode() == 0, errors.constData());
+            auto audio = loadMedia(path).audio; QVERIFY(audio && audio->storage->decodes()); sources.push_back(std::move(audio));
+        }
+        using Clock = std::chrono::steady_clock;
+        constexpr unsigned block = 512;
+        constexpr auto period = std::chrono::nanoseconds(block * 1000000000LL / sampleRate);
+        const auto run = [&](unsigned clips, unsigned seekEvery, bool cold) {
+            auto show = std::make_shared<Show>(); show->duration = frames(40);
+            show->tracks.push_back({"audio", "Audio"});
+            for (unsigned i = 0; i < clips; ++i) {
+                Clip clip; clip.id = std::to_string(i); clip.audio = sources[i % sources.size()];
+                const Frame offsets[] = {0, frames(3.7), frames(8.3), clip.audio->length() - (2*8192 + 1500),
+                    frames(11.1), frames(14.4), frames(6.4), frames(1.5)};
+                clip.offset = offsets[(i / sources.size()) % std::size(offsets)];
+                clip.loop = true; clip.duration = show->duration; clip.gain = 1. / clips;
+                show->clips.push_back(std::move(clip));
+            }
+            Transport transport; transport.configure(show);
+            if (!transport.command({Action::Play})) throw std::runtime_error("Cannot queue Play");
+            std::array<float, block*2> out;
+            auto next = Clock::now();
+            unsigned seeks = 0, deadlineMisses = 0;
+            bool audible = false;
+            constexpr unsigned callbacks = 5 * sampleRate / block;
+            for (unsigned i = 0; i < callbacks; ++i) {
+                std::this_thread::sleep_until(next); next += period;
+                if (seekEvery && i && i % seekEvery == 0) {
+                    const Frame destinations[] = {frames(12.2), frames(26.5), frames(6.4), frames(18.9)};
+                    const Frame destination = cold ? destinations[seeks % std::size(destinations)] : transport.position() + 97;
+                    if (!transport.command({Action::Seek, destination})) throw std::runtime_error("Cannot queue Seek");
+                    ++seeks;
+                }
+                transport.render(out.data(), block, 2);
+                audible |= transport.peak() > 0.f;
+                if (Clock::now() > next) ++deadlineMisses;
+            }
+            if (transport.audioReadFailed() || transport.readRetries() || transport.clipped() || !audible)
+                throw std::runtime_error("Unhealthy stress fixture playback");
+            return std::array{transport.bufferWaits(), seeks, deadlineMisses};
+        };
+        const auto baseline = run(32, 12, false);
+        QCOMPARE(baseline[0], 0u);
+        // Opt-in measurements. Cold jumps deliberately leave the four-block window.
+        if (qEnvironmentVariableIsSet("SAV_MEASURE_STREAM_HEADROOM")) {
+            const auto measure = [&](unsigned clips, unsigned interval, bool cold) {
+                const auto result = run(clips, interval, cold);
+                qInfo("stream load: %u clips, %s seeks, %u callbacks/seek, %u seeks, %u waits, %u callback deadlines missed",
+                    clips, cold ? "cold" : "warm", interval, result[1], result[0], result[2]);
+            };
+            for (unsigned clips : {32, 64, 128, 256, 384, 512, 768, 1024}) measure(clips, 0, false);
+            for (unsigned interval : {48, 12, 3, 1}) measure(32, interval, false);
+            for (unsigned interval : {192, 48, 12, 3}) measure(32, interval, true);
+            measure(1, 192, true);
+        }
+    }
+    void streamedAudioGapRecoversAtShowTime() {
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
+        QTemporaryDir dir; QVERIFY(dir.isValid()); const QString path = dir.filePath("gap.mp3");
+        QProcess ff; ff.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+            "aevalsrc=0.3*sin(2*PI*233*t)|0.4*sin(2*PI*547*t):s=44100:d=8", "-c:a", "libmp3lame", path});
+        QVERIFY(ff.waitForFinished(30000));
+        const auto errors = ff.readAllStandardError();
+        if (errors.contains("Unknown encoder")) QSKIP(qPrintable(QString::fromUtf8(errors)));
+        QVERIFY2(ff.exitStatus() == QProcess::NormalExit && ff.exitCode() == 0, errors.constData());
+        const auto reference = loadMedia(path).audio; QVERIFY(reference);
+        setAudioPreparation(AudioPreparation::Stream);
+        const auto streamed = loadMedia(path).audio; QVERIFY(streamed && streamed->storage->decodes());
+        auto audio = std::make_shared<AudioData>(*streamed);
+        struct InterruptedStorage final : AudioStorage {
+            std::shared_ptr<const AudioStorage> source;
+            std::atomic<bool> interrupted{false};
+            Frame length() const noexcept override { return source->length(); }
+            bool decodes() const noexcept override { return true; }
+            void read(Frame first, float* out, std::size_t count) const override {
+                if (interrupted.load()) throw std::runtime_error("Temporary streamed read interruption");
+                source->read(first, out, count);
+            }
+        };
+        auto storage = std::make_shared<InterruptedStorage>(); storage->source = audio->storage; audio->storage = storage;
+        auto resident = std::make_shared<AudioData>(); resident->samples = {.125f, .125f};
+        auto show = std::make_shared<Show>(); show->duration = audio->length();
+        show->tracks = {{"stream", "Stream"}, {"resident", "Resident", false, true, false, 1, 0, 2, 3}};
+        Clip clip; clip.id = "late"; clip.audio = audio; clip.duration = show->duration; show->clips.push_back(clip);
+        clip.id = "steady"; clip.track = 1; clip.audio = resident; clip.loop = true; show->clips.push_back(clip);
+        Transport transport; transport.setLateAudio(LateAudio::Gap); transport.configure(show);
+        QVERIFY(!transport.audioReadFailed());
+        constexpr unsigned block = 512;
+        std::array<float, block*4> out;
+        QVERIFY(transport.command({Action::Play})); transport.render(out.data(), block, 4);
+        QVERIFY(transport.peak() > .125f); QCOMPARE(transport.audioGaps(), 0u);
+        storage->interrupted.store(true);
+        const Frame destination = frames(4) + 301;
+        QVERIFY(transport.command({Action::Seek, destination}));
+        Frame position = destination;
+        auto next = std::chrono::steady_clock::now();
+        const auto render = [&] {
+            std::this_thread::sleep_until(next); next += std::chrono::nanoseconds(block * 1000000000LL / sampleRate);
+            transport.render(out.data(), block, 4); position += block;
+        };
+        for (unsigned i = 0; i < 6; ++i) {
+            render(); QCOMPARE(transport.position(), position); QCOMPARE(transport.audioGaps(), i + 1);
+            for (unsigned f = 0; f < block; ++f) {
+                if (i || f >= Transport::fadeFrames) { QCOMPARE(out[4*f], 0.f); QCOMPARE(out[4*f + 1], 0.f); }
+                QCOMPARE(out[4*f + 2], .125f); QCOMPARE(out[4*f + 3], .125f);
+            }
+        }
+        QVERIFY(transport.readRetries() > 0);
+        storage->interrupted.store(false);
+        bool fadingIn = false, recovered = false;
+        for (unsigned i = 0; i < 100; ++i) {
+            const auto gaps = transport.audioGaps();
+            render(); QCOMPARE(transport.position(), position); QCOMPARE(transport.state(), State::Playing);
+            std::array<float, block*2> expected;
+            reference->storage->read(position - block, expected.data(), block);
+            for (unsigned f = 0; f < block; ++f) { QCOMPARE(out[4*f + 2], .125f); QCOMPARE(out[4*f + 3], .125f); }
+            for (unsigned f = 0; f < block && !fadingIn; ++f) {
+                if (out[4*f] == 0.f && out[4*f + 1] == 0.f) continue;
+                const double attack = 1. - static_cast<double>(Transport::fadeFrames - 1) / Transport::fadeFrames;
+                QCOMPARE(out[4*f], static_cast<float>(expected[2*f] * attack));
+                QCOMPARE(out[4*f + 1], static_cast<float>(expected[2*f + 1] * attack));
+                fadingIn = true;
+            }
+            if (transport.audioGaps() != gaps) continue;
+            for (unsigned f = Transport::fadeFrames; f < block; ++f) {
+                QCOMPARE(std::bit_cast<quint32>(out[4*f]), std::bit_cast<quint32>(expected[2*f]));
+                QCOMPARE(std::bit_cast<quint32>(out[4*f + 1]), std::bit_cast<quint32>(expected[2*f + 1]));
+            }
+            recovered = true; break;
+        }
+        QVERIFY(fadingIn && recovered); QCOMPARE(transport.bufferWaits(), 0u); QVERIFY(!transport.audioReadFailed());
+    }
     void playbackPreferencesPersistAndSwapAudioWithoutUndo() {
         QSettings().setValue("audio/sources", "stream"); QSettings().setValue("audio/late", "gap");
         {

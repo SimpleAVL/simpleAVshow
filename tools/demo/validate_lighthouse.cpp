@@ -4,6 +4,7 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QCryptographicHash>
+#include <QDataStream>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -22,10 +23,12 @@
 #include <iostream>
 #include <set>
 #include <chrono>
+#include <bit>
+#include <limits>
 
 using namespace sav;
 namespace {
-QString stateName(State s) {
+QString rehearsalStateName(State s) {
     switch (s) {
     case State::Stopped: return "STOPPED";
     case State::Playing: return "PLAYING";
@@ -37,6 +40,85 @@ QString stateName(State s) {
 }
 QByteArray pictureHash(const QImage& image) {
     return QCryptographicHash::hash(QByteArrayView(reinterpret_cast<const char*>(image.constBits()), image.sizeInBytes()), QCryptographicHash::Sha256).toHex();
+}
+
+// The live rehearsal uses wall-clock timers for operator actions. Use exact frame counts
+// and float samples when comparing preparation modes, while letting the read-ahead worker
+// run at device pace. No device, MIDI destination or compositor is needed for this check.
+int renderSoftwareAudio(const QString& path, const QString& out, const QString& scenario, const QString& sources) {
+    if (!QStringList{"routing", "async", "show", "long-hold"}.contains(scenario) ||
+        !QStringList{"prepared", "stream"}.contains(sources))
+        throw std::runtime_error("--software-audio requires a playback scenario and --audio-sources prepared or stream");
+    setAudioPreparation(sources == "stream" ? AudioPreparation::Stream : AudioPreparation::Prepared);
+    auto project = readProject(path);
+    for (const auto& asset : project.assets) if (asset.offline) throw std::runtime_error("Offline media in rehearsal project");
+    auto show = std::make_shared<Show>(std::move(project.show));
+    Transport transport; transport.configure(show);
+    constexpr unsigned channels = 16, block = 512;
+    QFile wav(out + "/software-mix-16ch.wav");
+    if (!wav.open(QIODevice::WriteOnly) || !wav.seek(44)) throw std::runtime_error("Cannot open float WAV");
+    Frame rendered = 0;
+    using Clock = std::chrono::steady_clock;
+    auto deadline = Clock::now();
+    const auto command = [&](Action action, Frame position = 0) {
+        if (!transport.command({action, position})) throw std::runtime_error("Transport command queue full");
+    };
+    const auto render = [&](Frame count) {
+        if (rendered + count > static_cast<Frame>((std::numeric_limits<quint32>::max() - 36) / (channels * sizeof(quint32))))
+            throw std::runtime_error("Rehearsal exceeds the RIFF size limit");
+        std::array<float, block * channels> samples;
+        std::array<quint32, block * channels> pcm;
+        while (count > 0) {
+            const auto n = static_cast<unsigned>(std::min<Frame>(count, block));
+            std::this_thread::sleep_until(deadline);
+            deadline = std::max(deadline, Clock::now()) + std::chrono::nanoseconds(n * 1000000000LL / sampleRate);
+            transport.render(samples.data(), n, channels);
+            for (unsigned i = 0; i < n * channels; ++i) pcm[i] = qToLittleEndian(std::bit_cast<quint32>(samples[i]));
+            const auto bytes = static_cast<qint64>(n * channels * sizeof(quint32));
+            if (wav.write(reinterpret_cast<const char*>(pcm.data()), bytes) != bytes) throw std::runtime_error("Cannot write float WAV");
+            rendered += n; count -= n;
+        }
+    };
+    const auto expect = [&](State state, Frame position, int async) {
+        if (transport.state() != state || transport.position() != position || transport.asyncVoices() != async)
+            throw std::runtime_error("Unexpected rehearsal state at rendered frame " + std::to_string(rendered) +
+                ", show frame " + std::to_string(transport.position()) + ", waits " + std::to_string(transport.bufferWaits()));
+    };
+    command(Action::Play);
+    if (scenario == "async") {
+        render(frames(2));
+        command(Action::Pause); render(frames(2.2)); expect(State::Paused, frames(2), 1);
+        command(Action::Seek, frames(8)); render(frames(1)); expect(State::Paused, frames(8), 1);
+        command(Action::Seek, frames(16)); render(frames(.8)); expect(State::Paused, frames(16), 0);
+        command(Action::Seek, frames(4)); render(frames(.7)); expect(State::Paused, frames(4), 0);
+        command(Action::Play); render(frames(1.6)); expect(State::Playing, frames(5.6), 1);
+    } else if (scenario == "routing") {
+        render(show->duration + block); expect(State::Ended, show->duration, 0);
+    } else {
+        render(frames(12)); render(frames(scenario == "long-hold" ? 300 : 4));
+        expect(State::Held, frames(12), 1); command(Action::Play);
+        if (scenario == "long-hold") {
+            render(frames(2)); expect(State::Playing, frames(14), 1);
+        } else {
+            render(frames(8.5)); command(Action::Pause); render(frames(2)); expect(State::Paused, frames(20.5), 1);
+            command(Action::Play); render(frames(9.5)); render(frames(4)); expect(State::Held, frames(30), 1);
+            command(Action::Play); render(frames(13)); render(frames(4)); expect(State::Held, frames(43), 1);
+            command(Action::Play); render(show->duration - frames(43) + block); expect(State::Ended, show->duration, 0);
+        }
+    }
+    command(Action::StopAll); render(frames(.5)); expect(State::Stopped, transport.position(), 0);
+    const auto bytes = static_cast<quint32>(rendered * channels * sizeof(quint32));
+    if (!wav.seek(0)) throw std::runtime_error("Cannot update float WAV header");
+    QDataStream header(&wav); header.setByteOrder(QDataStream::LittleEndian);
+    header.writeRawData("RIFF", 4); header << quint32(bytes + 36); header.writeRawData("WAVEfmt ", 8);
+    header << quint32(16) << quint16(3) << quint16(channels) << quint32(sampleRate)
+           << quint32(sampleRate * channels * 4) << quint16(channels * 4) << quint16(32);
+    header.writeRawData("data", 4); header << bytes;
+    if (header.status() != QDataStream::Ok || !wav.flush()) throw std::runtime_error("Cannot finalize float WAV");
+    std::cout << scenario.toStdString() << ' ' << sources.toStdString() << ": " << rendered << " frames, "
+              << transport.bufferWaits() << " waits, " << transport.readRetries() << " retries\n";
+    return transport.bufferWaits() || transport.readRetries() || transport.audioReadFailed() ||
+        transport.eventOverflow() || transport.clipped() ? 1 : 0;
 }
 }
 
@@ -67,7 +149,16 @@ int main(int argc, char** argv) {
     parser.addOption({"hold-seconds", "Wall time at each stage hold", "seconds", "4"});
     parser.addOption({"list-devices", "List available native audio outputs and MIDI destinations, then exit"});
     parser.addOption({"software", "Record the real-file mixer to WAV without an audio device; NOT hardware-loopback proof"});
+    parser.addOption({"software-audio", "Render the scenario at fixed frame counts to a float WAV without a window, device or MIDI receiver"});
+    parser.addOption({"audio-sources", "Audio preparation for --software-audio: prepared or stream", "mode"});
     parser.process(app);
+    if (parser.isSet("software-audio")) {
+        try {
+            if (parser.value("output").isEmpty() || !QDir().mkpath(parser.value("output"))) throw std::runtime_error("Provide a writable --output directory");
+            return renderSoftwareAudio(QFileInfo(parser.value("project")).absoluteFilePath(), parser.value("output"),
+                parser.value("scenario"), parser.value("audio-sources"));
+        } catch (const std::exception& e) { std::cerr << e.what() << std::endl; return 1; }
+    }
     const auto apiName = parser.value("api");
     const auto api = apiName == "asio" ? RtAudio::WINDOWS_ASIO : apiName == "wasapi" ? RtAudio::WINDOWS_WASAPI : RtAudio::MACOSX_CORE;
     if (apiName != "asio" && apiName != "wasapi" && apiName != "core") { std::cerr << "Unknown audio API" << std::endl; return 2; }
@@ -149,7 +240,7 @@ int main(int argc, char** argv) {
     };
     auto sample = [&] {
         const auto s = c.transport.state();
-        log({{"kind", "sample"}, {"state", stateName(s)}, {"show_seconds", seconds(c.position())},
+        log({{"kind", "sample"}, {"state", rehearsalStateName(s)}, {"show_seconds", seconds(c.position())},
              {"async_voices", c.transport.asyncVoices()}, {"peak", c.transport.peak()},
              {"callbacks", static_cast<qint64>(c.device.callbacks())}, {"underruns", static_cast<int>(c.device.underruns())},
              {"audio_waits", static_cast<int>(c.transport.bufferWaits())}, {"read_retries", static_cast<int>(c.transport.readRetries())},
