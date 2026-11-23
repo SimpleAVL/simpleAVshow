@@ -1,161 +1,220 @@
 # 2. Editing a show
 
-[Manual contents](README.md) · Previous: [Getting started](getting-started.md) · Next: [Audio and outputs](audio-and-outputs.md)
+[Manual contents](README.md) · Previous: [1. Getting started](getting-started.md) · Next: [3. Audio and outputs](audio-and-outputs.md)
 
-## Enter an editable state
+This chapter covers everything you do while building and refining a show: importing media, managing tracks, trimming and splitting clips, adding titles, and sculpting volume and picture automation.
 
-Use **Stop All** and leave **Show mode**. Editing is blocked during Playing, Holding, media preparation, and while any async voices remain active. Paused playback is editable only when no async voices are running. The inspector is visibly disabled when editing is locked.
+---
 
-Each accepted project edit creates an undo step. **Edit → Undo/Redo** retains up to 32 undo steps; opening or replacing a show clears history. Invalid changes are rejected with an explanation in the status bar.
+## When editing is allowed
+
+To protect live playback, SimpleAVShow locks editing whenever the show is running or busy. Before making changes:
+
+- Click **Stop All** (not just Pause—a paused show may still have async audio or video running).
+- Make sure **Show mode** is turned off.
+- Wait for any media import or save progress dialog to finish.
+
+When editing is locked, the inspector dims out so you can tell at a glance. Once unlocked, every accepted edit adds an undo step. **Edit → Undo** and **Edit → Redo** remember up to **32 steps**; opening or replacing a show clears history. If an edit isn't allowed (such as overlapping two pictures on one layer), SimpleAVShow leaves the project untouched and tells you why in the status bar.
+
+---
 
 ## Import and place media
 
-Use **File → Import media…**, **+ Import media**, or drop media files from Finder/Explorer onto the editor. The file chooser lists WAV, AIFF/AIF, FLAC, MP3, OGG, M4A, MP4, MOV, MKV, WEBM, AVI, PNG, JPG/JPEG, BMP, and WebP. Actual decoding depends on the bundled media libraries and the file's codec/content.
+Bring files into the **Media** library in any of three ways: **File → Import media…**, the **+ Import media** button, or dragging files straight from Finder or File Explorer onto the window.
 
-Preparation runs with a progress dialog. Successful files appear in the Media library; failures are reported. Hover an item to see its source path. Generated demonstration sources have no file until saved/exported. Offline items are marked **OFFLINE · relink from File**.
+The file chooser accepts **WAV, AIFF/AIF, FLAC, MP3, OGG, M4A, MP4, MOV, MKV, WEBM, AVI, PNG, JPG/JPEG, BMP, and WebP** (actual decoding depends on the bundled libraries and the file's codec). While files prepare, a progress dialog appears. Hover over any imported item to see its source path; missing files show **OFFLINE · relink from File**.
 
-To create a clip, drag an asset onto a compatible track at the desired time. Alternatively, select a track header, place the playhead, then double-click the asset in Media.
+To put an item on the timeline, **drag it from Media onto a compatible track**, or select a track header, place the playhead, and **double-click** the item.
 
-| Source | Compatible placement |
+| Media type | Where it goes |
 | --- | --- |
-| Still image or video | Picture layer. |
-| Audio file | Audio or async audio track. |
-| Video with prepared embedded audio | Picture layer creates linked picture/sound when a synchronous audio track exists (an async audio track for an async picture layer); placing it on an audio track uses its audio. |
-| Text | Created directly with **+ Text**, rather than imported into Media. |
+| **Still image or video** | Any picture layer. |
+| **Audio file** | Any audio or async audio track. |
+| **Video with embedded audio** | Dropping on a picture layer creates a linked picture + audio pair (using the first matching synchronous or async audio track, if one exists). Dropping it directly on an audio track uses just its sound. |
+| **Text** | Created directly on the timeline with **+ Text** (not imported into Media). |
 
-The app can extend the project to accommodate a newly placed asset. Picture clips cannot overlap on the same layer; use another layer for simultaneous pictures or crossfades. Audio clips can overlap and their levels add.
+Two placement rules to keep in mind:
+- **Picture clips cannot overlap on the same layer.** To show two images together or crossfade between them, place them on separate picture layers.
+- **Audio clips can overlap freely** on the same track; their levels simply sum together.
 
-## Select and manage tracks
+Placing a clip past the current end of the timeline automatically extends project duration to give five seconds of headroom afterward.
 
-Click a track header to show its inspector. Rename it in **Name**. **Mute / hide track** silences audio or hides a picture layer. **Keep playing through pauses / holds** makes the track async. Audio tracks also have routing, gain, and pan; see [chapter 3](audio-and-outputs.md).
+---
 
-Use **Project → Add track → Picture layer / Async picture layer / Audio / Async audio** to add a track. New audio tracks route to outputs 1/2 by default, so route them deliberately before a show.
+## Work with tracks
 
-Picture tracks compose in timeline order: Background is underneath later picture tracks. To blend two pictures, put them on separate layers and automate the upper clip's opacity.
+Click any track header on the left of the timeline to inspect and configure it:
 
-**Project → Delete selected track…** names the current track and shows its clip count before deletion. The current track may be the track of a selected clip. Deletion removes that track's clips; at least one track must remain. Undo restores an accepted deletion.
+- **Name:** Label tracks clearly so you can scan them fast during rehearsal.
+- **Mute / hide track:** Silences an audio track or hides a picture layer.
+- **Keep playing through pauses / holds:** Turns a track into an **async** track (see [Synchronous vs. async audio and video](audio-and-outputs.md#synchronous-and-async-audio-and-video)).
+- **Audio routing, volume, and pan:** Covered in [Chapter 3: Audio and outputs](audio-and-outputs.md).
 
-## Move, trim, and seek
+To add more tracks, use **Project → Add track** and choose **Picture layer**, **Async picture layer**, **Audio**, or **Async audio**.
 
-- Drag a clip's body to move it in time or onto another compatible track.
-- Drag its left edge to change Start and Source in together while preserving the right edge.
-- Drag its right edge to change Length. Non-looping audio/video cannot extend beyond the available source; enable **Loop source** to run longer.
-- Click the ruler to seek. Clicking empty timeline space selects that track and also seeks. Double-clicking a clip seeks to that position in edit mode.
-- Drag a cue flag to move its time. Clip/cue nudging is available from Edit and keyboard shortcuts.
+> **Warning:** Newly added audio tracks route to outputs **1 and 2** by default. Re-route private tracks (like extra guide or click feeds) immediately so they cannot reach audience speakers.
 
-**Snap** starts enabled. It snaps to project frames and nearby clip edges, cues, the playhead, and zero. Disable it for placement without snapping. **Fit** shows the whole project. The Zoom slider adjusts magnification; Ctrl+wheel zooms around the cursor. **Follow** keeps the playhead visible during playback; manual horizontal scrolling temporarily suspends following.
+Picture layers stack in timeline order from top to bottom: **Background** sits underneath layers below it. To crossfade or layer graphics, put the incoming image on a lower (higher-numbered) picture track and animate its opacity.
 
-Seeking is allowed in edit mode even during playback. It never sends MIDI. Use Show mode to prevent accidental timeline jumps during a performance.
+To remove a track, select it (or any clip on it) and choose **Project → Delete selected track…**. The confirmation dialog tells you the track name and how many clips it contains. At least one track must remain in the project, and Undo brings a deleted track right back.
 
-## Edit clip timing and properties
+---
 
-Select a clip to show its inspector.
+## Move, trim, zoom, and seek
 
-![Text clip with timing and picture controls](screenshots/04-picture-and-text.png)
+- **Move a clip:** Drag its body left or right in time, or vertically onto another compatible track.
+- **Trim the start:** Drag the clip's left edge. This adjusts **Start** and **Source in** together while keeping the clip's end anchored in place.
+- **Trim the end:** Drag the clip's right edge to change **Length**. Non-looping audio and video stop at the end of their source file; enable **Loop source** to extend further.
+- **Move a cue:** Drag its flag along the ruler, or nudge it with the keyboard.
+- **Nudge selection:** Press **Alt+Left / Right** (Option+Left / Right on macOS) to nudge a selected clip or cue by one project frame, or **Alt+Shift+Left / Right** for one full second. Nudges stop cleanly at project boundaries.
+- **Seek the playhead:** Click the ruler, click empty space in a track (which also selects that track), or double-click a clip in edit mode.
 
-| Control | Meaning |
+Timeline navigation tools on the toolbar:
+- **Snap** *(on by default)* aligns drags to project frames, nearby clip edges, cue flags, the playhead, and `00:00:00:00`. Turn it off for freehand placement.
+- **Zoom** and **Ctrl+mouse wheel** (Command+wheel on macOS) magnify around the cursor; **Fit** frames the whole show.
+- **Follow** *(on by default)* keeps the playhead in view during playback. Manually scrolling horizontally temporarily pauses Follow so it doesn't fight you.
+
+> **Note:** In edit mode, you can seek even while the show is playing—and seeking never fires MIDI cues. Switch to **Show mode** during a performance to prevent accidental timeline clicks.
+
+---
+
+## Clip timing and properties
+
+Select any clip to inspect its timing and appearance on the right.
+
+![Text clip inspector showing timing, text box, and picture transform controls](screenshots/04-picture-and-text.png)
+
+| Field | What it controls |
 | --- | --- |
-| **Start** | Show time at which the clip begins. |
-| **Length** | Duration occupied on the timeline. |
-| **Source in** | Offset into the source when the clip begins. |
-| **Loop source** | Repeat from Source in to source end for the clip's timeline duration. |
-| **Gain / Pan** | Base audio values when that property has no automation. |
-| **X (frame widths) / Y (frame heights)** | Picture displacement from center. Positive X moves right; positive Y moves down. `0.5` means half a project width/height. |
-| **Scale** | Picture size multiplier: `1` is the normal fitted size. |
-| **Opacity** | `0` is transparent; `1` is fully visible. |
+| **Start** | Show time when the clip begins. |
+| **Length** | How long the clip lasts on the timeline. |
+| **Source in** | Where inside the source file playback begins. |
+| **Loop source** | Repeats from **Source in** to the end of the source file until the clip finishes. |
+| **Gain / Pan** *(audio)* | Base volume and pan when no automation curve is active for that property. |
+| **X / Y** *(picture)* | Offset from frame center in frame widths/heights (`+X` moves right, `+Y` moves down; `0.5` is half a screen). |
+| **Scale** *(picture)* | Size multiplier (`1` fits the source cleanly inside the project frame). |
+| **Opacity** *(picture)* | `0` is completely transparent; `1` is fully visible. |
 
-Start, Length, Source in, and cue Time display **HH:MM:SS:FF**. At 24 fps, `00:00:12:12` is 12.5 seconds. These fields also accept plain seconds (`12.5`), minutes/seconds (`01:30`), or minutes/seconds/frames (`01:30:12`). The last part of a three- or four-part entry is a frame number, not decimal seconds. Frame numbers must be below the project's frame-rate ceiling.
+### Entering timecode
 
-Numeric/name fields apply when you press Enter or leave the field. Checkboxes and routing presets apply immediately. The **Apply track**, **Apply clip**, and **Apply cue** buttons remain available. For multiline text, click **Apply clip** after editing. MIDI message choices require **Apply cue**. Automation table changes require **Apply curve**; timeline keyframe edits apply when you release the mouse, and timeline menu choices apply immediately.
+**Start**, **Length**, **Source in**, and cue **Time** display `HH:MM:SS:FF` (at 24 fps, `00:00:12:12` is 12.5 seconds). When typing, you can also enter:
+- Plain seconds: `12.5`
+- Minutes and seconds: `01:30`
+- Minutes, seconds, and frames: `01:30:12`
 
-Moving a clip keeps its automation relative to the clip. A left trim shifts automation with the source content and preserves the value and segment shape at the new beginning. Edits and device changes rebuild playback state; async source cursors do not persist through those operations.
+Keep in mind that the last number in a three- or four-part entry is a **frame count**, not decimal seconds, so it must be smaller than the project's frame rate.
+
+### When edits take effect
+
+- **Single-line numbers and names** apply as soon as you press **Enter** or leave the field.
+- **Checkboxes and routing presets** apply immediately.
+- **Multiline text** requires clicking **Apply clip**.
+- **MIDI message edits** require clicking **Apply cue**.
+- **Inspector automation table edits** require clicking **Apply curve** *(whereas dragging keyframes directly on the timeline applies as soon as you release the mouse)*.
+
+Moving a clip carries its automation along with it. Left-trimming shifts clip-relative automation with the source content so the curve value and segment shape at the new start stay seamless. Note that edits and device changes rebuild playback state, so async source positions reset afterward.
+
+---
 
 ## Linked video and audio
 
-Placing video with embedded audio on a picture track creates a sound companion on the first synchronous audio track, if one exists. The clips share a link: **moving, nudging, changing timing, trimming, splitting, and deleting either clip affect its linked partners**.
+When you place a video that contains embedded audio onto a picture layer, SimpleAVShow automatically places its audio on the first matching audio track (synchronous for a regular picture layer, async for an async picture layer) and links the two clips together.
 
-Select the picture clip for picture properties and the sound clip for gain/pan. Those properties remain independent. To move them independently, select either and choose **Edit → Unlink clip**.
+- **Timing stays locked together:** Moving, nudging, editing timing, trimming, splitting, or deleting either clip updates its linked partner too.
+- **Properties stay independent:** Select the video clip to adjust picture transforms and opacity; select the audio clip to adjust gain, pan, and volume automation.
+- **Separating them:** Select either clip and choose **Edit → Unlink clip** to break the link.
 
-**Copy/Paste** and **Duplicate** copy only the selected clip and clear the copied link. They do not create a second linked pair. If duplicating a complete video section, copy both components and check their alignment.
+> **Note:** **Copy / Paste** and **Duplicate** only copy the single selected clip and clear its link. To duplicate both video and sound together, copy each clip and verify their alignment.
+
+---
 
 ## Copy, duplicate, split, and delete
 
-| Action | Result |
+| Menu action | What it does |
 | --- | --- |
 | **Edit → Copy clip** | Copies the selected clip to the app's clip clipboard. |
-| **Paste clip at playhead** | Places that copy on the selected compatible track at the playhead. |
-| **Duplicate clip** | Places an unlinked copy directly after the selected clip. Space must be available on a picture layer and within project duration. |
-| **Split clip at playhead** | Divides a non-looping clip when the playhead is strictly inside it. Linked partners split together where they contain that time. Automation continues across the cut. |
-| **Unlink clip** | Separates all clips sharing that link. |
-| **Delete selected clip / cue** | Deletes the selection. Deleting a linked clip deletes its partners. |
+| **Edit → Paste clip at playhead** | Pastes the copied clip at the playhead onto the selected compatible track. |
+| **Edit → Duplicate clip** | Places an unlinked copy right after the selected clip (requires open space on picture layers and room inside project duration). |
+| **Edit → Split clip at playhead** | Cuts a non-looping clip when the playhead sits strictly inside it. Linked partners split together at the same time, and automation flows seamlessly across the cut. |
+| **Edit → Unlink clip** | Detaches all clips sharing a link. |
+| **Edit → Delete selected clip / cue** | Removes the selection (and any linked partners). |
 
-Looping clips cannot be split, because their loop starts at Source in. Unlinking does not change that restriction. Nudge a selected clip or cue one frame with Alt+Left/Right, or one second with Alt+Shift+Left/Right. Nudges stop at project boundaries.
+Looping clips—and any clip linked to a looping partner—cannot be split, because loops always wrap back to **Source in**.
+
+---
 
 ## Text and picture layers
 
-Select an empty picture layer, seek, and click **+ Text**. The new clip starts at the playhead, lasts ten seconds, and contains **Your text**. If an audio track is selected, the app uses the first picture layer; choose a picture layer explicitly to avoid overlap.
+To add a title or surtitle, select an open picture layer, move the playhead to where it should appear, and click **+ Text**. SimpleAVShow inserts a 10-second clip containing **Your text**. (If an audio track is selected when you click **+ Text**, the clip lands on the first picture layer—select your target layer first to avoid overlaps.)
 
-Text is centered, white, word-wrapped, and rendered using system Arial at a size derived from project height. The current UI has no font, color, or alignment chooser. Use X/Y, Scale, Opacity, and their automation to position or animate it. Appearance can vary across operating systems.
+Current text rendering is intentionally simple: centered, white, word-wrapped **Arial** sized proportionally to your project height. There is no font, color, or alignment picker yet, and system Arial can look slightly different across operating systems. Use **X/Y**, **Scale**, **Opacity**, and automation to place and animate text.
 
-Still images and video preserve their aspect ratio and fit inside the project frame before transformations. The program preview/output then fits the project frame to its display, with black bars where aspect ratios differ.
+Still images and videos always keep their original aspect ratio and fit inside the project frame before any X/Y or Scale transforms are applied. On the audience display, the project frame itself scales to fit the monitor, adding black bars if the screen's aspect ratio differs.
+
+---
 
 ## Automation and fade helpers
 
-![Looping ambience clip with shaped volume automation on the timeline and Time, Value, Shape, and Bend columns in the inspector](screenshots/05-audio-automation.png)
+Automation lets a clip's volume, pan, position, scale, or opacity change smoothly over time.
 
-Automation values follow **show time**, measured relative to clip Start. They do not follow the looping source's playback position. When a property has keyframes, its curve supplies that property's value; it does not multiply the base clip value. Track gain still multiplies clip volume.
+![Looping ambience clip with shaped volume automation on the timeline and its keyframe table in the inspector](screenshots/05-audio-automation.png)
 
-### On the timeline
+Three important rules to understand before drawing curves:
+1. **Curves follow show time**, measured in seconds from the clip's **Start**—not from a looping audio file's internal position. During a hold or pause, all curves freeze with show time (even on async tracks whose audio or video keeps running).
+2. **A curve replaces the clip's base value** for that property (it does not multiply it). Track volume still multiplies clip volume on top. Clear all points on a curve to return to the clip's base value.
+3. **Flat ends:** Before the first keyframe, the clip holds the first keyframe's value; after the last keyframe, it holds the last keyframe's value.
 
-Clips with keyframes draw their Volume (audio) or Opacity (picture) curve. The selected clip draws the compatible property chosen in the inspector, with a dashed line at its base value when it has no keyframes.
+### Edit keyframes directly on the timeline
 
-1. Select a clip and choose the property under **Automation · follows show time** in the inspector. Use Volume or Pan for audio; Position X, Position Y, Scale, or Opacity for picture.
-2. Click the selected clip's gold curve (or dashed base-value line) to add a keyframe. Drag a gold point horizontally to change its time and vertically to change its value; the label shows clip-relative seconds and the value during the drag.
-3. Release the mouse to apply the edit. The inspector table updates to match; no **Apply curve** click is needed for timeline edits. Use **Edit → Undo** to undo the gesture.
+Any clip with automation draws its **Volume** curve (audio) or **Opacity** curve (picture) right on the clip. Whichever clip you select displays the property currently chosen in the inspector—drawn as a dashed line at its base value if it has no keyframes yet.
 
-![Ambience Volume keyframe being dragged to 10 seconds relative to clip start and a value of 0.75](screenshots/12-timeline-keyframes.png)
+1. Select a clip and pick a property under **Automation · follows show time** in the inspector (**Volume** or **Pan** for audio; **Position X**, **Position Y**, **Scale**, or **Opacity** for picture).
+2. Click the gold curve (or dashed base line) to add a keyframe, and drag it into place. A live readout shows clip-relative seconds and value as you drag.
+3. Release the mouse to commit the change immediately as one undo step—no **Apply curve** button needed.
 
-While editing is allowed:
+![Dragging a Volume keyframe on the timeline to 10 seconds and value 0.75](screenshots/12-timeline-keyframes.png)
 
-| Mouse | Result |
+| Mouse gesture | Effect |
 | --- | --- |
-| Drag a point | Moves it in time and value. Times stay between the neighbouring points and inside the clip, and follow **Snap**. Hold Shift to change only the value. |
-| Click the selected clip's line | Adds a point on the line and lets you drag it straight away. |
-| Double-click a point | Deletes it. |
-| Alt/Option-drag the selected clip's segment | Adjusts its bend; Linear or Hold becomes **Curve**, while Curve or S-curve keeps its shape. Dragging up bows the line upwards. |
-| Right-click a point | **Delete point** removes it. When a next point exists, choose the shape of the segment leading to it. |
-| Right-click the selected clip's line between points | Chooses that segment's shape. **Reset bend** straightens a bent Curve or S-curve. |
+| **Click the selected clip's line** | Adds a new keyframe and lets you drag it right away. |
+| **Drag a keyframe point** | Moves it in time and value, constrained between neighboring points and inside the clip (respects **Snap**). Hold **Shift** to lock time and adjust value only. |
+| **Double-click a point** | Deletes that keyframe. |
+| **Alt / Option-drag a segment** | Bends the segment between two points. Dragging up bows the curve upward; bending a Linear or Hold segment converts it to **Curve**. |
+| **Right-click a point** | Delete the point or pick the shape of the segment leading to the next point. |
+| **Right-click a segment** | Pick that segment's shape, or choose **Reset bend** to straighten a Curve or S-curve. |
 
-The cursor shows what a press would grab. Points on unselected clips can be dragged directly; that selects the clip. A drag elsewhere on the clip still moves or trims it. Each change is one undo step. Zoom in if points are close together. To move or trim a clip, grab away from its points and curve.
+You can even grab a visible point on an unselected clip to select and drag it in one motion. To move or trim the clip itself instead of editing its curve, grab away from the points and line (zoom in if points are crowded).
 
 ### Segment shapes
 
-Each keyframe sets the shape of the segment that runs to the next keyframe:
+Every keyframe controls the shape of the segment running from itself to the **next** keyframe (so the final keyframe's shape and bend have no effect):
 
-| Shape | Behaviour |
+| Shape | How it moves |
 | --- | --- |
-| **Linear** | Straight line. |
-| **Hold** | Keeps the keyframe's value, then jumps at the next keyframe. |
-| **Curve** | Positive bend changes quickly first and settles into the next point (a natural audio fade-out); negative bend starts slowly and accelerates. |
-| **S-curve** | Positive bend eases out of one point and into the next; negative bend does the opposite, moving quickly at both ends. |
+| **Linear** | Constant straight-line change. |
+| **Hold** | Stays flat at the keyframe's value, then steps abruptly at the next keyframe. |
+| **Curve** | Exponential-style bend. Positive bend moves fast at first and eases in (great for natural audio fade-outs); negative bend starts gently and accelerates. |
+| **S-curve** | Smooth ease-out and ease-in at both ends with positive bend; negative bend moves quickly at both ends and lingers in the middle. |
 
-Bend runs from −1 to 1; 0 is a straight line for Curve and S-curve. Choosing Curve or S-curve from the timeline menu sets a zero bend to 0.5; an existing nonzero bend is preserved. Linear and Hold reset bend to 0. The last keyframe has no following segment, so its Shape and Bend do not change the curve.
+**Bend** ranges from **−1** to **+1** (`0` is straight). Switching a segment to **Curve** or **S-curve** from the timeline right-click menu nudges a `0` bend to `0.5` so you see the curve immediately; switching to **Linear** or **Hold** resets bend to `0`.
 
-### In the inspector
+### Precision editing in the inspector table
 
-1. Select the clip and scroll to **Automation · follows show time**.
-2. Choose **Volume**, **Pan**, **Position X**, **Position Y**, **Scale**, or **Opacity**.
-3. Seek to a useful position and click **+ At playhead** to add a row with the current interpolated value. The time is clamped to the selected clip's duration.
-4. Edit **Time (s)**, **Value**, **Shape**, and **Bend**, using a decimal point for decimal table entries. Times here are seconds relative to clip Start, not timecode.
-5. Select a row and use **− Point** to remove it.
-6. Click **Apply curve** to commit the table as one undo step. Times are sorted; duplicate times, negative times, bends outside −1…1, and values outside the property's range are rejected. Apply the table before changing the selection/property or editing points on the timeline.
+For exact numbers, scroll to **Automation · follows show time** in the inspector:
 
-![Complete automation table with Time, Value, Shape, and Bend, plus Apply curve and fade helpers](screenshots/11-automation-controls.png)
+![Complete inspector automation controls showing Time, Value, Shape, Bend, Apply curve, and fade helpers](screenshots/11-automation-controls.png)
 
-Before the first keyframe they use its value; after the last they keep the final value. An empty curve restores the base clip value. All curves freeze during pauses and holds, including curves on async audio whose source keeps playing.
+1. Choose the property you want to edit.
+2. Position the playhead where you want a keyframe and click **+ At playhead** to insert a row at the current interpolated value (clamped inside the clip).
+3. Edit **Time (s)**, **Value**, **Shape**, and **Bend**. Note that table times are **clip-relative seconds** (not timecode) and always use a period (`.`) for decimals.
+4. Select a row and click **− Point** to remove it.
+5. Click **Apply curve** to commit the whole table as a single undo step. *(Always click **Apply curve** before switching clips, changing properties, or dragging points on the timeline.)*
 
-**Fade in** replaces the Volume curve on audio, or Opacity curve on picture, with a two-second linear ramp from zero to the base value, shortened if the clip is shorter. It applies immediately.
+### One-click fade helpers
 
-**After hold** finds the earliest following hold inside the selected clip, at or after the playhead. It preserves earlier points, places the current curve value at the hold, and fades to zero over four seconds, shortened at clip end. It applies immediately. While the hold lasts, the fade is frozen; continuing starts the fade. If no following hold is inside the clip, the status bar explains why no fade was created.
+Both helpers apply immediately as undoable edits:
 
-For a picture crossfade, overlap clips on separate layers and fade the upper layer's opacity. Check both layers at the intended start and end positions in the preview.
+- **Fade in:** Replaces the clip's **Volume** curve (audio) or **Opacity** curve (picture) with a 2-second linear fade from `0` up to the clip's base value (shortened automatically if the clip is under 2 seconds).
+- **After hold:** Finds the next hold cue inside the selected clip at or after the playhead, keeps any earlier keyframes intact, anchors the current value at the hold, and ramps smoothly to `0` over 4 seconds after the hold (shortened if the clip ends sooner). While the show waits at the hold, the level stays steady; as soon as the operator presses **Continue**, the fade begins.
+
+> **Tip for picture crossfades:** Place the outgoing image on **Background** and the incoming image overlapping it on **Overlay**, then fade **Overlay**'s opacity from `0` to `1`. Scrub the start and end of the crossfade to verify both layers look right in **PROGRAM**.
