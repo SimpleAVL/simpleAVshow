@@ -1,132 +1,176 @@
-# 7. Reference and troubleshooting
+# 9. Reference and troubleshooting
 
-[Manual contents](README.md) · Previous: [Saving and recovery](saving-and-recovery.md)
+[Manual contents](README.md) · Previous: [8. Agent collaboration](agent-collaboration.md)
 
-## Keyboard reference
+Use this chapter as a quick desk reference for shortcuts, exact numeric limits, health indicator meanings, troubleshooting, media caching, and current v1 boundaries.
 
-Shortcuts below use Windows/Linux names. For Qt menu shortcuts, **Ctrl generally appears as Command on macOS**, and Alt appears as Option. The menu's displayed shortcut is authoritative for your platform. Standard Redo/Save as combinations can differ.
+---
 
-| Key / menu action | Effect |
+## Keyboard shortcuts
+
+Shortcuts below use Windows and Linux naming. On macOS, **Ctrl** in menu shortcuts is generally **Command (⌘)** and **Alt** is **Option (⌥)**—the shortcut shown in your platform's menu bar is always authoritative (especially for **Redo** and **Save as…**).
+
+### Playback & cues
+
+| Shortcut | Action |
 | --- | --- |
-| Space | Play/Pause/Continue outside editing fields. |
-| Escape | Stop All in edit mode outside editing fields. |
-| Escape twice within 600 ms | Stop All in Show mode. |
-| Delete or Backspace | Delete selected clip/cue outside editing fields; linked partners are deleted together. |
-| Ctrl+N / Ctrl+O / Ctrl+S | New show / Open / Save. |
-| **File → Save as…** | Save to another filename; use the platform's menu shortcut. |
-| Ctrl+I | Import media. |
-| Ctrl+Z | Undo; up to 32 undo steps. |
-| **Edit → Redo** | Redo; use the platform's menu shortcut. |
-| Ctrl+C / Ctrl+V | Copy selected clip / paste at playhead on selected compatible track. Editing fields retain their text clipboard behavior. |
-| Ctrl+D | Duplicate selected clip after its end. |
-| Ctrl+B | Split selected non-looping clip at playhead. |
-| Alt+Left / Alt+Right | Nudge selected clip/cue one project frame. |
-| Alt+Shift+Left / Alt+Shift+Right | Nudge selected clip/cue one second. |
-| Ctrl+Left / Ctrl+Right | Previous / next cue and seek to it in edit mode. |
-| Ctrl+mouse wheel | Zoom timeline around cursor. |
-| Up / Down, timeline focused | Select previous/next track. |
-| Left / Right, timeline focused | Select previous/next clip on that track. |
-| Home / End, timeline focused | Seek to project start/end in edit mode. |
-| Tab / Shift+Tab | Move keyboard focus through controls. |
-| Standard Close shortcut, program window focused | Hide program output; typically Ctrl+W / Command+W. |
+| **Space** | Play, Pause, or Continue a hold *(when focus is outside text/number/dropdown/table editors)*. |
+| **Escape** | **Stop All** in edit mode *(outside editing controls)*. |
+| **Escape × 2** *(within 600 ms)* | **Stop All** in Show mode. |
+| **Ctrl+Left / Ctrl+Right** | Jump to previous / next cue *(edit mode)*. |
+| **Home / End** *(timeline focused)* | Seek to project start / end *(edit mode)*. |
 
-Buttons support keyboard focus. The timeline has a focus outline and announces selected track/clip/cue descriptions for assistive technology. Space in text/spin/combo/table-cell editing controls belongs to that control, not the transport. Modal dialogs also have their own keyboard behavior.
+### Editing & timeline
+
+| Shortcut | Action |
+| --- | --- |
+| **Ctrl+Z** / **Edit → Redo** | Undo (up to 32 steps) / Redo. |
+| **Ctrl+C / Ctrl+V** | Copy selected clip / paste at playhead on selected compatible track *(normal text clipboard inside fields)*. |
+| **Ctrl+D** | Duplicate selected clip immediately after its end. |
+| **Ctrl+B** | Split selected non-looping clip at the playhead. |
+| **Delete** or **Backspace** | Delete selected clip or cue *(outside editing fields; deletes linked partners together)*. |
+| **Alt+Left / Alt+Right** | Nudge selected clip or cue by 1 project frame. |
+| **Alt+Shift+Left / Right** | Nudge selected clip or cue by 1 second. |
+| **Up / Down** *(timeline focused)* | Select previous / next track. |
+| **Left / Right** *(timeline focused)* | Select previous / next clip on the current track. |
+| **Ctrl+mouse wheel** | Zoom timeline around the cursor. |
+
+### Files & windows
+
+| Shortcut | Action |
+| --- | --- |
+| **Ctrl+N / Ctrl+O / Ctrl+S** | New show / Open / Save. |
+| **File → Save as…** | Save under a new filename *(platform shortcut)*. |
+| **Ctrl+I** | Import media. |
+| **Tab / Shift+Tab** | Move keyboard focus across controls. |
+| **Ctrl+W / Command+W** *(program window focused)* | Hide the fullscreen audience display window. |
+
+> **Accessibility note:** Buttons accept keyboard focus, and the timeline draws a clear focus outline while announcing selected tracks, clips, and cues to assistive technologies.
+
+---
 
 ## Numeric ranges and units
 
-| Setting | Range / unit |
+| Setting | Valid range / unit |
 | --- | --- |
-| Project width | 320–7680 pixels. |
-| Project height | 240–4320 pixels. |
-| Project frame rate | 1–120 fps; default 24. |
-| Project duration | Positive seconds in Project settings; no fixed 24-hour cap. Must contain all clips/cues. |
-| Clip/cue time fields | Display HH:MM:SS:FF; also accept seconds, MM:SS, and MM:SS:FF. |
-| Automation time | Nonnegative seconds relative to clip Start; unique keyframe times. |
-| Automation shape | Linear, Hold, Curve, or S-curve per segment; bend −1…+1, 0 is straight. |
-| Track/clip volume | 0–4 linear gain; 1 is unity. Volume automation uses the same range. |
-| Track/clip pan | −1…+1; one-output mono routing ignores pan. |
-| Picture X/Y | −2…+2 project frame widths/heights from center. |
-| Scale | 0.01–8; 1 is normal fitted size. |
-| Opacity | 0–1. |
-| Output channels | One-based physical channel numbers; Off disconnects a leg. Open channels are limited by the interface. |
-| MIDI channels | 1–16. |
-| Notes / CC / velocity / pressure | 0–127; note velocity 0 stops rather than plays. |
-| Displayed MIDI programs | 1–128; transmitted values are 0–127. |
-| Pitch bend | −8192…+8191; 0 centered. |
+| **Project width × height** | `320–7680` × `240–4320` pixels. |
+| **Project frame rate** | `1–120` fps (default `24`). |
+| **Project duration** | Positive seconds in Project settings (no fixed 24-hour cap; must contain all clips and cues). |
+| **Clip & cue time fields** | Display `HH:MM:SS:FF`; accept seconds (`12.5`), `MM:SS`, or `MM:SS:FF`. |
+| **Automation time** | Nonnegative seconds relative to clip **Start**; no duplicate times. |
+| **Automation shape & bend** | `Linear`, `Hold`, `Curve`, or `S-curve` per segment; bend `−1…+1` (`0` = straight). |
+| **Track & clip volume** | `0–4` linear gain (`1` = unity; same range for Volume automation). |
+| **Track & clip pan** | `−1…+1` *(ignored on single-leg mono routes)*. |
+| **Picture X / Y** | `−2…+2` project frame widths / heights from center. |
+| **Picture scale** | `0.01–8` (`1` = normal fit). |
+| **Picture opacity** | `0–1`. |
+| **Audio output channels** | 1-based physical channel numbers, or **Off**; capped by open interface channels. |
+| **MIDI channels** | `1–16`. |
+| **MIDI notes / CC / velocity / pressure** | `0–127` *(Note On velocity `0` acts as note-off)*. |
+| **MIDI program numbers** | Displayed `1–128`; transmitted on the wire as `0–127`. |
+| **MIDI pitch bend** | `−8192…+8191` (`0` = centered). |
 
-Numeric inspector fields may use your system decimal separator. Automation table entries are parsed as decimal-point numbers. Timecode counts frames at the project rate; it is not a wall-clock stopwatch and does not include time spent holding.
+Inspector spin boxes respect your operating system's decimal separator, whereas automation table cells always parse a period (`.`). Timecode counts frames of **show time**—it pauses during holds and does not track wall-clock elapsed time.
+
+---
 
 ## Health indicators
 
-The bottom-right readout reports open audio channels and 48 kHz, async activity, MIDI status when needed, and fault counters. A problem counter turns it orange. The program banner/status bar explain playback failures.
+The bottom-right readout summarizes engine status and turns **orange** whenever a fault counter increments.
 
-| Indicator | Meaning and response |
+| Indicator | What it means & what to do |
 | --- | --- |
-| **Audio · connects on Play** | No running output yet. Play prepares the default/remembered device. |
-| **N ch · 48 kHz** | Audio output is running with N channels. Verify physical routing separately. |
-| **N async playing** | Async voices are active; pausing does not necessarily silence them. Use Stop All before editing/connections. |
-| **MIDI needs a device** | The show has MIDI messages but no remembered destination. Choose one in Outputs. |
-| **MIDI reconnects on Play** | A destination is remembered but not currently connected. Check it is available. |
-| **CLIPPING** | Output exceeded full scale or contained invalid samples. Lower summed levels; Stop All clears the latch. |
-| **underruns** | Audio driver reported missed delivery. Try a larger buffer and investigate CPU/driver load. |
-| **audio waits** | Disk-backed audio was not ready. Audio and show time wait together instead of skipping source frames. Investigate disk throughput and concurrent playback. |
-| **disk retries** | Source reads needed retrying. Investigate file availability, storage, and programs locking the files. |
-| **video waits** | A requested picture was delayed; the previous composition is retained when available. Reduce decode/composition load and rehearse the actual media. |
+| **Audio · connects on Play** | Idle—pressing **Play** will open the remembered (or default) audio device. |
+| **N ch · 48 kHz** | Audio engine is running with `N` open physical channels. *(Verify cabling separately.)* |
+| **N async playing** | Async voices are active. Pause won't silence them—use **Stop All** before editing or switching devices. |
+| **MIDI needs a device** | The show contains MIDI cues, but no MIDI destination is selected. Pick one in **Outputs**. |
+| **MIDI reconnects on Play** | A destination is remembered and will reconnect automatically on **Play**—check that it's plugged in/running. |
+| **CLIPPING** | Summed audio exceeded full scale (or hit invalid samples) and was clamped. Lower gains and click **Stop All** to clear. |
+| **underruns** | The audio driver missed a buffer deadline. Try a larger buffer size and check CPU/driver load. |
+| **audio waits** | Disk-backed audio wasn't ready in time; audio and show time waited together instead of skipping frames. Check disk speed and concurrent voice count. |
+| **disk retries** | Source file reads had to retry. Check drive stability, cables, or other apps locking the files. |
+| **video waits** | A video frame decoded late; the previous frame stayed on screen. Lower decode/layer load and rehearse with final media. |
 
-Counters describe software events; they do not establish physical audio/video/MIDI alignment. Some counters reset when playback/device state is rebuilt. Use changes during a rehearsal to assess stability.
+*Counters track software events and may reset when playback or devices rebuild—watch for increments during a full rehearsal rather than assuming zero guarantees physical alignment.*
+
+---
 
 ## Troubleshooting
 
-| Symptom | Check and recovery |
+### Playback & audio
+
+| Symptom | Likely cause & fix |
 | --- | --- |
-| Play does nothing or a warning appears | Read the banner/status. Wait for preparation, resolve missing timeline media, select needed MIDI, and check remembered audio/routing. |
-| Remembered audio device is missing | Reconnect it, Refresh devices, and retry Play. To use another device: Stop All, leave Show mode, choose it explicitly in Outputs. |
-| “A track needs more output channels” | Open enough channels on the interface or route/disconnect the offending track. Muting unused audio tracks also excludes their routes from the check. |
-| No Guide/Click sound | They start Off. Route to intended physical channels, open those channels, check mute/gain/source timing, and inspect the cabling. |
-| Stereo content loses a side on a mono feed | Exactly one connected leg sums stereo to mono. Verify the other leg is Off and check phase cancellation in the source. |
-| Sound or video continues after Pause or at a hold | Check **Keep playing through pauses / holds** and async count. This is expected for async sources. Stop All stops them. |
-| Cannot edit/save/test MIDI | Stop All, leave Show mode, and wait for media preparation. Paused async voices still lock editing. |
-| Outputs/Audience display button is disabled | Leave Show mode or wait for preparation. In edit-mode playback, Outputs opens for inspection but connection controls stay locked. |
-| Space types a space or changes a control | Move focus out of text/spin/combo/cell editors, then use Space or the transport button. |
-| Escape did not stop Show mode playback | Press twice within 600 ms, or click Stop All once. |
-| Copy/Paste/Duplicate has no useful result | Select a clip and a compatible destination track. Picture overlaps/project bounds can reject placement; copies are unlinked. |
-| Split is rejected | Put the playhead strictly inside the selected clip. Looping clips and linked looping partners cannot be split. |
-| Picture clips cannot overlap | Add another picture layer. Use opacity automation for a crossfade. |
-| After hold does nothing | The selected clip needs a following hold inside its interval, at or after the current playhead. |
-| Changing a clip's gain/opacity seems ineffective | A nonempty curve supplies that property instead of its base value. Edit the curve or remove its rows and Apply curve. |
-| MIDI test works but cue does not | Click Apply cue, check arrival/resume timing and destination/channel, and rehearse across the cue. Seeking alone sends nothing. |
-| External note/device remains active after Stop All | Send matching note-off/cleanup MIDI or use the receiver's stop/panic control. Stop All sends no external stop command. |
-| Program selection is off by one | The UI displays 1–128; MIDI transmits 0–127. Check the receiver's numbering convention. |
-| Missing files after moving a project | Move the required media tree too, use Relink missing media, or transfer a .savpack. Save as does not gather all imported sources. |
-| Audio source changed/cannot be read | Restore temporarily unavailable originals and retry Play. Reopen the show to reload changed files or rebuild damaged caches; rehearse the result. |
-| Fatal video warning with frozen picture | Audio/cues can continue. After stopping, verify the source and reopen/reprepare it; inspect the audience output. |
-| Black picture | Check clip interval, picture-track hide, opacity/curves, offline media, and selected program display. Source/preview aspect ratios can produce black bars normally. |
-| Program output covered the editor | Focus the output and use the standard Close shortcut shown in the warning. Reopen on a separate audience screen. |
-| Program display disconnected | Restore the display/cable. Output attempts to reopen when the same named screen returns away from the editor; verify it physically. |
-| Package export/open fails | Keep all library media available and ensure free disk space. Use an unmodified app-generated package; read the archive/source error. |
-| Package edits were not recovered after restart | Opened packages need a normal Save before autosave starts. Keep the original package and save the extracted working copy. |
-| Saved show has a newer autosave | Choose Recover autosave when opening; inspect it and Save or Save as. |
-| Audio crackles or picture stutters | Increase audio buffer, reduce simultaneous media/composition load, use stable local storage, and investigate the health counters on show hardware. |
+| **Play does nothing or shows a warning** | Check the banner under **PROGRAM** and the status bar: wait for media preparation, relink missing timeline media, select a MIDI destination if cues need one, or check audio device/routing. |
+| **Remembered audio device is missing** | SimpleAVShow won't silently fall back to built-in speakers. Reconnect your interface, click **Refresh devices**, and retry **Play**—or **Stop All**, leave Show mode, and explicitly choose another device in **Outputs**. |
+| **"A track needs more output channels"** | Open enough channels in **Outputs**, reroute the track to an open channel, or mute the unused track. |
+| **No sound from Guide or Click** | Both tracks start with outputs **Off**. Route them to physical outputs, open enough channels in Outputs, check mute/gain/clip timing, and verify your cabling. |
+| **Stereo audio loses one side on a mono feed** | With one connected leg, stereo sums automatically as `(L + R) / 2`. Check that the other leg is truly **Off**, and check whether your stereo file has phase-inverted channels canceling out. |
+| **Audio or video keeps playing after Pause or at a hold** | Normal behavior for **async** tracks (**Keep playing through pauses / holds**). Check the `async playing` indicator and click **Stop All** to silence everything. |
+| **Audio crackles or video stutters** | Increase the audio buffer size in Outputs, reduce overlapping layers/voices, run media from fast local storage, and inspect the health counters on the actual show PC. |
+| **Audio source changed or unreadable** | Restore any disconnected drive/file and retry **Play**. If the file was modified on disk or its cache was damaged, reopen the show to reload/rebuild and rehearse again. |
 
-## Media preparation and disk usage
+### Editing, timeline & automation
 
-Compatible 48 kHz mono/stereo PCM WAV files stream directly from their source. Supported direct WAV sample types include 8/16/24/32-bit integer and 32-bit float, with compatible extensible headers. Other audio formats/sample rates prepare to a reusable 48 kHz stereo float PCM cache, about **1.29 GiB per source hour**. Multichannel source audio still needs separate mono/stereo stems.
+| Symptom | Likely cause & fix |
+| --- | --- |
+| **Can't edit, save, or test MIDI** | Click **Stop All**, leave **Show mode**, and wait for media preparation. Even a paused show with active async voices locks editing. |
+| **Outputs / Audience display button is greyed out** | Leave **Show mode** or wait for preparation. During edit-mode playback, Outputs opens read-only with a **Stop All to change connections** button inside. |
+| **Space types a space or triggers a control** | Focus is inside a text box, number field, dropdown, or table cell. Click the timeline, preview, or a transport button first. |
+| **Escape didn't stop playback in Show mode** | Show mode requires **Escape twice within 600 ms** (or one click on **Stop All**). |
+| **Copy / Paste / Duplicate won't place a clip** | Make sure a clip and a compatible destination track are selected, picture layers have room without overlapping, and there is space inside project duration. *(Copies are always unlinked.)* |
+| **Split is rejected** | Put the playhead strictly *inside* the clip. Looping clips (and clips linked to a looping partner) cannot be split. |
+| **Can't overlap two picture clips** | Picture clips can't overlap on the same track. Add another picture layer and animate the upper layer's opacity to crossfade. |
+| **After hold does nothing** | The selected clip must contain a hold cue at or after the current playhead position. |
+| **Changing clip Gain or Opacity has no effect** | A non-empty automation curve overrides the clip's base value. Edit the curve, or remove all its points and click **Apply curve**. |
 
-Caches live in Qt's application cache directory under `audio-pcm-v1-le` (or `audio-pcm-v1-be`). They are local, excluded from packages, and can be reused when identical source content moves or arrives in a reopened package. Reuse validates source/prepared data and waveform metadata; missing or damaged entries rebuild. Even a reused cache can take time to validate for large files.
+### Cues & MIDI
 
-The current app trims old/unused caches at startup and after conversion, targeting at most 20 GiB and a lower budget on disks with limited free space. In-use cache entries are retained. With the app closed, you can remove its audio cache folder to reclaim space; sources needing conversion will prepare again on the next open. Keep originals and saved projects.
+| Symptom | Likely cause & fix |
+| --- | --- |
+| **Send test works, but the cue doesn't fire in the show** | Click **Apply cue** to save your MIDI settings into the cue, check **Send** timing (arrival vs. after hold), verify the port/channel, and play *across* the cue (seeking never sends MIDI). |
+| **Program number is off by one** | SimpleAVShow displays programs as **1–128** and transmits **0–127** on the wire. Check whether your synth or console numbers from 0 or 1. |
+| **External synth note or light stays on after Stop All** | **Stop All** never sends external MIDI stop/panic commands. Send a matching Note Off / cleanup cue, or use your receiver's own panic button. |
 
-Playback uses bounded read-ahead buffers rather than keeping entire imported audio files in memory. There is no fixed project audio-byte budget, track/clip/cue count cap, or 24-hour duration cap. Actual capacity depends on memory, disk throughput, simultaneous voices, and picture work; very large projects still need target-machine testing.
+### Picture & displays
+
+| Symptom | Likely cause & fix |
+| --- | --- |
+| **Picture is black** | Check clip timing, whether the picture layer is hidden, opacity/automation curves, offline media, and which screen is chosen in Outputs. *(Letterbox/pillarbox black bars are normal when aspect ratios differ.)* |
+| **Fullscreen output covered the editor** | Focus the output window and press **Ctrl+W** (Windows/Linux) or **Command+W** (macOS) to hide it, then reopen it on a separate audience monitor. |
+| **Audience display disconnected** | Reconnect the cable. SimpleAVShow hides the window on disconnect and tries to reopen automatically if the same named display returns on a screen other than the editor—always verify physically. |
+| **Fatal video warning with frozen picture** | Audio and MIDI cues continue safely. After stopping, check the video file and reopen/reprepare the show. |
+
+### Files, packages & recovery
+
+| Symptom | Likely cause & fix |
+| --- | --- |
+| **Files go missing after moving a project** | **Save** / **Save as…** keeps external media in place. Move the full media folder tree with the `.savshow`, use **File → Relink missing media…**, or transfer a `.savpack` package instead. |
+| **Package export or open fails** | All Media library items (even unused ones) must be online to export, and the drive needs enough free space. Don't open manually modified/re-zipped archives. |
+| **Edits to an opened package disappeared after restart** | Opened `.savpack` files live in temporary storage and don't autosave until your first normal **File → Save**. Always save a permanent `.savshow` copy after opening a package. |
+| **Prompted about a newer autosave on open** | Choose **Recover autosave** to inspect your recovered changes, then **Save** (to update the project) or **Save as…** (to keep a separate copy). |
+
+---
+
+## Media preparation and audio cache
+
+- **Direct streaming WAVs:** 48 kHz mono or stereo PCM WAV files (8/16/24/32-bit integer or 32-bit float, including standard extensible headers) stream directly from disk with zero conversion.
+- **Converted audio cache:** Other formats and sample rates convert automatically into a reusable 48 kHz stereo float PCM cache (~**1.29 GiB per hour of audio**). Multichannel source files must be split into separate mono/stereo stems beforehand.
+- **Cache location and cleanup:** Caches live locally inside Qt's application cache folder under `audio-pcm-v1-le` (or `audio-pcm-v1-be`), are never packed into `.savpack` files, and are reused automatically even when an identical file moves or arrives in a package. SimpleAVShow trims old unused caches on startup and after conversions (targeting at most 20 GiB, or less on tighter drives). With the app closed, you can safely delete that cache folder to reclaim disk space—files that need conversion will simply rebuild next time you open them.
+- **Memory usage:** Playback streams through bounded read-ahead buffers instead of loading entire audio files into RAM. There is no hard cap on audio bytes, tracks, clips, cues, or 24-hour duration—practical limits depend on your show computer's disk speed, memory, simultaneous voice count, and video decoding load.
+
+---
 
 ## Current limitations
 
-- Windows 11 is the primary show target. Physical routing/ASIO, MIDI bridge latency, display behavior, and complete rehearsal runs require validation on the actual machine.
-- One audio output device is used at a time. NDI, MIDI input, Wings import, plugins, and advanced effects are outside v1.
-- Audio is based on mono/stereo sources; prepare separate stems for multichannel material.
-- Picture clips cannot overlap within one layer. Video decoding and picture composition use software FFmpeg/QPainter; hardware decoding/GPU composition are future work.
-- Multi-layer 1080p24 capacity is not established for your show PC by automated tests.
-- Audio legs share one callback, but physical driver/display buffering and MIDI timing are not automatically latency-compensated. Measure alignment.
-- Text styling is fixed in the UI and system fonts can vary between computers.
-- Async source position survives seeks within an active clip, but not edits/device changes. Stop All/project end clear voices.
+Keep these v1 scope boundaries in mind when planning a production:
 
-See [hardware validation](hardware-validation.md) for a structured rehearsal and failure-test procedure.
+- **Hardware validation required:** Windows 11 is the primary stage target. ASIO routing, MIDI bridge latency, multi-display behavior, and real-world show stability must be verified on your actual show PC.
+- **Single audio output device:** One audio interface at a time. NDI, MIDI input, Wings import, audio plugins, and advanced video effects are not included in v1.
+- **Mono/stereo audio files only:** Split multichannel audio files into separate mono or stereo stems before importing.
+- **Software video decoding and compositing:** Picture clips cannot overlap on the same layer, and video decoding/compositing currently runs on the CPU via FFmpeg and QPainter (hardware acceleration is future work). Always stress-test multi-layer 1080p24 shows on your real show PC.
+- **No automatic latency compensation:** All audio outputs share one callback, but physical driver buffering, projector lag, and MIDI bridge latency are not automatically compensated—measure alignment during rehearsal.
+- **Fixed text styling:** Text uses centered, white system Arial; appearance can vary slightly between operating systems.
+- **Async state resets on edits:** Async media positions survive seeks inside an active clip, but reset on **Stop All**, project end, edits, or device changes.
+
+For a structured test run on your stage machine, see the [Show-machine validation checklist](hardware-validation.md).

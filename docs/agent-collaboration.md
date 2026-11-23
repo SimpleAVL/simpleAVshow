@@ -1,18 +1,22 @@
 # 8. Agent collaboration
 
-An MCP agent can help build the show that is currently open in the editor. Both the agent and the operator use the same project: changes appear immediately on the timeline, and **Edit → Undo** reverses an agent batch in one step.
+[Manual contents](README.md) · Previous: [7. Saving and recovery](saving-and-recovery.md) · Next: [9. Reference and troubleshooting](reference-and-troubleshooting.md)
 
-![Agent collaboration controls with editing enabled](screenshots/08-agent-collaboration.png)
+SimpleAVShow includes an optional local **MCP (Model Context Protocol)** server so an AI coding or production assistant on your computer can inspect and help build the live show right alongside you. Changes appear immediately on your timeline, and **Edit → Undo** reverses an entire agent batch in a single step.
 
-## Connect an agent
+![Agent collaboration dialog showing the local MCP URL, editing toggle, and copy configuration buttons](screenshots/08-agent-collaboration.png)
+
+---
+
+## Connect an MCP agent
 
 1. Open **Project → Agent collaboration…**, or click **Agent · off** in the top bar.
-2. Check **Enable local MCP server**. It starts in read-only mode at `http://127.0.0.1:48123/mcp`. Choose another port before enabling if that port is occupied.
-3. Click **Copy connection configuration** and add it to the agent client's MCP settings. Choose **Streamable HTTP** if the client asks for a transport. Clients with separate fields need the **MCP URL** and the copied **bearer token**.
-4. Check **Allow the agent to edit this show and import media** to build together. Close the dialog; the server keeps running.
-5. Ask the agent to read the current show and make changes. For example: “Add opening titles, a hold at 12 seconds for the actor, and a closing cue at 45 seconds. Keep the existing media and routing.”
+2. Check **Enable local MCP server**. It starts in **read-only** mode at `http://127.0.0.1:48123/mcp`. *(If port `48123` is already in use, pick a different port before enabling.)*
+3. Click **Copy connection configuration** and paste it into your MCP client's settings. If your client asks for a transport, choose **Streamable HTTP**; if it uses separate fields, paste the **MCP URL** and copy the **bearer token** individually.
+4. When you're ready to co-edit, check **Allow the agent to edit this show and import media**. Close the dialog—the server keeps running in the background.
+5. Prompt your agent to inspect and edit the open show—for example: *"Read the current show, then add opening titles, a hold at 12 seconds for the actor, and a closing cue at 45 seconds. Keep existing media and routing intact."*
 
-The copied JSON has this structure; use the real URL and token from the dialog:
+The copied configuration looks like this (using the live URL and token from the dialog):
 
 ```json
 {
@@ -27,39 +31,54 @@ The copied JSON has this structure; use the real URL and token from the dialog:
 }
 ```
 
-Client configuration formats vary. The endpoint and `Authorization: Bearer …` header are the connection details. The server speaks MCP versions `2025-11-25`, `2025-06-18`, and `2025-03-26`; it uses JSON responses and polling rather than server notifications. A client that supports only stdio needs an HTTP-to-stdio bridge.
+### Connection details and limits
 
-The server connects to this particular app window on this computer. A hosted agent cannot reach your computer's loopback URL. Enabling does not persist across app launches; disabling or restarting creates a new token, so update the client configuration when reconnecting.
+- **Local to this window only:** The server binds to `127.0.0.1` on your machine, so remote/cloud-hosted agents cannot reach it.
+- **Session-only credentials:** The server starts **off** on every app launch. Disabling it or restarting SimpleAVShow generates a brand-new bearer token, so update your client's config when reconnecting.
+- **Protocol support:** Implements MCP versions `2025-11-25`, `2025-06-18`, and `2025-03-26` using Streamable HTTP JSON responses and polling (no server-push notifications or standalone SSE stream). Clients that only speak stdio need an HTTP-to-stdio bridge.
 
-## Work together
+---
 
-The top-bar Agent button shows **off**, **read only**, **editing**, or **locked**. Open it at any time to revoke editing or disable the connection entirely. The status bar reports agent changes and media preparation.
+## How co-editing works safely
 
-The agent can read project settings, tracks, clips, automation, cues, media metadata, and the current operator state. With editing enabled, it can add or patch project settings, tracks, clips and cues, delete clips/cues, and import local audio, images, and video. New audio tracks start disconnected; inspect their routing before rehearsal.
+The top-bar button always tells you what the agent can do right now: **Agent · off**, **read only**, **editing**, or **locked**. Click it anytime to revoke write access or turn the server off immediately. The status bar announces every agent edit and import.
 
-Agent batches must validate as complete shows: picture clips cannot overlap on one layer, clip times must fit inside the show, assets and tracks must exist, and MIDI messages and automation must be valid. Linked picture/sound clips trim, move, and delete together. Use a patch with an empty `link` to unlink before changing a partner independently.
+### What the agent can and cannot do
 
-Changes remain unsaved until the operator saves. Use **Undo** to reject a batch. The operator controls playback, audience displays, audio/MIDI equipment, Show mode, saving, opening, and package export.
+- **Can read (always, when enabled):** Project settings, tracks, clips, automation curves, cues, media metadata, and current operator state—even during playback or Show mode.
+- **Can write (only when editing is allowed):** Update project settings; add, patch, or delete tracks/clips/cues; and import local audio, image, and video files. *(New audio tracks created by an agent start disconnected—check their routing before rehearsal.)*
+- **Operator-only controls:** The agent can **never** save or open files, export packages, control playback, enter/leave Show mode, open audience displays, configure audio/MIDI devices, or send MIDI directly.
 
-Agent edits obey the same locks as operator edits: leave Show mode, use **Stop All** to silence playback and async voices, and wait for any busy operation to finish. Reading still works while running the show. Media preparation can finish in the background while the operator edits or rehearses, but adding prepared assets waits for editability.
+### Built-in guardrails
 
-If the operator changes the show after the agent reads it, the agent's write fails with a revision conflict. The agent must read the show again and adjust its batch to the current state. Pending inspector fields are committed before checking an agent write, so uncommitted typing also causes a conflict rather than being overwritten.
+- **Atomic validation:** Every edit batch must leave the show completely valid—no overlapping pictures on one layer, all clips inside project duration, valid track/asset IDs, and valid MIDI/automation data—or the entire batch is rejected cleanly.
+- **Single-step undo:** Changes stay unsaved until you choose **File → Save**, and **Edit → Undo** reverts an agent's whole batch at once.
+- **Same locks as the operator:** Agent edits are blocked during Show mode, playback, active async voices, or busy operations. Background media preparation can run while you edit or rehearse, though committing the prepared assets still waits until the editor is unlocked.
+- **Optimistic revision checks:** If you edit the show (or even have uncommitted typing in an inspector field, which commits automatically first) after the agent last read it, the agent's write fails with a revision conflict instead of overwriting your work. The agent simply reads the latest show and retries.
+- **Linked clips stay linked:** Moving, trimming, or deleting one clip in a linked video/audio pair updates its partner automatically. To detach them, the agent patches the clip with an empty `link` first.
 
-## Tools and timing
+---
+
+## MCP tools and data model
 
 | Tool | Purpose |
 | --- | --- |
-| `get_show` | Read the current project, library metadata, operator state and revision. |
-| `apply_edits` | Apply `project`, `track`, `clip`, `marker`, `delete_clip`, or `delete_marker` operations atomically. |
-| `import_media` | Start preparing up to 64 absolute local file paths; returns a `job_id`. |
-| `get_import` | Poll that job until `ready` or `failed`; inspect the prepared asset IDs and metadata. |
-| `commit_import` | Add the ready assets as one undo step, using a fresh show revision. |
+| `get_show` | Returns the full project snapshot, library metadata, operator state, and current `revision`. *(Also available as MCP resource `simpleavshow://show`.)* |
+| `apply_edits` | Atomically applies up to 256 `project`, `track`, `clip`, `marker`, `delete_clip`, or `delete_marker` operations. |
+| `import_media` | Starts background preparation for up to 64 absolute local file paths; returns a `job_id`. |
+| `get_import` | Polls an import job until `ready` or `failed`, returning prepared asset IDs and metadata. |
+| `commit_import` | Adds the staged assets to the Media library as one undo step using a fresh show `revision`. |
 
-`simpleavshow://show` is also exposed as a readable MCP resource with the same snapshot as `get_show`.
+### Key conventions for agent callers
 
-All timeline and automation times are **48,000 Hz audio frames**: multiply seconds by 48,000 and round to an integer. They are independent of the picture frame rate. Track indices and physical audio channel numbers are zero-based; routing `-1` disconnects a leg. Automation points are ordered `[clip-relative time, value]` pairs. A point may append `[shape, bend]` to shape the segment to the next point: `"linear"`, `"hold"`, `"curve"`, or `"scurve"`, with bend from −1 to 1 (0 is straight); for example `[96000, 1, "curve", 0.5]`.
+- **Timing unit = 48,000 Hz audio frames:** Multiply seconds by `48000` and round to an integer (independent of picture fps).
+- **Zero-based indices:** Track indices and physical audio output numbers are zero-based; `-1` disconnects an audio leg.
+- **Automation points:** Ordered `[clip_relative_frame, value]` pairs, optionally followed by segment shape and bend for the segment to the next point: `[96000, 1, "curve", 0.5]` (shapes: `"linear"`, `"hold"`, `"curve"`, `"scurve"`; bend `−1…1`, `0` = straight).
+- **Create vs. patch:** `track`, `clip`, and `marker` operations patch an existing ID (leaving omitted fields intact) or create a new entry if the ID doesn't exist yet. Creating a clip requires `track`, `duration`, and either `text` or an imported `asset` ID—asset file paths cannot be set through `apply_edits`.
 
-Here is an `apply_edits` argument that adds a five-second title and a hold at 12 seconds. Replace `expected_revision` with the revision returned by `get_show`, check that track 1 is a compatible empty picture layer, and extend the project duration first if needed:
+### Example `apply_edits` payload
+
+Adds a 5-second fading title on track 1 and a hold cue at 12 seconds (`12 × 48000 = 576000`). Always use the latest `revision` from `get_show`, confirm track 1 is an available picture layer, and extend project duration first if needed:
 
 ```json
 {
@@ -89,18 +108,20 @@ Here is an `apply_edits` argument that adds a five-second title and a hold at 12
 }
 ```
 
-`track`, `clip`, and `marker` operations patch an existing ID, or create an entry when the caller-chosen ID is new. Omitted fields on an existing entry remain intact. Clip creation requires `track` and `duration`, plus `text` or an imported `asset` ID. No asset paths can be changed through `apply_edits`; import prepares and validates sources first. Use unique new IDs and retain IDs from `get_show` when editing existing entries. A batch supports up to 256 operations.
+### Importing media via MCP
 
-Import stages the entire batch before changing the library. If any source fails, no assets are added. Only one preparation job is retained; a new import replaces the previous completed/staged job. Once ready, read `get_show` again and call `commit_import` with its revision. Conflicts or temporary locks retain the prepared assets for retry. After adding them, create clips using the returned IDs; video sound requires a separate audio clip, and a common nonempty `link` keeps the pair together.
+`import_media` stages the entire batch off-timeline first—if any single file fails, nothing is added to the library. Only one staged job is kept at a time (starting a new import replaces the previous finished/staged job). Once `get_import` reports `ready`, read `get_show` for a fresh revision and call `commit_import` (conflicts or temporary locks keep the staged assets ready to retry). Afterward, place clips with `apply_edits` using the returned asset IDs. *(For a video with sound, create both a picture clip and an audio clip sharing the same non-empty `link` string to keep them paired.)*
 
-## Troubleshooting
+---
 
-- **Cannot start:** another app/window may be using the port. Disable, choose another port, and enable again.
-- **Unauthorized:** copy the current bearer token. It changes when the server restarts.
-- **Agent editing disabled:** enable the editing checkbox in the collaboration dialog.
-- **Editing locked:** the operator must leave Show mode and Stop All playback, or finish the current busy operation.
-- **Revision conflict:** reread `get_show` and rebase on the operator's current show.
-- **Media preparation failed:** inspect the job's error and the local path. A failed batch changes no library entries.
-- **HTTP GET returns 405:** expected; this endpoint has no standalone SSE stream. Use a Streamable HTTP client that supports JSON responses.
+## Troubleshooting agent connections
 
-[Back to the manual](README.md)
+| Issue | Fix |
+| --- | --- |
+| **Server cannot start** | Port `48123` is occupied by another app or window. Disable the server, pick a free port, and re-enable it. |
+| **Unauthorized (401)** | Copy the current bearer token from the dialog—it rotates every time the server restarts. |
+| **Agent editing disabled** | Check **Allow the agent to edit this show and import media** in the collaboration dialog. |
+| **Editing locked** | Leave **Show mode**, click **Stop All** (including async voices), or wait for a busy operation to finish. |
+| **Revision conflict** | Have the agent call `get_show` again and reapply its edits against the latest revision. |
+| **Media preparation failed** | Check the job's error message and verify the absolute local path; failed batches leave the library unchanged. |
+| **HTTP GET returns 405** | Expected—this endpoint does not serve a standalone SSE stream. Use a Streamable HTTP client that handles JSON responses. |

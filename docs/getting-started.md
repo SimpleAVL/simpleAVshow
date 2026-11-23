@@ -1,78 +1,97 @@
 # 1. Getting started
 
-[Manual contents](README.md) · Next: [Editing a show](editing-a-show.md)
+[Manual contents](README.md) · Next: [2. Editing a show](editing-a-show.md)
+
+This chapter gets SimpleAVShow running on your computer, gives you a quick tour of the interface, walks you through the built-in demonstration, and guides you through building a short show from scratch.
+
+---
 
 ## Install and launch
 
-Use the packages linked under **Downloads** in the [repository README](../README.md#downloads). Keep the included runtime libraries and third-party notices with the application.
+Download the package for your platform from the [Downloads section of the README](../README.md#downloads). Always keep the bundled libraries and third-party notices alongside the app—no extra SDKs or package managers are needed.
 
-| Platform | Installation |
+| Platform | Steps |
 | --- | --- |
-| Windows 11 x64 | Extract the entire ZIP into a folder, then run `bin/simpleavshow.exe`. Moving only the executable leaves its dependencies behind. |
-| macOS 15 or newer, Apple Silicon | Extract the ZIP and move `simpleavshow.app` into Applications. Intel Macs are outside the supported targets. |
-| Linux x64 | The AppImage targets Ubuntu 24.04/glibc 2.39 or newer. Make it executable, then run it. If FUSE is unavailable, use `APPIMAGE_EXTRACT_AND_RUN=1`. |
+| **Windows 11 (x64)** | Extract the entire ZIP archive into a folder, then run `bin/simpleavshow.exe`. Do not move the `.exe` out of its folder on its own. |
+| **macOS 15+ (Apple Silicon)** | Extract the ZIP and drag `simpleavshow.app` into **Applications**. Intel Macs are not supported. |
+| **Linux (x64)** | Make the AppImage executable (`chmod +x`) and run it. Built for Ubuntu 24.04 (glibc 2.39+). If FUSE is unavailable, launch with `APPIMAGE_EXTRACT_AND_RUN=1`. |
 
-The prerelease packages are unsigned; macOS builds use ad-hoc signing without notarization. Follow the included `README.txt` for downloaded-app prompts. SDKs and Homebrew are not required for packaged builds. To build from source, follow [CONTRIBUTING.md](https://github.com/staubichsauger/simpleAVshow/blob/main/CONTRIBUTING.md) in the source repository.
+> **Note:** Prerelease packages are unsigned (macOS builds use ad-hoc signing without notarization), so Windows or macOS may show a standard downloaded-app prompt on first launch. Check the `README.txt` included in your package if needed. To build from source instead, see [CONTRIBUTING.md](https://github.com/SimpleAVL/simpleAVshow/blob/main/CONTRIBUTING.md).
 
-The app opens a new, empty show. If an untitled autosave from a previous session exists, startup offers recovery. You can open a `.savshow` or `.savpack` through **File → Open…**, or drop a single show/package file onto the window.
+When SimpleAVShow opens, it starts with a fresh, empty project. If an untitled autosave was left behind from an earlier session, it offers to recover it. To open an existing `.savshow` project or `.savpack` package, use **File → Open…** or drop the file straight onto the window.
+
+---
 
 ## Tour the workspace
 
-![Workspace with library, program preview, inspector, timeline, and transport](screenshots/01-editor-overview.png)
+![SimpleAVShow workspace with media library, program preview, inspector, timeline, and transport](screenshots/01-editor-overview.png)
 
-| Area | Purpose |
+| Area | What it does |
 | --- | --- |
-| Top bar | Project title, resolution, frame rate, **Outputs**, and **Show mode**. A dot beside the title indicates unsaved changes; the window title also gains an asterisk. |
-| **Media** tab, upper left | Imported assets available to place on the timeline. Importing a file does not place a clip automatically. |
-| **Cues** tab | Holds and MIDI cues, ordered by show time. Click to select; double-click to seek in edit mode. |
-| **PROGRAM**, center | Preview of the composed audience picture. **Audience display…** opens output settings. |
-| **INSPECTOR**, right | Controls for the selected track, clip, or cue. Scroll this panel to reach automation and lower controls. |
-| Timeline toolbar | Add a cue or text, toggle **Snap**, adjust **Zoom**, **Fit** the show, and enable **Follow**. |
-| Timeline | Track headers, clips, a ruler, cue flags, and the playhead. Scroll horizontally for time and vertically for tracks. |
-| Bottom transport | Play/Pause/Continue, Stop All, timecode, playback state, next cue, remaining show time, and health indicators. |
-| Status bar | Results of imports/saves and explanations of blocked actions or errors. Playback problems can also appear below the program preview. |
+| **Top bar** | Shows the project title, resolution, and frame rate, plus buttons for **Outputs**, **Show mode**, **Remote**, and **Agent**. A dot beside the title (and an `*` in the window title) means you have unsaved changes. |
+| **Media tab** *(upper left)* | Lists every media file imported into the project. Importing a file adds it here without placing it on the timeline yet. |
+| **Cues tab** *(upper left)* | Lists all holds and MIDI cues in show-time order. Click a cue to select it; double-click to jump the playhead there (in edit mode). |
+| **PROGRAM** *(center)* | Live preview of the composed audience picture. Click **Audience display…** to open fullscreen output settings. |
+| **INSPECTOR** *(right)* | Settings for whatever you have selected—a track, a clip, or a cue. Scroll down to reach automation and lower controls. |
+| **Timeline toolbar** | Quick buttons for **+ Hold / MIDI cue**, **+ Text**, **Snap**, **Zoom**, **Fit**, and **Follow**. |
+| **Timeline** *(lower pane)* | Track headers on the left, clips and cue flags in the middle, time ruler across the top, and the playhead line. Scroll horizontally for time and vertically for tracks. |
+| **Transport bar** *(bottom)* | **Play / Pause / Continue**, **Stop All**, main timecode clock, playback state, next cue countdown, remaining show time, and system health indicators. |
+| **Status bar** *(very bottom)* | Confirms imports and saves, and explains why an edit or action was blocked. Playback warnings also appear directly below the **PROGRAM** preview. |
 
-Drag the splitters between panels to give the preview, inspector, or timeline more space. The editor has a minimum size of 1100 × 720; on smaller screens, use panel scrolling and collapse unused space with the splitters.
+> **Tip:** Drag the dividers between panels to give the preview, inspector, or timeline more breathing room. The window has a minimum size of 1100 × 720; on smaller laptops, collapse unused panel space and scroll inside the inspector.
 
-## Try the demonstration
+---
 
-1. Choose **File → Open demonstration**. It contains a generated backdrop, title text, looping ambience, a click source, and three holds.
-2. Click **Fit** to see the whole 70-second show. Turn **Follow** on to keep the playhead visible during playback.
-3. Click a blank part of the timeline or the program preview to move focus away from editing fields.
-4. Click **Play** or press **Space**. On first use, the app prepares the default audio output. Later it restores the remembered device by name.
-5. At **00:00:12:00**, the show holds at **Wait for the actor**. The title and clock freeze. Ambience continues looping.
-6. Press **Space** or click **Continue**. The ambience fades out over four seconds of resumed show time. The next holds are at 38 and 60 seconds.
-7. Click **Stop All** when finished. Leave Show mode, if enabled, before making edits.
+## Run the built-in demonstration
 
-The Click track starts with both outputs **Off**, so the demonstration's click is silent until routed. The generated backdrop, ambience, and click become PNG/WAV files in a sibling `.media` folder when you save the demo.
+The fastest way to see how holds and async ambience feel is to play the built-in 70-second demo.
 
-If Play fails, read the banner and status bar, then use [audio setup](audio-and-outputs.md#connect-an-audio-output) or [troubleshooting](reference-and-troubleshooting.md#troubleshooting). A missing remembered device blocks playback until you reconnect it or explicitly choose a replacement.
+1. Choose **File → Open demonstration**. It loads a generated stage backdrop, fading title text, a looping ambient bed, a click track, and three stage holds.
+2. Click **Fit** on the timeline toolbar to see the whole 70 seconds at once. **Follow** is on by default so the timeline scrolls with the playhead when zoomed in.
+3. Click any empty spot in the timeline (or the **PROGRAM** preview) so keyboard focus is outside text fields.
+4. Click **Play** or press **Space**. On first launch, SimpleAVShow prepares your system's default audio output; later launches remember whichever device you chose.
+5. Watch what happens at **00:00:12:00**: playback pauses itself at the hold cue **Wait for the actor**. The clock and picture freeze, while the ambient bed keeps looping smoothly underneath.
+6. Press **Space** or click **Continue**. Show time resumes, and the ambient bed fades out over the next four seconds. Two more holds wait at 38 and 60 seconds.
+7. Click **Stop All** when you're done. (If you switched into Show mode, leave it before editing.)
 
-## Create a first show
+Two details worth noticing in the demo:
+- **The Click track is silent on purpose.** Both of its outputs start set to **Off** so click tracks never leak into audience speakers until you route them.
+- **Demo media is generated in memory** and only turns into real PNG and WAV files (stored in a sibling `.media` folder) if you save the project.
 
-### Set the project
+If **Play** fails, check the banner under **PROGRAM** and the status bar, then see [Connect an audio output](audio-and-outputs.md#connect-an-audio-output) or [Troubleshooting](reference-and-troubleshooting.md#troubleshooting). Remember that if a previously used audio device is unplugged, SimpleAVShow blocks playback on purpose instead of silently switching to your laptop speakers.
 
-Choose **File → New show**, then **Project → Project settings…**.
+---
 
-![Project settings for the demonstration](screenshots/02-project-settings.png)
+## Build your first show
 
-Set **Title**, **Width**, **Height**, **Frames / second**, and **Duration (s)**, then click **OK**. A new show defaults to 1920 × 1080 at 24 fps and 60 seconds. Project settings use seconds for duration; the transport and clip/cue inspectors display timecode.
+Let's put together a short scene with a picture, sound, a title, and a stage hold.
 
-Choose the delivery resolution and frame rate before fine timing work. Reducing duration below an existing clip or cue is rejected; shorten or remove those items first. Audio always uses a 48 kHz engine, regardless of project frame rate.
+### 1. Configure project settings
 
-### Build a simple scene
+Choose **File → New show**, then open **Project → Project settings…**.
 
-1. Click **+ Import media** and choose a picture and an audio file. Wait for preparation to finish.
-2. Drag the picture from Media onto **Background** at the start of the show.
-3. Drag the sound onto **Main audio** at the desired time.
-4. Click the **Overlay** track header, seek to the desired title time using the ruler, and click **+ Text**.
-5. Select the text clip, replace **Your text** in the inspector, and click **Apply clip**. Adjust Start and Length as needed.
-6. Seek to a point where an operator must wait, then click **+ Hold / MIDI cue**. Give it a meaningful name, such as “Wait for performer ready.” Leave **Hold · Space to continue** checked.
-7. Choose **File → Save** and save a `.savshow` file.
-8. Seek to the beginning, press Play, and rehearse the hold and Continue operation.
+![Project settings dialog showing title, resolution, frame rate, and duration](screenshots/02-project-settings.png)
 
-The default tracks are Background and Overlay picture layers, Main audio, async Ambience, Guide, and Click. Main audio and Ambience route to outputs 1/2; Guide and Click are silent. Use [chapter 3](audio-and-outputs.md) before routing guide or click to hardware.
+Set your **Title**, **Width**, **Height**, **Frames / second**, and **Duration (s)**, then click **OK**. A new show starts at 1920 × 1080, 24 fps, and 60 seconds.
 
-Adding a media or text clip can extend project duration to leave five seconds after the new clip. Check the final Duration before rehearsing the ending.
+- **Pick resolution and frame rate early**, before doing frame-accurate timing.
+- **Duration is entered in seconds** here, even though the transport and clip/cue inspectors display `HH:MM:SS:FF` timecode.
+- You cannot shorten project duration below an existing clip or cue—trim or remove items near the end first.
+- Audio always runs at **48 kHz**, regardless of your picture frame rate.
 
-Continue with [Editing a show](editing-a-show.md) for precise timing, linked video/audio, and fades.
+### 2. Arrange a simple scene
+
+Every new show starts with six tracks ready to use: **Background** and **Overlay** (picture layers), **Main audio** and **Ambience** (async audio), plus **Guide** and **Click** (disconnected/silent by default).
+
+1. Click **+ Import media**, select an image and an audio file, and wait for preparation to finish.
+2. Drag the image from the **Media** tab onto the **Background** track at the start of the show.
+3. Drag the audio file onto **Main audio** where you want it to begin.
+4. Click the **Overlay** track header, click the timeline ruler where a title should appear, and click **+ Text**.
+5. Select the new text clip, replace **Your text** in the inspector, and click **Apply clip**. Adjust its **Start** and **Length** if needed.
+6. Click the ruler where you want the show to wait for a performer, then click **+ Hold / MIDI cue**. Name it something unmistakable—like *"Wait for performer ready"*—and leave **Hold · Space to continue** checked.
+7. Save your work with **File → Save** to create a `.savshow` file.
+8. Click the start of the ruler, press **Space**, and practice releasing the hold with **Continue**.
+
+> **Note:** Placing a clip near the end of your show can automatically extend the project duration to leave five seconds of breathing room after the new clip. Double-check **Project settings…** before rehearsing your ending.
+
+Ready to go deeper? Continue to [Chapter 2: Editing a show](editing-a-show.md) for precision trimming, linked video/audio, and automation curves.

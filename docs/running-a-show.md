@@ -1,82 +1,118 @@
 # 5. Running a show
 
-[Manual contents](README.md) · Previous: [Cues and MIDI](cues-and-midi.md) · Next: [Saving and recovery](saving-and-recovery.md)
+[Manual contents](README.md) · Previous: [4. Cues and MIDI](cues-and-midi.md) · Next: [6. Phone remote](remote-control.md)
 
-## Rehearse in edit mode
+This chapter takes you from final rehearsal to curtain up: checking readiness with Show mode's preflight screen, operating holds and pauses calmly, handling problems mid-show, and shutting down cleanly.
 
-1. Open the project or package. Resolve offline media and save a normal project copy if you opened a package.
-2. Select audio, MIDI, and audience-display destinations on this computer.
-3. Verify Main, Ambience, Guide, and Click on their actual physical outputs.
-4. Seek to the beginning or a rehearsal cue. Seek does not fire MIDI; Play at an exact cue can.
-5. Play through every hold, pause, Continue, fade, and scene boundary using the final media.
-6. Watch the health indicators and record any clipping, underruns, waits, or retries.
-7. Complete at least one full rehearsal on the target computer with the actual interface, MIDI bridge/receiver, and display. Use the [hardware-validation guide](hardware-validation.md) for physical tests.
+---
 
-For a repeat run, click **Stop All**, then seek to zero in edit mode. Stop All itself does not rewind. Home seeks to zero when the timeline has focus. Seeking backward may rearm cues; allow for the effects of replaying external MIDI commands.
+## Rehearse in edit mode first
 
-## Before the performance
+Before locking down Show mode, run at least one full technical rehearsal on the actual show machine:
 
-- Confirm the intended project/version and final duration. Save all changes.
-- Confirm every required source is online and no playback problem is unresolved.
-- Verify audio driver, device, open channel count, buffer stability, track routing, and levels.
-- Verify the MIDI destination and each required external-device action, including cleanup messages.
-- Open fullscreen program output on the audience display; check framing and the held picture.
-- Stop All, position the playhead at the intended starting point, and make sure Guide/Click cannot reach audience channels.
-- Enable Follow if you want the timeline to page with the playhead. Put keyboard focus outside editing fields.
-- Enter Show mode and review its preflight warnings.
+1. Open your project or package. If you opened a `.savpack`, resolve any offline files and **Save** a permanent `.savshow` copy first.
+2. Open **Outputs** and verify your audio interface, MIDI destination, and audience display on this computer.
+3. Send audio to **Main**, **Ambience**, **Guide**, and **Click** and confirm each one arrives at the right physical output.
+4. Move the playhead to the start (or any cue you're rehearsing). Remember: seeking never sends MIDI, though pressing **Play** directly on a cue fires its arrival message.
+5. Play straight through every hold, pause, **Continue**, fade, and scene transition using your final media files.
+6. Keep an eye on the health indicators at the bottom right—note any clipping, underruns, audio/video waits, or disk retries.
+7. Run the full physical checks in the [Show-machine validation checklist](hardware-validation.md) before your first audience.
+
+> **Tip for repeat runs:** **Stop All** silences playback without rewinding the playhead. To run a scene again, click **Stop All**, then click the start of the ruler (or focus the timeline and press **Home**) in edit mode. Keep in mind that seeking backward rearms cues—make sure replaying MIDI messages won't put your lighting console or instruments into an unexpected state.
+
+---
+
+## Pre-show checklist
+
+Work through this quick list right before house opens:
+
+- [ ] **Right show file:** Confirm you have the latest version, expected final duration, and **no unsaved changes** (no dot beside the title).
+- [ ] **All media online:** No **OFFLINE** items in Media and no unresolved warnings below **PROGRAM**.
+- [ ] **Audio verified:** Correct driver (ASIO on Windows), interface, open channel count, buffer size, routing, and headroom. Confirm **Guide** and **Click** cannot reach audience speakers.
+- [ ] **MIDI verified:** Correct destination port connected, cues tested, and any needed end-of-show cleanup messages in place.
+- [ ] **Audience display open:** Fullscreen program output is open on the projector/monitor, framed properly, and holding the right opening frame.
+- [ ] **Cued to start:** Click **Stop All** and place the playhead at your starting position (`00:00:00:00` or your preset cue).
+- [ ] **Operator ready:** **Follow** is on if you want the timeline to track playback, and keyboard focus is outside text/number fields.
+- [ ] **Show mode locked:** Click **Show mode** and resolve every preflight warning.
+
+---
 
 ## Enter Show mode
 
-Click **Show mode**. The preflight checks unsaved changes, missing media used on the timeline, MIDI destinations, audio availability/routing where it can inspect them, and whether a required program output is open.
+Click **Show mode** in the top bar. SimpleAVShow runs a quick **preflight check** for unsaved changes, missing timeline media, unconfigured MIDI destinations, audio device/routing issues it can inspect, and whether a needed fullscreen program output is open.
 
-![Preflight warning for unsaved changes, an unconfigured MIDI destination, and closed program output](screenshots/08-show-preflight.png)
+![Show mode preflight warning listing unsaved changes, unconfigured MIDI, and closed program output](screenshots/08-show-preflight.png)
 
-If issues exist, **Cancel** is the default. Fix them, then retry. **Enter Show mode anyway** is an explicit override for a known rehearsal situation; it does not fix destinations or bypass Play's own checks. Preflight cannot establish real cabling, external-device response, or performance capacity.
+If preflight flags anything, **Cancel** is highlighted by default—go fix the issue and click **Show mode** again. **Enter Show mode anyway** is only for deliberate rehearsal overrides; it does not fix missing devices or bypass **Play**'s own checks. *(Preflight also cannot verify physical cables, external consoles, or real-time CPU headroom—that's what rehearsal is for.)*
 
-![Show mode locked while holding at the first demonstration cue](screenshots/10-show-mode.png)
+![Editor locked in Show mode while holding at the first demonstration cue](screenshots/10-show-mode.png)
 
-The button becomes **Show mode · locked**. Editing, saving/exporting, timeline seeks, and Outputs access are blocked. Space still toggles playback, and Stop All remains available. The inspector is disabled. Play can prepare/reconnect remembered devices while stopped; leave Show mode to choose a different destination.
+Once active, the top-bar button switches to **Show mode · locked**:
+- **Protected:** Timeline edits, seeks, saving/exporting, and opening **Outputs** are all blocked, and the inspector is dimmed out.
+- **Ready to run:** **Space**, the **Play / Pause / Continue** button, **Stop All**, and the [Phone remote](remote-control.md) keep working normally.
+- **Remembered devices still reconnect on Play** while stopped, though choosing a different device requires leaving Show mode first.
 
-Leaving Show mode while Playing, Holding, or with async voices running requires confirmation. Even after leaving, editing remains blocked until playback/async activity stops. Quitting while Show mode or playback is active also asks for confirmation; Cancel keeps the session open.
+Leaving Show mode while playing, holding, or running async audio/video asks for confirmation (and editing still stays locked until you **Stop All**). Quitting while Show mode or playback is active also prompts before stopping, with **Cancel** keeping the show alive.
+
+---
 
 ## Operate the transport
 
-| State | What is happening | Primary button / Space |
+| Transport state | What the show is doing | Primary button / **Space** |
 | --- | --- | --- |
-| **STOPPED** | Internal voices are stopped at the current position. | Play begins there. |
-| **PLAYING** | Show time advances; audio, picture, and cues follow it. | Pause freezes show time; async audio can continue. |
-| **PAUSED** | Manual pause or a non-playing seek. | Play resumes from that position. |
-| **HOLDING** | A hold cue has frozen show time. | Continue releases the hold and sends its resume MIDI, if configured. |
-| **ENDED** | The project duration has been reached and voices have stopped. | Seek earlier in edit mode before starting again. |
+| **STOPPED** | All internal audio/video voices are stopped at the playhead. | **Play** — starts playback here. |
+| **PLAYING** | Show time advances; audio, video, and cues run normally. | **Pause** — freezes show time (async tracks keep playing). |
+| **PAUSED** | Manually paused, or parked after a seek. | **Play** — resumes from here. |
+| **HOLDING** | Stopped at a hold cue waiting for stage action. | **Continue** — releases the hold and fires any hold-resume MIDI. |
+| **ENDED** | Reached the end of project duration; all voices have stopped. | Seek earlier in edit mode before starting again. |
 
-The large clock is **HH:MM:SS:FF** at project frame rate. **NEXT** shows the next cue's name/type and time until it; **left** shows remaining timeline duration. These are show-time durations: they do not predict wall-clock finishing time when performers spend additional time at holds. While holding, NEXT points to the following cue.
+### Reading the clock and countdowns
 
-### Holds
+- **Main clock:** Current show time in `HH:MM:SS:FF` at the project frame rate.
+- **NEXT:** Name/type of the upcoming cue and show time until it arrives. While holding, **NEXT** looks ahead to the *next* cue after the current hold.
+- **left:** Remaining timeline duration.
 
-![Holding at twelve seconds, with one async ambience voice continuing](screenshots/09-hold-playback.png)
+Remember that **NEXT** and **left** measure **show time**, not wall-clock time—any extra minutes performers spend at a hold won't shrink them.
 
-At a hold, the button reads **Continue**, the state reads **HOLDING**, and the banner names the cue. Normal audio stops sounding and the picture freezes. Already-running async sources continue playing or finish naturally. Their automation stays at the held value. Press Space or click Continue when the stage is ready.
+### Working with holds
 
-Space inside a text field, spin-box editor, combo box, or automation cell editor belongs to that control. Click the timeline/preview or focus a transport control before relying on Space as a show control.
+![Transport bar holding at twelve seconds while one async ambience voice continues playing](screenshots/09-hold-playback.png)
 
-### Pause and Stop All
+When playback reaches a hold cue, the primary button turns into **Continue**, the status reads **HOLDING**, and the banner names the cue. Normal audio stops and the stage picture freezes; any already-running **async** audio or video keeps playing smoothly with its automation frozen at the hold's level. Press **Space** or click **Continue** when the stage is ready.
 
-Pause is useful when show time must wait without ending ambience. It is not silence-all. Click **Stop All** to stop all internal voices, including async audio, at the current position.
+> **Keyboard focus tip:** If your cursor is inside a text box, number field, dropdown, or automation table cell, **Space** types into that control instead of running the show. Before curtain, click the timeline, preview, or a transport button so **Space** always controls playback.
 
-In edit mode, Escape invokes Stop All outside editing controls; inside a field it can cancel editing. In Show mode, press **Escape twice within 600 ms** to Stop All. The first press prompts for the second. The Stop All button always takes one click. Held pictures remain at the current position after Stop All; it is not a blackout command.
+### Pause vs. Stop All
 
-A phone or tablet can also play, pause, continue holds, and Stop All from its browser; see [Phone remote](remote-control.md).
+- **Pause** freezes show time while letting async ambience or projections keep running. Use it when you need to wait unexpectedly without cutting the room tone. It is **not** a silence-all command.
+- **Stop All** silences every internal voice immediately—including all async audio and video—without moving the playhead.
+  - Clicking the **Stop All** button always takes **one click**.
+  - With the keyboard: press **Escape** once in edit mode (outside editing fields), or **Escape twice within 600 ms** in Show mode (the first press prompts you for the second, preventing accidental stops).
+  - **Stop All** holds the current picture at the playhead—it is **not** a video blackout.
+  - **Stop All** does **not** send MIDI stop or panic commands to external gear. Silence or reset external synths and lighting separately, or trigger a dedicated cleanup cue.
 
-External MIDI equipment does not receive an automatic stop message. Stop/panic that equipment separately or use intentionally programmed MIDI cleanup cues.
+Need to step away from the desk during tech or run cues from backstage? You can also trigger **Play / Pause / Continue** and **Stop All** from a phone or tablet—see [Chapter 6: Phone remote](remote-control.md).
 
-## Respond to a problem
+---
 
-Read the persistent banner below PROGRAM, the bottom health readout, and the status bar. An audio device that fails/stalls stops playback; a missing remembered output prevents a new start. Restore it and press Play to retry, or leave Show mode and choose a replacement in Outputs.
+## Handle problems calmly
 
-An unreadable/changed audio source stops playback. Restore temporarily unavailable media and retry; reopen the show to reload changed sources or rebuild damaged caches. A fatal video reader error holds its last picture and reports a warning while audio/cues continue. A display disconnect hides the audience window and reports its reconnect behavior. Check the actual audience output rather than only the editor preview.
+If something goes wrong mid-show, check three places: the banner directly below **PROGRAM**, the health readout at the bottom right, and the status bar.
 
-For changing connections or files: Stop All, leave Show mode, fix the fault, then rehearse the affected section and reposition deliberately. See [troubleshooting](reference-and-troubleshooting.md#troubleshooting) for specific symptoms.
+- **Audio device dropped or stalled:** Playback stops. If a cable bumped loose, reconnect the interface and press **Play** to retry it. To switch to a backup device instead: click **Stop All**, leave **Show mode**, pick the replacement in **Outputs**, and confirm routing.
+- **Unreadable or modified audio file:** Playback stops. Restore a temporarily unavailable drive/file and press **Play**; if a file was modified or a cache damaged, reopen the show after stopping.
+- **Fatal video decode error:** SimpleAVShow holds the last good picture and raises a warning so **audio and MIDI cues keep running**. Fix and reopen the source after stopping.
+- **Audience display disconnected:** SimpleAVShow hides the output window and warns you; if the same monitor reconnects (away from the editor screen), it tries to reopen automatically. Always eyeball the physical projector rather than trusting the editor preview alone.
 
-## End the session
+Whenever you need to fix hardware or files, follow the safe sequence: **Stop All → leave Show mode → fix the issue → verify → re-cue deliberately**. See [Troubleshooting](reference-and-troubleshooting.md#troubleshooting) for specific messages and fixes.
 
-At project end, all internal voices stop. Confirm external equipment has reached its desired state. To edit/save afterward, leave Show mode. Close the program output from Outputs if needed, save edits, and quit. When prompted to quit an active session, **Stop and quit** stops the app's audio/cue scheduling/output; Cancel keeps the app running.
+---
+
+## Wrap up after the show
+
+At the end of the project duration, all internal voices stop automatically.
+
+1. Confirm external lighting and MIDI gear are in their post-show state.
+2. Leave **Show mode** if you want to save tweaks or inspect settings.
+3. Close the audience display from **Outputs** (or focus it and press **Ctrl+W** / **Command+W**).
+4. Save any final changes and quit. If prompted while active, **Stop and quit** shuts down audio, cues, and program output cleanly; **Cancel** keeps your session open.

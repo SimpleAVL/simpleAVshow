@@ -1,94 +1,115 @@
 # 3. Audio and outputs
 
-[Manual contents](README.md) · Previous: [Editing a show](editing-a-show.md) · Next: [Cues and MIDI](cues-and-midi.md)
+[Manual contents](README.md) · Previous: [2. Editing a show](editing-a-show.md) · Next: [4. Cues and MIDI](cues-and-midi.md)
+
+This chapter explains how to connect your audio interface, route tracks to separate physical outputs (such as house speakers, crew guide, and performer click), use async audio and video for live stage waits, and send the program picture to your audience screen.
+
+---
 
 ## Connect an audio output
 
-Click **Outputs**, **Audience display…**, or **Project → Outputs…**. Stop All and leave Show mode before changing audio or MIDI connections.
+Open the Outputs dialog from the **Outputs** button in the top bar, **Audience display…** above the preview, or **Project → Outputs…**.
 
-![Outputs dialog with advanced audio settings, MIDI, and audience display controls](screenshots/07-outputs.png)
+> **Important:** Click **Stop All** and leave **Show mode** before changing audio or MIDI connections. In edit mode you can open Outputs during playback to inspect settings (with a **Stop All to change connections** shortcut inside), but in Show mode or during media preparation the dialog is completely locked.
 
-This screenshot shows the capture computer's CoreAudio device and a virtual capture display. Your physical interface and monitors will have different names and channel counts.
+![Outputs dialog showing audio device, driver and latency settings, MIDI destination, and audience display controls](screenshots/07-outputs.png)
 
-1. Plug in the intended interface, then click **Refresh devices**.
-2. For Windows show hardware, check **Show driver and latency settings**, then choose the interface's **ASIO** driver under **Audio driver**, when available.
-3. Choose **Play sound through**. Selecting an available device connects it immediately using the currently displayed settings.
-4. Set **Outputs to use** to the number of physical channels needed by the show. The maximum follows the selected interface.
-5. Choose **Buffer size** in the advanced settings if needed.
-6. Click **Use audio settings** to apply channel/buffer changes. Read the connection feedback and status bar.
+*(This screenshot shows a macOS CoreAudio device and virtual display; your interface and screens will appear with their own names and channel counts.)*
 
-The engine runs at **48 kHz**. Buffer choices are 128, 256, 512, 1024, and 2048 samples; 512 is the default. Smaller buffers reduce buffering delay; larger buffers can improve stability. Measure performance with your interface rather than treating the buffer setting as total system latency.
+1. Plug in your audio interface, then click **Refresh devices**.
+2. **On Windows show PCs:** Check **Show driver and latency settings** and pick your interface's native **ASIO** driver under **Audio driver** whenever available.
+3. Choose your interface under **Play sound through**—selecting an available device connects it immediately using the displayed channel and buffer settings.
+4. Set **Outputs to use** to at least as many physical channels as your show routes to.
+5. Adjust **Buffer size** under the advanced settings if needed, then click **Use audio settings** to apply channel or buffer changes. Check the connection message and status bar to confirm.
 
-The app remembers driver, device name, channel count, and buffer setting on this computer. Play prepares the remembered output automatically; on first use it chooses the default output. If the remembered device disappears, playback remains blocked rather than silently switching speakers. Reconnect it and Refresh, or explicitly select a replacement.
+### Sample rate, buffer size, and remembered devices
 
-The Outputs dialog can be inspected during playback/holds in edit mode. Audio/MIDI connection controls are then disabled, with a **Stop All to change connections** button. Program-display controls remain available. In Show mode, or during media preparation, the Outputs entry points are disabled entirely.
+- **Fixed 48 kHz engine:** SimpleAVShow always runs its audio engine at **48 kHz**.
+- **Buffer sizes:** Choose **128, 256, 512 (default), 1024, or 2048 samples**. Smaller buffers lower buffering delay; larger buffers give the computer more headroom against crackles and underruns. Always test stability with your actual show rather than guessing from buffer size alone.
+- **No silent fallback:** SimpleAVShow remembers your driver, device name, channel count, and buffer size locally on this computer. On first run, pressing **Play** opens the system default output; after that, it reconnects to your remembered device automatically. If that device is unplugged, playback **stays blocked** instead of quietly falling back to laptop speakers—reconnect it and click **Refresh devices**, or explicitly pick a replacement.
+
+---
 
 ## Route tracks to physical channels
 
-Click an audio track header. Its inspector shows **Audio and routing**.
+Select any audio track header to open **Audio and routing** in the inspector.
 
-![Guide track routed to physical output 3, with its right leg Off](screenshots/03-track-routing.png)
+![Guide track routed to mono physical output 3 with right leg set to Off](screenshots/03-track-routing.png)
 
-**Quick routing** offers stereo outputs 1+2, Silent, and one-output mono presets. Presets apply immediately. Before an interface is connected, mono presets cover outputs 1–4; after connection they follow the interface's open channels. **Left → output** and **Right → output** accept custom channel numbers. **Off** disconnects a leg; displayed output numbers are one-based physical channels.
+Use **Quick routing** for one-click presets (stereo **1+2**, **Silent**, or single-output mono feeds), or set **Left → output** and **Right → output** manually to any 1-based physical output number (or **Off** to disconnect that leg). Before an interface is connected, mono presets list outputs 1–4; once connected, they match the interface's open channels.
 
-A common four-channel arrangement is:
+### Example: typical four-channel theatre setup
 
-| Track | Left → output | Right → output | Destination |
+| Track | Left → output | Right → output | Where it goes |
 | --- | --- | --- | --- |
-| Main audio | 1 | 2 | Audience stereo. |
-| Ambience | 1 | 2 | Audience stereo bed. |
-| Guide | 3 | Off | Performer/crew guide. |
-| Click | 4 | Off | Performer click. |
+| **Main audio** | 1 | 2 | Audience stereo PA. |
+| **Ambience** | 1 | 2 | Audience stereo bed. |
+| **Guide** | 3 | Off | Crew / performer spoken guide (mono). |
+| **Click** | 4 | Off | Performer click track (mono). |
 
-Open **four channels** in Outputs for that arrangement. Routing a track to output 4 while opening only two channels blocks Play. Muted tracks are excluded from this routing check.
+For this layout, set **Outputs to use** to **4** (or more) in Outputs. If any unmuted track routes to a channel higher than the open channel count, SimpleAVShow blocks **Play** so nothing disappears silently. Muting an unused track excludes it from that check.
 
-Guide and Click start with both legs Off. Use separate interface channels/cabling to keep them out of audience speakers. Verify each channel physically with a distinct signal; the track labels do not prove the wiring is correct.
+> **Safety tip:** **Guide** and **Click** start with both outputs set to **Off** on every new project. Always verify each physical channel with a distinct test sound and check your cabling—track names alone don't guarantee the right wire is plugged into the right desk input.
 
-### Gain and pan
+### Volume, pan, and clipping
 
-**Volume (1 = full)** controls the track gain. Clip **Gain** supplies the clip's base level unless a Volume curve exists. Track gain multiplies the clip's base/automated volume; overlapping clips add at the destination. Values are linear multipliers: `0` is silence, `0.5` is half amplitude, and `1` is unity.
+- **Volume (`1` = full):** Track volume multiplies each clip's base gain (or its active Volume automation curve). Values are linear multipliers (`0` = silence, `0.5` = half amplitude, `1` = unity, up to `4`). Overlapping clips on the same or different tracks add together at the output.
+- **Pan with two connected legs:** Track pan and clip/automated pan add together (clamped to `−1…+1`). Mono files use equal-power panning; stereo files use left/right balance.
+- **Mono routing (exactly one connected leg):** Mono files play at full unity level, stereo files sum as `(left + right) / 2` so neither channel is lost, and **pan has no effect**. *(Watch out for phase-inverted stereo material, which can cancel when summed to mono.)*
+- **CLIPPING indicator:** If summed outputs exceed full scale (or produce invalid samples), SimpleAVShow clamps the output and lights **CLIPPING** in the transport health readout. Lower your track or clip gains, rehearse the loudest overlap, and click **Stop All** to clear the latch.
 
-With two connected legs, track and clip/automated pan combine and are clamped to −1…+1. Mono sources use equal-power panning; stereo sources use balance. With exactly **one connected leg**, mono plays at full level, stereo is summed as `(left + right) / 2`, and pan has no effect. This preserves both sides of a stereo source for a mono guide/click route. Phase-opposed stereo material can still cancel when summed.
-
-**CLIPPING** means the summed signal exceeded full scale or contained non-finite samples. The output is clamped; lower gains and rehearse the loudest overlaps. Stop All resets the clipping indicator.
+---
 
 ## Synchronous and async audio and video
 
-An ordinary track follows timeline time. An async track has **Keep playing through pauses / holds** checked. Ambience uses this setting by default; you can change it on any audio track or picture layer while editing.
+Live stage timing rarely matches a stopwatch—actors pause for laughs, entrances run long, or a scene change takes extra seconds. SimpleAVShow handles this by splitting tracks into two behaviors:
 
-| Event | Ordinary audio or video | Already-running async audio or video |
+- **Synchronous (ordinary) tracks** stay locked to **show time**. When a hold or pause freezes show time, synchronous audio stops and synchronous video holds its frame.
+- **Async tracks** have **Keep playing through pauses / holds** checked in the track inspector (**Ambience** starts this way by default). Once an async clip starts playing, its media keeps running smoothly on its own clock even while show time is frozen.
+
+Here is how the two compare across every transport action:
+
+| What happens | Ordinary (synchronous) track | Already-running async track |
 | --- | --- | --- |
-| Playback advances | Follows show time. | Source advances independently. |
-| Hold or manual pause | Stops sounding; picture/show time freeze. | Source continues; automation freezes at current show time. |
-| Continue / Play | Resumes at timeline position. | Keeps its current source position; automation advances again. |
-| Seek inside the clip's active interval | Jumps to the sought source position on playback. | Keeps its source cursor. |
-| Seek outside the interval, including exactly clip end | Leaves the clip. | Stops the voice. |
-| Stop All or project end | Stops. | Stops. |
+| **Normal playback** | Follows show time. | Media advances on its own clock. |
+| **Hold or manual Pause** | Audio stops; video freezes. | **Media keeps playing**; automation curves freeze at the current show time. |
+| **Continue / Play** | Resumes from timeline position. | Keeps its live media position seamlessly; automation resumes advancing. |
+| **Seek inside the clip** | Jumps to the new timeline position. | Keeps its live media position uninterrupted. |
+| **Seek outside the clip** *(including exact clip end)* | Leaves the clip. | Stops the active voice. |
+| **Stop All or end of show** | Stops. | Stops. |
 
-Clip intervals include Start and exclude End. Seeking into an inactive async clip does not start it while paused; playback starts it at `Source in + (sought time − Start)`. A non-looping async source can finish during a long hold and stays finished when you Continue. A looping async source keeps repeating from Source in to source end.
+### Helpful async details
 
-At the same held show time, an async source may have played for minutes. Its fade remains at the hold's value until Continue. This is the intended way to sustain ambience beneath an unpredictable stage wait, then fade it as the next action begins.
+- **Half-open intervals:** A clip is active from its **Start** up to (but not including) its **End**.
+- **Starting mid-clip:** Seeking into an inactive async clip while paused does not start it automatically; pressing **Play** starts it at `Source in + (playhead − Start)`.
+- **Loops vs. one-shots during long holds:** A looping async clip keeps cycling cleanly from **Source in** to source end for as long as the hold lasts. A non-looping one-shot can finish naturally during a long hold and stays finished when you **Continue** (for video, it holds its final frame until show time leaves the clip).
+- **Fading out after a hold:** Because automation follows show time, an async ambient bed can loop for five minutes at a hold while staying at full volume, then fade smoothly to zero the instant you press **Continue**. Use the **After hold** helper in the inspector to build this in one click.
 
-### Async video
+### Async video specifics
 
-An async picture layer applies the same rules to its videos: a running video keeps advancing through holds and pauses while show time and the rest of the picture stand still. Its opacity, position, and scale automation freezes with show time. A looping video keeps repeating; a one-shot video that ends during a hold keeps showing its last frame until show time leaves the clip. Still images and text on an async layer behave as on any other layer.
+Async picture layers follow the exact same rules for video clips (still images and text on an async layer behave normally):
 
-The audio engine clocks async video, so the audio device must be running, just as for async audio. A video's linked sound must be on an async audio track; otherwise the two would drift apart at the first hold, and the edit is rejected. Placing a video with sound on an async layer links its sound to the first async audio track. Add one first if the project has none.
+- **Clocked by the audio engine:** Because the audio device drives async timing, an active audio output is required for async video just like async audio.
+- **Linked sound must also be async:** If a video has linked audio, both clips must be on async tracks (otherwise picture and sound would drift apart at the first hold). Dropping a video with sound onto an async picture layer automatically links its sound to the first async audio track—add an async audio track first if the project doesn't have one.
+- **Rehearse with real playback:** **Stop All**, timeline edits, and device changes reset async voice state, so always rehearse async phase and fades by actually playing through them rather than only scrubbing.
 
-Stop All clears voice state. Edits/device changes can rebuild it too. Use actual playback to rehearse the source phase and fades; seeking alone cannot reproduce elapsed async playback.
+---
 
 ## Open the audience display
 
-1. Connect the projector/monitor and configure the operating system's display arrangement.
-2. Open Outputs and find **Picture · audience display**. Scroll if necessary.
-3. Choose **Show picture on**. The editor's current display is labeled **(editor)**.
-4. Click **Open fullscreen program output**. The audience window is frameless, black-backed, and hides the cursor.
-5. Confirm the picture on the physical screen, then close Outputs before entering Show mode.
+SimpleAVShow composes all picture layers into one program image, shared by the editor's **PROGRAM** preview and the fullscreen audience window.
 
-The chosen display name is remembered locally. Opening output is still an explicit action each session. **Close program output** hides the window. The standard Close shortcut on the output window also hides it: typically Ctrl+W on Windows/Linux or Command+W on macOS.
+1. Connect your projector or external monitor and arrange displays in your operating system settings (extended desktop, not mirrored).
+2. Open **Outputs** and scroll to **Picture · audience display**.
+3. Pick the target screen under **Show picture on**. Whichever screen currently holds the editor is marked **(editor)**.
+4. Click **Open fullscreen program output**. A frameless, black-backed fullscreen window opens with the mouse cursor hidden.
+5. Glance at the actual physical screen to verify framing, then close **Outputs** before entering **Show mode**.
 
-If you choose the editor's display, the app asks before covering the editor and tells you the Close shortcut. Use a separate screen for normal operation. The project picture preserves aspect ratio when fitted to the output; the editor preview and audience output share the composition.
+### Managing the output window
 
-If an open audience display disconnects, the app hides its output window and reports the problem. It attempts to reopen when the same display returns on a screen other than the editor's. Verify reconnection behavior with your actual HDMI/display setup; it is not a substitute for stable cabling.
+- **Closing it:** Click **Close program output** in Outputs, or focus the output window and press your platform's Close shortcut (**Ctrl+W** on Windows/Linux, **Command+W** on macOS).
+- **Covering the editor by mistake:** If you pick the screen marked **(editor)**, SimpleAVShow warns you before opening and reminds you of the Close shortcut. Use a dedicated second display for shows.
+- **Remembered, not auto-opened:** SimpleAVShow remembers which display you picked on this computer, but opening the fullscreen window is always an intentional click each session.
+- **If the display cable disconnects:** SimpleAVShow hides the output window and displays a warning. If the same screen reconnects (and isn't the editor's display), it attempts to reopen automatically. Test how your projector and HDMI chain behave beforehand—auto-reopen is a safety net, not a replacement for locking cables.
 
-Audio, MIDI, and display selections are local to the computer. Track routing travels with the project/package. Reconfigure and validate all three destinations after moving a show.
+> **Moving a show to another computer?** Track routing travels inside your `.savshow` / `.savpack` file, while audio interface, MIDI port, and display choices are stored locally per machine. Always open **Outputs** and verify all three after moving a show.

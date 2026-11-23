@@ -1,32 +1,36 @@
-# Show-machine validation
+# Show-machine validation checklist
 
-Validate the Windows 11 PC, real interface, bridge, and display before a performance. Local tests do not establish physical driver behavior.
+[Manual contents](README.md) · [5. Running a show](running-a-show.md) · [9. Reference and troubleshooting](reference-and-troubleshooting.md)
 
-## Routing
+Automated tests confirm software logic, not how your specific audio interface, ASIO driver, MIDI bridge, and projector behave together. Run through this checklist on your actual show computer (typically Windows 11) before your first live performance.
 
-- In Outputs, show driver and latency settings, choose the interface's native ASIO driver and open the needed channels. Verify Play restores it on the next launch.
-- Place distinct aligned stems on main, guide, and click. Route main 1/2, guide 3/Off, click 4/Off; pan left-only mono routes left for unity gain.
-- Inspect/record outputs: guide/click must not leak onto 1/2, unused channels must be silent, and impulses must stay aligned during a long run.
-- Repeat at 128/256/512/1024 samples. Choose a stable buffer; inspect reported settings and underruns.
+---
 
-## Holds and seeks
+## 1. Audio interface and physical routing
 
-- Hold looping ambience for five minutes, then resume into a fade. The source continues through the hold; the fade starts on resume.
-- Repeat with a one-shot ending during the hold; it must stay finished after resume.
-- Pause inside ambience, seek inside its clip, then outside or exactly to its end. Expect uninterrupted source phase inside and silence outside.
-- Stop All from Playing, Held, and Paused. All internal audio must stop; external MIDI receivers are controlled separately.
+- [ ] **ASIO driver & persistence:** Open **Outputs**, check **Show driver and latency settings**, choose your interface's native **ASIO** driver, and open all channels your show needs. Quit, relaunch, and verify pressing **Play** restores the exact same device and channel count.
+- [ ] **Channel isolation:** Place distinct, time-aligned test stems on **Main audio** (outputs `1/2`), **Guide** (`3/Off`), and **Click** (`4/Off`). *(With one leg Off, mono stems play at unity gain and stereo stems sum automatically—no panning trick required.)*
+- [ ] **Physical verification:** Listen to and/or record every physical output. Confirm **Guide** and **Click** never bleed into `1/2`, unused channels stay completely silent, and aligned impulses stay in sync over a long run.
+- [ ] **Buffer stability:** Repeat playback at **128, 256, 512, and 1024 samples**. Pick a buffer that runs cleanly with zero **underruns**, and note the confirmed settings.
 
-## MIDI and picture
+## 2. Holds, pauses, async media, and Stop All
 
-- Choose the real bridge port and verify required Note/CC/Program Change/SysEx messages. Verify automatic reconnection on Play, editor/test-send values (including program numbering and pitch bend), and missing-port errors without fallback.
-- Confirm arrival/resume each fire once, seeks send nothing, rehearsal backward seeks rearm cues, and same-time/time-zero holds behave correctly.
-- Select the display; compare program and preview, hold the frame, and resume.
-- Measure physical audio/video/MIDI offsets with a capture setup. Device/display/bridge buffering is not compensated yet.
-- Run four-layer 1080p24 with actual formats. Inspect CPU/memory, video waits, and underruns over a full rehearsal.
+- [ ] **Long hold + post-hold fade:** Hold a looping async ambient bed for **five minutes**, then press **Continue** into an **After hold** fade. Confirm the loop stays smooth throughout the hold and begins fading only after **Continue**.
+- [ ] **Async one-shot:** Repeat with a short non-looping async clip that finishes during the hold; verify it stays finished after **Continue**.
+- [ ] **Async pause & seek:** Pause inside an active async clip, seek *inside* its interval (source phase should stay unbroken), then seek *outside* or directly to its end (voice should stop cleanly).
+- [ ] **Stop All everywhere:** Trigger **Stop All** from Playing, Holding, and Paused states. Confirm every internal audio and video voice stops immediately, and verify your plan for silencing external MIDI gear separately.
 
-## Workflow and failures
+## 3. MIDI cues and audience picture
 
-- Show mode must block edits/seeks while Space and Escape still work.
-- Save/reopen, move media with the show, and open the autosave sidecar.
-- Disconnect audio: the show must halt. Press Play to retry the remembered interface; if it is still missing, playback must remain stopped without falling back to another device. Verify Refresh devices and explicit replacement in Outputs. Inspect MIDI disconnect errors too.
-- Record app/driver versions and health indicators during long holds, repeated resumes, seeks, and stopped output changes.
+- [ ] **Real MIDI delivery:** Select your real MIDI port/bridge and verify every message type your show uses (Note On/Off, CC, Program Change—checking `1–128` vs. `0–127` numbering—Pitch Bend, and SysEx). Confirm automatic reconnection on **Play**, and confirm unplugging the port raises an error without falling back to another port.
+- [ ] **Cue timing rules:** Confirm arrival and hold-resume messages each fire exactly once, seeking sends nothing, backward seeks rearm cues cleanly, and same-time or `00:00:00:00` holds behave as expected.
+- [ ] **Audience display:** Open fullscreen program output on the real projector/monitor. Compare framing against **PROGRAM**, confirm the picture freezes cleanly at holds, and verify resuming playback.
+- [ ] **Physical sync offset:** Measure actual A/V and MIDI timing offset with a camera or capture setup, since driver, projector, and MIDI bridge latency are not automatically compensated.
+- [ ] **Real-media stress test:** Rehearse your heaviest layered video section (for example, four simultaneous 1080p24 layers in your final codecs) for a full run while watching CPU, memory, **video waits**, and **underruns**.
+
+## 4. Show mode, files, and fault recovery
+
+- [ ] **Show mode lock:** Enter **Show mode** and confirm edits and timeline seeks are blocked while **Space** and **double-Escape** (plus the **Stop All** button and phone remote, if used) work reliably.
+- [ ] **File transfer & recovery:** Save, reopen, move a show with its media (or round-trip via `.savpack`), and verify opening a `.savshow.autosave` sidecar works cleanly.
+- [ ] **Device disconnect drill:** Unplug the audio interface mid-playback and verify the show halts cleanly. Press **Play** while still unplugged and confirm it stays blocked (no silent switch to built-in speakers). Reconnect, click **Refresh devices** (or pick a backup interface after **Stop All** and leaving Show mode), and verify recovery. Repeat with a MIDI disconnect so you recognize the warning banner.
+- [ ] **Log your baseline:** Record the SimpleAVShow version (`Help → About SimpleAVShow`), OS build, ASIO driver version, buffer size, and health-indicator counts from your clean full rehearsal.
