@@ -11,6 +11,8 @@
 namespace sav {
 Controller::Controller(QObject* parent) : QObject(parent), project(newProject()), device(transport) {
     midiName_ = QSettings().value("midi/port").toString();
+    transport.setLateAudio(QSettings().value("audio/late").toString() == "gap" ? LateAudio::Gap : LateAudio::Freeze);
+    sav::setAudioPreparation(QSettings().value("audio/sources").toString() == "prepared" ? AudioPreparation::Prepared : AudioPreparation::Stream);
     arm(0);
     timer_.setInterval(16);
     connect(&timer_, &QTimer::timeout, this, [this] {
@@ -197,9 +199,31 @@ bool Controller::openMidi(int port) {
     if (ok) { midiName_ = midi.name(); QSettings().setValue("midi/port", midiName_); playbackProblem.clear(); }
     report(ok ? (port < 0 ? "MIDI output disconnected" : "MIDI output: " + midi.name()) : error); return ok;
 }
+void Controller::setLateAudio(LateAudio policy) {
+    transport.setLateAudio(policy); QSettings().setValue("audio/late", policy == LateAudio::Gap ? "gap" : "freeze");
+}
+void Controller::setAudioPreparation(AudioPreparation preparation) {
+    sav::setAudioPreparation(preparation); QSettings().setValue("audio/sources", preparation == AudioPreparation::Prepared ? "prepared" : "stream");
+}
+bool Controller::replaceAudio(const QMap<QString, std::shared_ptr<const AudioData>>& audio) {
+    if (!canEdit()) return false;
+    try {
+        Project next = project;
+        for (auto [id, data] : audio.asKeyValueRange()) if (next.assets.contains(id)) next.assets[id].audio = data;
+        bindAudio(next); validate(next);
+        // Undo and redo keep using the chosen preparation too.
+        for (auto* history : {&undo_, &redo_}) for (auto& p : *history) {
+            for (auto [id, data] : audio.asKeyValueRange()) if (p.assets.contains(id)) p.assets[id].audio = data;
+            bindAudio(p);
+        }
+        project = std::move(next); arm(std::min(position(), project.show.duration)); emit changed(); return true;
+    } catch (const std::exception& e) { report(QString::fromUtf8(e.what())); return false; }
+}
 QStringList Controller::preflight() {
     QStringList problems;
     if (dirty) problems << "The show has unsaved changes.";
+    if (std::any_of(project.show.clips.begin(), project.show.clips.end(), [](const Clip& clip) { return clip.audio && clip.audio->storage && clip.audio->storage->decodes(); }))
+        problems << "Audio streams from the original media files. For the steadiest playback, choose Prepared audio sources in Outputs.";
     for (const auto& missing : missingMedia()) problems << "Media is missing: " + missing;
     if (needsMidi() && !midi.connected()) {
         const QString remembered = QSettings().value("midi/port").toString();

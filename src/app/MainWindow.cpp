@@ -491,6 +491,7 @@ void MainWindow::updatePlayback() {
         (c_.needsMidi() ? (c_.midi.connected() ? " · MIDI connected" : c_.midiDestination().isEmpty() ? " · MIDI needs a device" : " · MIDI reconnects on Play") : "") +
         (c_.transport.clipped() ? " · CLIPPING" : "") + (c_.device.underruns() ? QString(" · %1 underruns").arg(c_.device.underruns()) : "") +
         (c_.transport.bufferWaits() ? QString(" · %1 audio waits").arg(c_.transport.bufferWaits()) : "") +
+        (c_.transport.audioGaps() ? QString(" · %1 audio gaps").arg(c_.transport.audioGaps()) : "") +
         (c_.transport.readRetries() ? QString(" · %1 disk retries").arg(c_.transport.readRetries()) : "") +
         (c_.lateFrames ? QString(" · %1 video waits").arg(c_.lateFrames) : ""));
     midiDestination_->setText(c_.midi.connected() ? "Destination: " + c_.midi.name() : c_.midiDestination().isEmpty() ? "Choose a MIDI device once; Play reconnects it automatically." : "On Play: reconnect to " + c_.midiDestination());
@@ -505,7 +506,7 @@ void MainWindow::updatePlayback() {
     const bool problem = state != State::Held && !c_.playbackProblem.isEmpty();
     hint_->setStyleSheet(state == State::Held ? "color: #e5c47d; font-weight: 600;" :
         problem ? "color: #ffd7d2; background: #5a2523; border-radius: 4px; padding: 6px 8px;" : "color: #8fa8c9;");
-    health_->setStyleSheet(c_.transport.clipped() || c_.device.underruns() || c_.transport.bufferWaits() || c_.transport.readRetries() || c_.lateFrames ? "color: #f0a66e;" : "color: #92a8c6;");
+    health_->setStyleSheet(c_.transport.clipped() || c_.device.underruns() || c_.transport.bufferWaits() || c_.transport.audioGaps() || c_.transport.readRetries() || c_.lateFrames ? "color: #f0a66e;" : "color: #92a8c6;");
     inspector_->setEnabled(c_.canEdit(false));
     const auto picture = c_.compose(); preview_->setPicture(picture); if (output_) output_->setPicture(picture);
 }
@@ -790,6 +791,32 @@ void MainWindow::relinkMedia(bool afterOpening) {
         return result;
     }));
 }
+void MainWindow::reloadAudio() {
+    QMap<QString, QString> paths; // Asset id → source; generated audio has no file to prepare.
+    for (const auto& a : c_.project.assets) if (a.audio && a.audio->storage && !a.offline) paths.insert(a.id, a.path);
+    if (paths.isEmpty()) { c_.report(audioPreparation() == AudioPreparation::Prepared ? "Audio will be prepared when imported." : "Audio will stream from media files."); return; }
+    c_.busy = true;
+    const bool preparing = audioPreparation() == AudioPreparation::Prepared;
+    auto* progress = new QProgressDialog(preparing ? "Preparing audio for playback…" : "Switching audio to stream from media files…", QString(), 0, 0, this);
+    progress->setWindowModality(Qt::WindowModal); progress->setMinimumDuration(0); progress->show();
+    using Reloaded = std::pair<QMap<QString, std::shared_ptr<const AudioData>>, QStringList>;
+    auto* watcher = new QFutureWatcher<Reloaded>(this);
+    connect(watcher, &QFutureWatcher<Reloaded>::finished, this, [this, watcher, progress, preparing] {
+        const auto [audio, errors] = watcher->result(); c_.busy = false; progress->deleteLater(); watcher->deleteLater();
+        if (!audio.isEmpty() && !c_.replaceAudio(audio)) return;
+        if (!errors.isEmpty()) QMessageBox::warning(this, "Some audio kept its previous preparation", errors.join("\n\n"));
+        else c_.report(preparing ? QString("Prepared %1 audio sources. Playback reads cached samples.").arg(audio.size())
+                                 : QString("%1 audio sources now stream from their media files.").arg(audio.size()));
+    });
+    watcher->setFuture(QtConcurrent::run([paths]() {
+        Reloaded result;
+        for (auto [id, path] : paths.asKeyValueRange()) {
+            try { result.first.insert(id, loadMedia(path).audio); }
+            catch (const std::exception& e) { result.second << QFileInfo(path).fileName() + ": " + QString::fromUtf8(e.what()); }
+        }
+        return result;
+    }));
+}
 void MainWindow::placeAsset(QString id, int track, Frame time) {
     if (!c_.canEdit() || !c_.project.assets.contains(id)) return;
     const auto& asset = c_.project.assets[id]; const bool visual = c_.project.show.tracks[track].visual, async = c_.project.show.tracks[track].async;
@@ -921,6 +948,27 @@ void MainWindow::outputSettings() {
     connect(audioApply, &QPushButton::clicked, &dialog, useAudio);
     connect(devices, &QComboBox::activated, &dialog, useAudio);
     auto* routing = new QLabel("Track routing is edited in the track inspector.\nGuide and Click start disconnected. For one interface with four outputs,\nuse Main 1/2, Guide 3/Off, Click 4/Off. Windows: prefer the interface's ASIO driver."); routing->setWordWrap(true); form->addRow(routing);
+    auto* playbackBox = new QGroupBox("Playback · audio reliability"); auto* playbackForm = new QFormLayout(playbackBox); layout->addWidget(playbackBox);
+    auto* sources = new QComboBox; sources->setObjectName("audioSourcePreparation");
+    sources->addItem("Stream from media files · fast import", static_cast<int>(AudioPreparation::Stream));
+    sources->addItem("Prepared cache · steadiest playback", static_cast<int>(AudioPreparation::Prepared));
+    sources->setCurrentIndex(sources->findData(static_cast<int>(audioPreparation())));
+    sources->setToolTip("Streaming decodes compressed audio while the show plays, so imports are quick while building a show.\n"
+        "Prepared decodes everything once into a disk cache before playback; choose it on the show machine before a performance.");
+    auto* late = new QComboBox; late->setObjectName("lateAudioPolicy");
+    late->addItem("Freeze show time until it is ready", static_cast<int>(LateAudio::Freeze));
+    late->addItem("Keep time and leave a short gap", static_cast<int>(LateAudio::Gap));
+    late->setCurrentIndex(late->findData(static_cast<int>(c_.transport.lateAudio())));
+    late->setToolTip("Freeze keeps every track, cue and hold aligned, but the show runs slightly late.\n"
+        "Gap keeps the show on time with outside clocks (a band, timecode, external video); only the late sound drops out briefly.");
+    playbackForm->addRow("Audio sources", sources); playbackForm->addRow("If audio is late", late);
+    connect(late, &QComboBox::activated, &dialog, [&] { c_.setLateAudio(static_cast<LateAudio>(late->currentData().toInt())); });
+    connect(sources, &QComboBox::activated, &dialog, [&] {
+        const auto chosen = static_cast<AudioPreparation>(sources->currentData().toInt());
+        if (chosen == audioPreparation()) return;
+        if (!c_.canEdit()) { sources->setCurrentIndex(sources->findData(static_cast<int>(audioPreparation()))); return; }
+        c_.setAudioPreparation(chosen); reloadAudio();
+    });
     auto* midiBox = new QGroupBox("MIDI · control lights, instruments or other apps"); auto* midiForm = new QFormLayout(midiBox); layout->addWidget(midiBox);
     auto* midiHint = new QLabel("Only needed for cues that send MIDI. Choose a destination once; selecting it connects immediately and Play reconnects it next time.");
     midiHint->setWordWrap(true); midiForm->addRow(midiHint);

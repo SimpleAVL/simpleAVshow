@@ -2,7 +2,7 @@
 
 [Manual contents](README.md) · Previous: [2. Editing a show](editing-a-show.md) · Next: [4. Cues and MIDI](cues-and-midi.md)
 
-This chapter explains how to connect your audio interface, route tracks to separate physical outputs (such as house speakers, crew guide, and performer click), use async audio and video for live stage waits, and send the program picture to your audience screen.
+This chapter explains how to connect your audio interface, configure playback reliability, route tracks to separate physical outputs (such as house speakers, crew guide, and performer click), use async audio and video for live stage waits, and send the program picture to your audience screen.
 
 ---
 
@@ -27,6 +27,22 @@ Open the Outputs dialog from the **Outputs** button in the top bar, **Audience d
 - **Fixed 48 kHz engine:** SimpleAVShow always runs its audio engine at **48 kHz**.
 - **Buffer sizes:** Choose **128, 256, 512 (default), 1024, or 2048 samples**. Smaller buffers lower buffering delay; larger buffers give the computer more headroom against crackles and underruns. Always test stability with your actual show rather than guessing from buffer size alone.
 - **No silent fallback:** SimpleAVShow remembers your driver, device name, channel count, and buffer size locally on this computer. On first run, pressing **Play** opens the system default output; after that, it reconnects to your remembered device automatically. If that device is unplugged, playback **stays blocked** instead of quietly falling back to laptop speakers—reconnect it and click **Refresh devices**, or explicitly pick a replacement.
+
+---
+
+## Playback reliability
+
+The **Playback · audio reliability** group in **Outputs** holds two per-machine settings:
+
+| Setting | Choice | Use it when |
+| --- | --- | --- |
+| **Audio sources** | **Stream from media files · fast import** *(default)* | Building and iterating on a show. Compressed audio (MP3, AAC/M4A, FLAC, Ogg, video soundtracks, and WAV at other sample rates) decodes from the original file while it plays—imports skip the disk cache and reopen almost instantly. |
+| | **Prepared cache · steadiest playback** | Rehearsing and performing. Every compressed source is decoded once into a disk cache so playback only reads samples. Choose this on the show machine before rehearsing and performing. |
+| **If audio is late** | **Freeze show time until it is ready** *(default)* | The show is self-contained. A late read pauses the whole show for that moment so every track, cue, and hold stays aligned; the show runs slightly late. |
+| | **Keep time and leave a short gap** | The show must stay on time with outside clocks such as a live band, timecode, or external video player. Only the late sound drops out briefly and fades back in at the correct place. |
+
+- **Same timeline alignment:** Both source modes place every sample at the same show frame, so switching moves nothing on the timeline. Click **Stop All** first—switching prepares or releases the open show's audio with a progress dialog. Compatible 48 kHz PCM WAV files always play directly from their source in either mode.
+- **Preflight and counters:** Show mode's preflight warns while audio still streams. Late audio is rare in either mode; the status bar counts **audio waits** (Freeze) and **audio gaps** (Gap) so you can spot it during rehearsals.
 
 ---
 
@@ -112,4 +128,4 @@ SimpleAVShow composes all picture layers into one program image, shared by the e
 - **Remembered, not auto-opened:** SimpleAVShow remembers which display you picked on this computer, but opening the fullscreen window is always an intentional click each session.
 - **If the display cable disconnects:** SimpleAVShow hides the output window and displays a warning. If the same screen reconnects (and isn't the editor's display), it attempts to reopen automatically. Test how your projector and HDMI chain behave beforehand—auto-reopen is a safety net, not a replacement for locking cables.
 
-> **Moving a show to another computer?** Track routing travels inside your `.savshow` / `.savpack` file, while audio interface, MIDI port, and display choices are stored locally per machine. Always open **Outputs** and verify all three after moving a show.
+> **Moving a show to another computer?** Track routing travels inside your `.savshow` / `.savpack` file, while audio interface, playback reliability, MIDI port, and display choices are stored locally per machine. Always open **Outputs** and verify them after moving a show.

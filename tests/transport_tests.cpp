@@ -240,6 +240,27 @@ int main() {
             near(after[(fade - 1) * 2], PatternStorage::value(destination + fade) + .1 * (1 + (destination + fade) % 4), "recovery skips no samples on either track");
             expect(!storage->callbackReads.load(), "seek never reads disk on callback");
         }},
+        {"gap policy keeps show time running and returns the late track in sync", [] {
+            auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto p = show(false); p->duration = storage->length(); p->clips[0].duration = p->duration; p->clips[0].audio = diskAudio(storage);
+            auto companion = p->clips[0]; companion.audio = audio({.1f, .2f, .3f, .4f}); companion.loop = true; p->clips.push_back(companion);
+            Transport t; t.setLateAudio(LateAudio::Gap); t.configure(p); play(t); float out[2]; checkedRender(t, out, 1, 2);
+            storage->delay.store(30);
+            const Frame destination = frames(30 * 3600) + 123;
+            t.command({Action::Seek, destination}); checkedRender(t, out, 1, 2);
+            expect(t.position() == destination + 1 && t.bufferWaits() == 0 && t.audioGaps() == 1, "a miss leaves a gap instead of freezing");
+            Frame elapsed = 1;
+            // The resident track keeps playing on time while the disk track is late.
+            for (int i = 0; i < 1000 && t.audioGaps() == static_cast<unsigned>(elapsed); ++i, ++elapsed) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1)); checkedRender(t, out, 1, 2);
+            }
+            expect(t.position() == destination + elapsed, "show time never waited");
+            std::vector<float> after(fade * 2 * 2); checkedRender(t, after.data(), fade * 2, 2);
+            const Frame last = destination + elapsed + fade * 2 - 1;
+            near(after[(fade * 2 - 1) * 2], PatternStorage::value(last) + .1 * (1 + last % 4), "the late track returns at show time, not where it stopped");
+            t.setLateAudio(LateAudio::Freeze); expect(t.lateAudio() == LateAudio::Freeze, "policy switches live");
+            expect(!storage->callbackReads.load(), "gaps never read disk on callback");
+        }},
         {"disk async loop keeps offset through hold, pause, seek, and Stop All", [] {
             auto storage = std::make_shared<PatternStorage>(17003);
             auto p = show(); p->clips[0].audio = diskAudio(storage); p->clips[0].offset = 8131; p->clips[0].loop = true;

@@ -4,7 +4,9 @@
 #include <QUuid>
 #include <QImageReader>
 #include <QTemporaryFile>
+#include <atomic>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -56,7 +58,284 @@ struct Input {
         checked(avcodec_open2(codec, decoder, nullptr), "Open decoder");
     }
 };
+// Decodes a file's best audio stream to interleaved 48 kHz stereo float at show frames. The first
+// decoded frame's timestamp places the source (a positive container offset becomes leading
+// silence, a negative one is trimmed); samples then follow contiguously. Prepared caches and
+// streamed sources both decode through this, so they place every sample identically.
+class AudioDecoder {
+public:
+    // Seeks start this far early: codecs converge (MP3 bit reservoir, AAC/Opus overlap) and the
+    // resampler fills its filter, so seeked output matches a decode from the start.
+    static constexpr Frame preroll = sampleRate / 2;
+    explicit AudioDecoder(QString path) : path_(std::move(path)) { open(); }
+    bool mono() const noexcept { return mono_; }
+    // The next decoded run, frames [first, first + samples.size() / 2). False once the source ends.
+    bool next(Frame& first, std::vector<float>& samples) {
+        samples.clear();
+        while (!finished_) {
+            if (receive()) {
+                convert(input_->frame, first, samples); av_frame_unref(input_->frame);
+            } else if (convert(nullptr, first, samples) <= 0) finished_ = true; // Drains the resampler's delay line.
+            if (!samples.empty()) return true;
+        }
+        return false;
+    }
+    // Continue output from at or before frame, so the next runs cover it.
+    void seek(Frame frame) {
+        // A linear decode's first frames anchor timestamps to sample positions.
+        if (!anchorTried_) { Frame first; std::vector<float> samples; while (!anchorTried_ && next(first, samples)) {} }
+        const Frame output = std::max<Frame>(0, frame - start_ - preroll);
+        // Resume on a resampling phase boundary, where output and input samples coincide exactly.
+        target_ = output / stepOut_ * stepIn_; retries_ = 0;
+        if (target_ == 0 || !anchored_) restart(); else seekInput(target_);
+    }
+private:
+    QString path_;
+    std::unique_ptr<Input> input_;
+    int stream_ = -1, rate_ = 0, retries_ = 0;
+    bool mono_ = false, started_ = false, aligned_ = false, finished_ = false, anchorTried_ = false, anchored_ = false;
+    double origin_ = 0;
+    std::int64_t firstPts_ = AV_NOPTS_VALUE; // Of the first decoded frame, in stream time base.
+    // Counted input position minus the one a timestamp implies. Decoders trim encoder delay
+    // (MP3, AAC, Opus priming) from the first frame without moving its timestamp, so later
+    // timestamps are offset by the trimmed samples. Measured on the second frame of a linear decode.
+    std::int64_t ptsOffset_ = 0;
+    Frame start_ = 0;                        // Show frame of output sample 0.
+    std::int64_t stepIn_ = 1, stepOut_ = 1;  // Input and output samples per resampling phase cycle.
+    std::int64_t inputAt_ = 0, target_ = 0, produced_ = 0;
+    std::vector<float> scratch_;
+    void open() {
+        input_ = std::make_unique<Input>(); input_->open(path_);
+        stream_ = av_find_best_stream(input_->format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+        if (stream_ < 0) throw std::runtime_error("File contains no audio");
+        input_->decoder(stream_);
+        if (input_->codec->ch_layout.nb_channels > 2)
+            throw std::runtime_error("Import mono or stereo stems separately; multichannel source files are not supported yet");
+        mono_ = input_->codec->ch_layout.nb_channels == 1; rate_ = input_->codec->sample_rate;
+        if (rate_ <= 0) throw std::runtime_error("Audio has no sample rate");
+        const auto common = std::gcd(rate_, sampleRate); stepIn_ = rate_ / common; stepOut_ = sampleRate / common;
+        origin_ = mediaOrigin(input_->format);
+        // Any one-channel layout (including front-left) is centre mono; the transport pans it.
+        AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO, mono = AV_CHANNEL_LAYOUT_MONO;
+        checked(swr_alloc_set_opts2(&input_->resampler, &stereo, AV_SAMPLE_FMT_FLT, sampleRate,
+            mono_ ? &mono : &input_->codec->ch_layout, input_->codec->sample_fmt, rate_, 0, nullptr), "Configure resampling");
+        checked(swr_init(input_->resampler), "Initialize resampling");
+        // Video and other streams are never decoded here; skip their packets while demuxing.
+        for (unsigned i = 0; i < input_->format->nb_streams; ++i) if (static_cast<int>(i) != stream_) input_->format->streams[i]->discard = AVDISCARD_ALL;
+        started_ = aligned_ = finished_ = false;
+    }
+    // The next decoded frame into input_->frame; false once the decoder is drained.
+    bool receive() {
+        for (;;) {
+            const int received = avcodec_receive_frame(input_->codec, input_->frame);
+            if (received == 0) return true;
+            if (received == AVERROR_EOF) return false;
+            if (received != AVERROR(EAGAIN)) checked(received, "Decode audio");
+            const int read = av_read_frame(input_->format, input_->packet);
+            if (read == AVERROR_EOF) { checked(avcodec_send_packet(input_->codec, nullptr), "Flush audio decoder"); continue; }
+            checked(read, "Read audio packets");
+            const int sent = input_->packet->stream_index == stream_ ? avcodec_send_packet(input_->codec, input_->packet) : 0;
+            av_packet_unref(input_->packet);
+            checked(sent, "Feed audio decoder");
+        }
+    }
+    void begin(std::int64_t pts) {
+        started_ = true; firstPts_ = pts; inputAt_ = 0; start_ = 0;
+        if (pts == AV_NOPTS_VALUE) return;
+        const double startTime = pts * av_q2d(input_->format->streams[stream_]->time_base) - origin_;
+        if (!std::isfinite(startTime) || std::abs(startTime) > maxSeconds) throw std::runtime_error("Invalid audio stream start time");
+        start_ = frames(startTime);
+    }
+    // Decoding again from the start always matches; also the fallback when seeking cannot be trusted.
+    void restart() { open(); }
+    void seekInput(std::int64_t sample) {
+        const auto base = input_->format->streams[stream_]->time_base;
+        checked(av_seek_frame(input_->format, stream_, firstPts_ + av_rescale_q(sample - ptsOffset_, {1, rate_}, base), AVSEEK_FLAG_BACKWARD), "Seek audio");
+        avcodec_flush_buffers(input_->codec); swr_close(input_->resampler);
+        checked(swr_init(input_->resampler), "Initialize resampling");
+        aligned_ = finished_ = false;
+    }
+    // Returns the resampler's output count (0 once a flush is drained); samples get the part at or after frame 0.
+    int convert(AVFrame* frame, Frame& first, std::vector<float>& samples) {
+        const std::uint8_t* planes[2]{};
+        int count = 0;
+        if (frame) {
+            const auto base = input_->format->streams[stream_]->time_base;
+            const auto pts = frame->best_effort_timestamp;
+            const auto implied = [&] { return av_rescale_q_rnd(pts - firstPts_, base, {1, rate_}, AV_ROUND_NEAR_INF); };
+            if (!started_) begin(pts);
+            else if (aligned_ && !anchorTried_) {
+                // Without timestamps there is nothing to seek by; seeks then decode from the start.
+                anchorTried_ = true;
+                if (pts != AV_NOPTS_VALUE && firstPts_ != AV_NOPTS_VALUE) { ptsOffset_ = inputAt_ - implied(); anchored_ = true; }
+            }
+            else if (!aligned_) {
+                // The first frame after a seek; its timestamp says where the decoder landed.
+                if (pts == AV_NOPTS_VALUE) { restart(); return 0; }
+                inputAt_ = implied() + ptsOffset_;
+                if (inputAt_ > target_) {
+                    // Landed late (an inexact index): back off further, then decode from the start.
+                    const auto earlier = target_ - 2 * (inputAt_ - target_) - rate_;
+                    if (++retries_ <= 3 && earlier > 0) seekInput(earlier); else restart();
+                    return 0;
+                }
+            }
+            if (!aligned_) { aligned_ = true; produced_ = target_ / stepIn_ * stepOut_; }
+            const auto skip = static_cast<int>(std::clamp<std::int64_t>(target_ - inputAt_, 0, frame->nb_samples));
+            inputAt_ += frame->nb_samples; count = frame->nb_samples - skip;
+            if (!count) return 0;
+            // Input before the resume point is dropped so the resampler starts on its phase boundary.
+            const int bytes = av_get_bytes_per_sample(static_cast<AVSampleFormat>(frame->format));
+            const bool planar = av_sample_fmt_is_planar(static_cast<AVSampleFormat>(frame->format));
+            const int channels = frame->ch_layout.nb_channels;
+            for (int c = 0; c < (planar ? channels : 1); ++c) planes[c] = frame->extended_data[c] + static_cast<std::size_t>(skip) * bytes * (planar ? 1 : channels);
+        } else if (!aligned_) return 0;
+        const int capacity = static_cast<int>(av_rescale_rnd(swr_get_delay(input_->resampler, rate_) + count, sampleRate, rate_, AV_ROUND_UP));
+        if (capacity <= 0) return 0;
+        scratch_.resize(static_cast<std::size_t>(capacity) * 2);
+        auto* dest = reinterpret_cast<std::uint8_t*>(scratch_.data());
+        const int written = swr_convert(input_->resampler, &dest, capacity, frame ? planes : nullptr, count);
+        checked(written, "Resample audio");
+        // FFmpeg's default mono -> stereo downmix applies -3 dB. Undo it;
+        // the transport applies constant-power mono pan exactly once.
+        if (mono_) for (int i = 0; i < written * 2; ++i) scratch_[i] *= 1.41421356237f;
+        const Frame at = start_ + produced_;
+        if (written > maxFrame - at) throw std::runtime_error("Audio duration exceeds representable frame timing");
+        produced_ += written;
+        const auto skip = static_cast<std::size_t>(std::clamp<Frame>(-at, 0, written));
+        first = at + static_cast<Frame>(skip);
+        samples.assign(scratch_.begin() + static_cast<std::ptrdiff_t>(skip * 2), scratch_.begin() + written * 2);
+        return written;
+    }
+};
+
+// Reads decode the original file. The transport's read-ahead worker calls read, never the
+// audio callback. A few decoders stay open so clips reading the same file at different
+// places continue sequentially instead of seeking for every block.
+class StreamStorage final : public AudioStorage {
+public:
+    StreamStorage(QString path, Frame length) : path_(std::move(path)), length_(length) {
+        const QFileInfo info(path_); size_ = info.size(); modified_ = info.lastModified();
+    }
+    Frame length() const noexcept override { return length_; }
+    bool decodes() const noexcept override { return true; }
+    void read(Frame first, float* stereo, std::size_t count) const override {
+        if (first < 0 || first > length_ || count > static_cast<std::size_t>(length_ - first)) throw std::runtime_error("Invalid audio source range");
+        std::fill(stereo, stereo + count * 2, 0.f);
+        if (!count) return;
+        const QFileInfo info(path_);
+        if (!info.exists()) throw std::runtime_error("Audio source is unavailable: " + path_.toStdString());
+        if (info.size() != size_ || info.lastModified() != modified_) throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString());
+        const std::lock_guard lock(mutex_);
+        Reader* reader = nullptr;
+        try {
+            pick(first, reader);
+            const Frame end = first + static_cast<Frame>(count);
+            for (Frame at = first; at < end;) {
+                const Frame have = reader->first + static_cast<Frame>(reader->samples.size() / 2);
+                if (have <= at) {
+                    if (!reader->decoder.next(reader->first, reader->samples)) break;
+                    continue;
+                }
+                if (reader->first > at) { at = std::min(end, reader->first); continue; } // Leading silence stays zero.
+                const Frame stop = std::min(end, have);
+                std::copy(reader->samples.begin() + (at - reader->first) * 2, reader->samples.begin() + (stop - reader->first) * 2, stereo + (at - first) * 2);
+                at = stop;
+            }
+            reader->used = ++clock_;
+        } catch (...) {
+            // A failed decoder's position is unknown; the next read opens a fresh one.
+            if (reader) std::erase_if(readers_, [reader](const auto& r) { return r.get() == reader; });
+            throw;
+        }
+    }
+private:
+    static constexpr std::size_t maxReaders = 4;
+    // Reading forward this far decodes through instead of seeking.
+    static constexpr Frame continueWithin = 2 * sampleRate;
+    struct Reader {
+        explicit Reader(const QString& path) : decoder(path) {}
+        AudioDecoder decoder;
+        Frame first = 0;
+        std::vector<float> samples;
+        std::uint64_t used = 0;
+    };
+    QString path_;
+    Frame length_;
+    qint64 size_ = 0;
+    QDateTime modified_;
+    mutable std::mutex mutex_;
+    mutable std::vector<std::unique_ptr<Reader>> readers_;
+    mutable std::uint64_t clock_ = 0;
+    // Sets reader before seeking it, so a failed seek discards that decoder.
+    void pick(Frame frame, Reader*& reader) const {
+        for (const auto& r : readers_) {
+            const Frame have = r->first + static_cast<Frame>(r->samples.size() / 2);
+            if (r->first <= frame && frame < have + continueWithin && (!reader || r->first > reader->first)) reader = r.get();
+        }
+        if (reader) return;
+        if (readers_.size() < maxReaders) {
+            readers_.push_back(std::make_unique<Reader>(path_)); reader = readers_.back().get();
+            if (frame < continueWithin) return; // A fresh decoder starts at the beginning.
+        } else reader = std::min_element(readers_.begin(), readers_.end(), [](const auto& a, const auto& b) { return a->used < b->used; })->get();
+        reader->samples.clear(); reader->first = 0; reader->decoder.seek(frame);
+    }
+};
+
+std::atomic<AudioPreparation> preparation{AudioPreparation::Stream};
+void addPeaks(std::vector<float>& peaks, Frame first, const std::vector<float>& samples) {
+    const auto count = static_cast<Frame>(samples.size() / 2);
+    peaks.resize(static_cast<std::size_t>((first + count + AudioData::peakStride - 1) / AudioData::peakStride), 0.f);
+    for (Frame i = 0; i < count; ++i) {
+        auto& peak = peaks[static_cast<std::size_t>((first + i) / AudioData::peakStride)];
+        peak = std::max(peak, std::max(std::abs(samples[i * 2]), std::abs(samples[i * 2 + 1])));
+    }
 }
+std::shared_ptr<const AudioData> loadAudio(const QString& path) {
+    AudioDecoder decoder(path);
+    auto data = std::make_shared<AudioData>(); data->mono = decoder.mono();
+    Frame first = 0; std::vector<float> samples;
+    if (preparation.load() == AudioPreparation::Stream) {
+        // One decode pass finds the exact length and waveform; playback decodes again on demand.
+        detail::StreamSummary summary(path);
+        auto known = summary.reuse(data->mono);
+        if (!known) {
+            known = detail::AudioSummary{0, data->mono, {}};
+            while (decoder.next(first, samples)) { addPeaks(known->peaks, first, samples); known->length = first + static_cast<Frame>(samples.size() / 2); }
+            if (known->length <= 0) throw std::runtime_error("Audio stream is empty");
+            summary.save(*known);
+        }
+        data->peaks = std::move(known->peaks);
+        data->storage = std::make_shared<StreamStorage>(path, known->length);
+        return data;
+    }
+    detail::AudioCache prepared(path);
+    if (auto reused = prepared.reuse(data->mono)) return reused;
+    QTemporaryFile cache(prepared.temporaryTemplate());
+    if (!cache.open()) throw std::runtime_error("Cannot create audio cache: " + cache.errorString().toStdString());
+    Frame total = 0;
+    while (decoder.next(first, samples)) {
+        if (first > total) {
+            // A sparse zero-filled prefix preserves embedded A/V offsets
+            // without allocating leading silence in RAM.
+            total = first;
+            if (!cache.resize(total * 2 * static_cast<qint64>(sizeof(float))) || !cache.seek(total * 2 * static_cast<qint64>(sizeof(float))))
+                throw std::runtime_error("Cannot prepare audio start offset: " + cache.errorString().toStdString());
+        }
+        const qint64 bytes = static_cast<qint64>(samples.size() * sizeof(float));
+        if (cache.write(reinterpret_cast<const char*>(samples.data()), bytes) != bytes)
+            throw std::runtime_error("Cannot write audio cache (check available disk space): " + cache.errorString().toStdString());
+        addPeaks(data->peaks, first, samples);
+        total += static_cast<Frame>(samples.size() / 2);
+    }
+    data->peaks.resize(static_cast<std::size_t>((total + AudioData::peakStride - 1) / AudioData::peakStride), 0.f);
+    data->storage = prepared.publish(cache, *data, total);
+    return data;
+}
+}
+
+void setAudioPreparation(AudioPreparation value) noexcept { preparation.store(value); }
+AudioPreparation audioPreparation() noexcept { return preparation.load(); }
 
 MediaAsset loadMedia(const QString& path) {
     if (!QFileInfo(path).isFile()) throw std::runtime_error("Media file is missing: " + path.toStdString());
@@ -88,93 +367,10 @@ MediaAsset loadMedia(const QString& path) {
         const auto rate = av_guess_frame_rate(input.format, stream, nullptr);
         if (rate.num && rate.den) asset.fps = av_q2d(rate);
     }
-    const int audio = av_find_best_stream(input.format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
-    if (audio >= 0) {
-        input.decoder(audio);
-        if (input.codec->ch_layout.nb_channels > 2)
-            throw std::runtime_error("Import mono or stereo stems separately; multichannel source files are not supported yet");
-        detail::AudioCache prepared(asset.path);
-        asset.audio = prepared.reuse(input.codec->ch_layout.nb_channels == 1);
-        if (!asset.audio) {
-            auto data = std::make_shared<AudioData>(); data->mono = input.codec->ch_layout.nb_channels == 1;
-            QTemporaryFile cache(prepared.temporaryTemplate());
-            if (!cache.open()) throw std::runtime_error("Cannot create audio cache: " + cache.errorString().toStdString());
-            Frame total = 0;
-            std::vector<float> scratch;
-            // Any one-channel layout (including front-left) is centre mono; the transport pans it.
-            AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO, mono = AV_CHANNEL_LAYOUT_MONO;
-            checked(swr_alloc_set_opts2(&input.resampler, &stereo, AV_SAMPLE_FMT_FLT, sampleRate,
-                data->mono ? &mono : &input.codec->ch_layout, input.codec->sample_fmt, input.codec->sample_rate, 0, nullptr), "Configure resampling");
-            checked(swr_init(input.resampler), "Initialize resampling");
-            bool firstFrame = true;
-            const double origin = mediaOrigin(input.format);
-            Frame trimAtStart = 0;
-            auto convert = [&](AVFrame* frame) {
-                if (firstFrame && frame) {
-                    firstFrame = false;
-                    const auto pts = frame->best_effort_timestamp;
-                    if (pts != AV_NOPTS_VALUE) {
-                        const double startTime = pts * av_q2d(input.format->streams[audio]->time_base) - origin;
-                        if (!std::isfinite(startTime) || std::abs(startTime) > maxSeconds) throw std::runtime_error("Invalid audio stream start time");
-                        const Frame start = frames(startTime);
-                        if (start > 0) {
-                            // A sparse zero-filled prefix preserves embedded A/V offsets
-                            // without allocating leading silence in RAM.
-                            total = start;
-                            if (!cache.resize(total * 2 * sizeof(float)) || !cache.seek(total * 2 * sizeof(float)))
-                                throw std::runtime_error("Cannot prepare audio start offset: " + cache.errorString().toStdString());
-                            data->peaks.resize(static_cast<std::size_t>((total + AudioData::peakStride - 1) / AudioData::peakStride), 0.f);
-                        } else trimAtStart = -start;
-                    }
-                }
-                const int samples = frame ? frame->nb_samples : 0;
-                const int capacity = static_cast<int>(av_rescale_rnd(swr_get_delay(input.resampler, input.codec->sample_rate) + samples,
-                    sampleRate, input.codec->sample_rate, AV_ROUND_UP));
-                if (capacity <= 0) return 0;
-                scratch.resize(static_cast<std::size_t>(capacity) * 2);
-                auto* dest = reinterpret_cast<unsigned char*>(scratch.data());
-                const int written = swr_convert(input.resampler, &dest, capacity, frame ? const_cast<const unsigned char**>(frame->extended_data) : nullptr, samples);
-                checked(written, "Resample audio");
-                // FFmpeg's default mono -> stereo downmix applies -3 dB. Undo it;
-                // the transport applies constant-power mono pan exactly once.
-                if (data->mono) for (int i = 0; i < written * 2; ++i) scratch[i] *= 1.41421356237f;
-                const Frame skip = std::min(trimAtStart, static_cast<Frame>(written));
-                trimAtStart -= skip;
-                const Frame kept = written - skip;
-                if (kept > maxFrame - total) throw std::runtime_error("Audio duration exceeds representable frame timing");
-                const qint64 bytes = kept * 2 * sizeof(float);
-                if (bytes && cache.write(reinterpret_cast<const char*>(scratch.data() + skip * 2), bytes) != bytes)
-                    throw std::runtime_error("Cannot write audio cache (check available disk space): " + cache.errorString().toStdString());
-                data->peaks.resize(static_cast<std::size_t>((total + kept + AudioData::peakStride - 1) / AudioData::peakStride), 0.f);
-                for (Frame i = 0; i < kept; ++i) {
-                    auto& peak = data->peaks[static_cast<std::size_t>((total + i) / AudioData::peakStride)];
-                    peak = std::max(peak, std::max(std::abs(scratch[(skip + i) * 2]), std::abs(scratch[(skip + i) * 2 + 1])));
-                }
-                total += kept;
-                return written;
-            };
-            auto receive = [&] {
-                for (;;) {
-                    int result = avcodec_receive_frame(input.codec, input.frame);
-                    if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) break;
-                    checked(result, "Decode audio"); convert(input.frame); av_frame_unref(input.frame);
-                }
-            };
-            int readResult = 0;
-            while ((readResult = av_read_frame(input.format, input.packet)) >= 0) {
-                if (input.packet->stream_index == audio) {
-                    checked(avcodec_send_packet(input.codec, input.packet), "Feed audio decoder"); receive();
-                }
-                av_packet_unref(input.packet);
-            }
-            if (readResult != AVERROR_EOF) checked(readResult, "Read audio packets");
-            checked(avcodec_send_packet(input.codec, nullptr), "Flush audio decoder"); receive();
-            while (convert(nullptr) > 0) {}
-            if (asset.video && (!std::isfinite(asset.duration) || asset.duration <= 0 || asset.duration > maxSeconds))
-                throw std::runtime_error("Media needs a finite, representable duration");
-            data->storage = prepared.publish(cache, *data, total);
-            asset.audio = data;
-        }
+    if (av_find_best_stream(input.format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0) >= 0) {
+        if (asset.video && (!std::isfinite(asset.duration) || asset.duration <= 0 || asset.duration > maxSeconds))
+            throw std::runtime_error("Media needs a finite, representable duration");
+        asset.audio = loadAudio(asset.path);
         if (!asset.video) asset.duration = seconds(asset.audio->length());
     }
     if (!asset.video && !asset.audio) throw std::runtime_error("File contains no supported audio, video, or still image");

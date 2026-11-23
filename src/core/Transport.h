@@ -13,6 +13,10 @@ inline const char* stateName(State state) noexcept {
     return state == State::Playing ? "playing" : state == State::Held ? "held" : state == State::Paused ? "paused" : state == State::Ended ? "ended" : "stopped";
 }
 enum class Action { Play, Pause, Seek, StopAll };
+// When a disk or decode read misses the callback: Freeze holds show time until every source is
+// ready, so tracks, cues and holds stay aligned. Gap keeps show time running and silences only
+// the late voices, so the show stays in step with outside clocks (a band, timecode, video).
+enum class LateAudio { Freeze, Gap };
 struct Command { Action action; Frame position = 0; };
 struct MidiEvent { int marker = -1; Frame time = 0; std::uint64_t epoch = 0; };
 
@@ -38,7 +42,12 @@ public:
     float peak() const noexcept { return publishedPeak_.load(); }
     bool clipped() const noexcept { return clipped_.load(); }
     bool eventOverflow() const noexcept { return overflow_.load(); }
+    // Safe at any time; applies from the next callback.
+    void setLateAudio(LateAudio policy) noexcept { lateAudio_.store(policy); }
+    LateAudio lateAudio() const noexcept { return lateAudio_.load(); }
     unsigned bufferWaits() const noexcept { return bufferWaits_.load(); }
+    // Callbacks in which Gap silenced a late voice.
+    unsigned audioGaps() const noexcept { return audioGaps_.load(); }
     unsigned readRetries() const noexcept { return readRetries_.load(); }
     bool audioReadFailed() const noexcept { return audioReadFailed_.load(); }
     std::uint64_t epoch() const noexcept { return epoch_.load(std::memory_order_acquire); }
@@ -49,7 +58,7 @@ private:
     // are recomputed only when pan changes.
     struct Voice {
         VoiceState state = VoiceState::Dormant; Frame source = 0, at = 0, next = 0; float left = 0, right = 0;
-        bool ready = false, audible = false; int attack = 0;
+        bool ready = false, audible = false, missed = false; int attack = 0;
         std::size_t volumeKey = 0, balanceKey = 0; double pan = 2, leftGain = 1, rightGain = 1, gain = 0;
     };
     // A cut voice keeps reading its source past the cut, fading from its last gains to silence.
@@ -64,7 +73,8 @@ private:
     std::vector<std::unique_ptr<AudioBuffer>> buffers_;
     std::thread audioWorker_;
     std::atomic<bool> audioStop_{true}, audioReadFailed_{false};
-    std::atomic<unsigned> bufferWaits_{0}, readRetries_{0};
+    std::atomic<unsigned> bufferWaits_{0}, readRetries_{0}, audioGaps_{0};
+    std::atomic<LateAudio> lateAudio_{LateAudio::Freeze};
     Queue<Command, 128> commands_;
     DynamicQueue<MidiEvent> midi_;
     Frame position_ = 0;

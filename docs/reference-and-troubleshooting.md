@@ -87,7 +87,8 @@ The bottom-right readout summarizes engine status and turns **orange** whenever 
 | **MIDI reconnects on Play** | A destination is remembered and will reconnect automatically on **Play**—check that it's plugged in/running. |
 | **CLIPPING** | Summed audio exceeded full scale (or hit invalid samples) and was clamped. Lower gains and click **Stop All** to clear. |
 | **underruns** | The audio driver missed a buffer deadline. Try a larger buffer size and check CPU/driver load. |
-| **audio waits** | Disk-backed audio wasn't ready in time; audio and show time waited together instead of skipping frames. Check disk speed and concurrent voice count. |
+| **audio waits** | Audio wasn't ready in time while **If audio is late** is set to **Freeze**; audio and show time waited together instead of skipping frames. Choose **Prepared cache** audio sources, check disk speed, and reduce simultaneous sources. |
+| **audio gaps** | Audio wasn't ready in time while **If audio is late** is set to **Gap**; show time kept running while the late sound dropped out briefly and faded back in. Choose **Prepared cache** audio sources, check disk speed, and reduce simultaneous sources. |
 | **disk retries** | Source file reads had to retry. Check drive stability, cables, or other apps locking the files. |
 | **video waits** | A video frame decoded late; the previous frame stayed on screen. Lower decode/layer load and rehearse with final media. |
 
@@ -107,6 +108,7 @@ The bottom-right readout summarizes engine status and turns **orange** whenever 
 | **No sound from Guide or Click** | Both tracks start with outputs **Off**. Route them to physical outputs, open enough channels in Outputs, check mute/gain/clip timing, and verify your cabling. |
 | **Stereo audio loses one side on a mono feed** | With one connected leg, stereo sums automatically as `(L + R) / 2`. Check that the other leg is truly **Off**, and check whether your stereo file has phase-inverted channels canceling out. |
 | **Audio or video keeps playing after Pause or at a hold** | Normal behavior for **async** tracks (**Keep playing through pauses / holds**). Check the `async playing` indicator and click **Stop All** to silence everything. |
+| **Status bar counts audio waits or gaps** | A source was not read in time. Choose **Prepared cache** audio sources in **Outputs**, use fast local storage, and reduce simultaneous long sources. **Freeze** counts waits; **Gap** counts gaps. |
 | **Audio crackles or video stutters** | Increase the audio buffer size in Outputs, reduce overlapping layers/voices, run media from fast local storage, and inspect the health counters on the actual show PC. |
 | **Audio source changed or unreadable** | Restore any disconnected drive/file and retry **Play**. If the file was modified on disk or its cache was damaged, reopen the show to reload/rebuild and rehearse again. |
 
@@ -154,9 +156,11 @@ The bottom-right readout summarizes engine status and turns **orange** whenever 
 
 ## Media preparation and audio cache
 
-- **Direct streaming WAVs:** 48 kHz mono or stereo PCM WAV files (8/16/24/32-bit integer or 32-bit float, including standard extensible headers) stream directly from disk with zero conversion.
-- **Converted audio cache:** Other formats and sample rates convert automatically into a reusable 48 kHz stereo float PCM cache (~**1.29 GiB per hour of audio**). Multichannel source files must be split into separate mono/stereo stems beforehand.
-- **Cache location and cleanup:** Caches live locally inside Qt's application cache folder under `audio-pcm-v1-le` (or `audio-pcm-v1-be`), are never packed into `.savpack` files, and are reused automatically even when an identical file moves or arrives in a package. SimpleAVShow trims old unused caches on startup and after conversions (targeting at most 20 GiB, or less on tighter drives). With the app closed, you can safely delete that cache folder to reclaim disk space—files that need conversion will simply rebuild next time you open them.
+- **Direct streaming WAVs:** 48 kHz mono or stereo PCM WAV files (8/16/24/32-bit integer or 32-bit float, including standard extensible headers) always stream directly from their source with zero conversion.
+- **Other formats and sample rates:** Controlled by **Audio sources** in **Outputs** (see [Playback reliability](audio-and-outputs.md#playback-reliability)). Multichannel source files must still be split into separate mono/stereo stems beforehand.
+  - **Stream from media files:** Decodes the original file during playback. Import still decodes each source once to draw its waveform and measure its exact length, then keeps only a small waveform file (~**30 KB per source hour**). Originals must stay available while the show plays.
+  - **Prepared cache:** Decodes into a reusable 48 kHz stereo float PCM cache (~**1.29 GiB per source hour**).
+- **Cache location and cleanup:** Caches and waveform files share Qt's application cache directory under `audio-pcm-v1-le` (or `audio-pcm-v1-be`). They are local, never packed into `.savpack` files, and reused automatically when identical source content moves or arrives in a package (even a reused prepared cache can take time to validate for large files; missing or damaged entries rebuild). SimpleAVShow trims old unused caches on startup and after conversions (targeting at most 20 GiB, or less on tighter drives) while retaining in-use entries. With the app closed, you can safely remove that cache folder to reclaim disk space—sources needing preparation will prepare again next time you open them. Keep your originals and saved projects.
 - **Memory usage:** Playback streams through bounded read-ahead buffers instead of loading entire audio files into RAM. There is no hard cap on audio bytes, tracks, clips, cues, or 24-hour duration—practical limits depend on your show computer's disk speed, memory, simultaneous voice count, and video decoding load.
 
 ---

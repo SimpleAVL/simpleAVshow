@@ -45,6 +45,11 @@ public:
     QStringList missingMedia() const;
     // Problems worth fixing before a performance; empty when the show is ready.
     QStringList preflight();
+    // Playback preferences for this machine, remembered across sessions.
+    void setLateAudio(LateAudio policy);
+    void setAudioPreparation(AudioPreparation preparation);
+    // Swaps reloaded audio into the open show (after a preparation change) without an undo step.
+    bool replaceAudio(const QMap<QString, std::shared_ptr<const AudioData>>& audio);
     QString midiDestination() const { return midiName_; }
     void setShowMode(bool enabled);
     QImage compose();

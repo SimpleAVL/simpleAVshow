@@ -19,6 +19,12 @@ struct MediaAsset {
     QImage still;
     std::shared_ptr<const AudioData> audio;
 };
+// How compressed audio (anything but direct 48 kHz PCM WAV) is made playable. Stream imports
+// quickly and decodes the original file during playback; Prepared decodes once into a PCM disk
+// cache, so playback only reads samples. Both place every sample at the same show frame.
+enum class AudioPreparation { Stream, Prepared };
+void setAudioPreparation(AudioPreparation preparation) noexcept;
+AudioPreparation audioPreparation() noexcept;
 MediaAsset loadMedia(const QString& path);
 
 // One worker per video clip. No decoding or disk access on the audio thread.

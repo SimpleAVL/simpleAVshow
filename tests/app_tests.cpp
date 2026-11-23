@@ -189,7 +189,8 @@ private slots:
     void cleanupTestCase() {
         QVERIFY(QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)).removeRecursively());
     }
-    void init() { QSettings().clear(); }
+    // Most media tests cover the prepared cache; streaming tests opt in.
+    void init() { QSettings().clear(); QSettings().setValue("audio/sources", "prepared"); setAudioPreparation(AudioPreparation::Prepared); }
     void audioSelectionRestoresByNameWithoutFallback() {
         const std::vector<DeviceDescription> devices = {{17, "Show interface", 8, false}, {42, "Speakers", 2, true}};
         auto selected = playbackDevice(devices, {}); QVERIFY(selected); QCOMPARE(selected->id, 42u);
@@ -581,6 +582,21 @@ private slots:
         });
         window.findChild<QPushButton*>("outputSettingsButton")->click();
         QVERIFY(audioMissing); QVERIFY(midiMissing);
+    }
+    void playbackSettingsInOutputs() {
+        QSettings().setValue("audio/late", "gap");
+        MainWindow window; window.show(); bool shown = false;
+        QTimer::singleShot(0, &window, [&] {
+            auto* dialog = window.findChild<QDialog*>("outputSettingsDialog"); if (!dialog) return;
+            auto* sources = dialog->findChild<QComboBox*>("audioSourcePreparation");
+            auto* late = dialog->findChild<QComboBox*>("lateAudioPolicy");
+            shown = sources && late && sources->currentData().toInt() == static_cast<int>(AudioPreparation::Prepared) &&
+                late->currentData().toInt() == static_cast<int>(LateAudio::Gap);
+            if (late) { late->setCurrentIndex(late->findData(static_cast<int>(LateAudio::Freeze))); emit late->activated(late->currentIndex()); }
+            dialog->reject();
+        });
+        window.findChild<QPushButton*>("outputSettingsButton")->click();
+        QVERIFY(shown); QCOMPARE(QSettings().value("audio/late").toString(), QString("freeze"));
     }
     void demoSaveReloadAndDecodedAudio() {
         QTemporaryDir dir; QVERIFY(dir.isValid());
@@ -1403,6 +1419,91 @@ private slots:
         const auto fresh = loadMedia(source); QCOMPARE(sampleAt(*fresh.audio, fresh.audio->length() - 1), .5f);
         QCOMPARE(caches.entryList({"*.wave"}, QDir::Files).size(), before + 1);
     }
+    void streamedAudioMatchesPreparedCache_data() {
+        QTest::addColumn<QStringList>("encode");
+        QTest::newRow("flac-44k-stereo") << QStringList{"-ar", "44100", "-c:a", "flac", "x.flac"};
+        QTest::newRow("wav-44k-resampled") << QStringList{"-ar", "44100", "-c:a", "pcm_s16le", "x.wav"};
+        QTest::newRow("mp3-44k-mono") << QStringList{"-ar", "44100", "-ac", "1", "-c:a", "libmp3lame", "-b:a", "192k", "x.mp3"};
+        // AAC noise substitution draws from a generator whose state depends on where decoding began, so
+        // noise bands differ (inaudibly) after any seek; without it, placement must be exact.
+        QTest::newRow("aac-48k-m4a") << QStringList{"-ar", "48000", "-c:a", "aac", "-aac_pns", "0", "-b:a", "192k", "x.m4a"};
+        QTest::newRow("opus-ogg") << QStringList{"-c:a", "libopus", "-b:a", "128k", "x.opus"};
+        QTest::newRow("vorbis-32k") << QStringList{"-ar", "32000", "-c:a", "libvorbis", "x.ogg"};
+    }
+    void streamedAudioMatchesPreparedCache() {
+        QFETCH(QStringList, encode);
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
+        QTemporaryDir dir; const QString file = dir.filePath(encode.takeLast()); QProcess process;
+        // A sweep with noise exercises every band of the codec and resampler.
+        process.start(ffmpeg, QStringList{"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+            "aevalsrc=0.4*sin(2*PI*(100+800*t)*t)+0.1*random(0)|0.3*sin(2*PI*660*t)+0.1*random(1):s=48000:d=12"} + encode + QStringList{file});
+        QVERIFY(process.waitForFinished(30000));
+        if (process.exitCode() != 0) QSKIP(qPrintable("encoder unavailable: " + QString::fromUtf8(process.readAllStandardError())));
+        const auto prepared = loadMedia(file).audio; QVERIFY(prepared); QVERIFY(!prepared->storage->decodes());
+        setAudioPreparation(AudioPreparation::Stream);
+        QDir caches(detail::audioCacheDirectory()); const auto pcm = caches.entryList({"*.pcm"}, QDir::Files);
+        const auto streamed = loadMedia(file).audio; QVERIFY(streamed); QVERIFY(streamed->storage->decodes());
+        QCOMPARE(caches.entryList({"*.pcm"}, QDir::Files), pcm); // Streaming writes no PCM.
+        QCOMPARE(streamed->length(), prepared->length()); QCOMPARE(streamed->mono, prepared->mono); QCOMPARE(streamed->peaks, prepared->peaks);
+        // Out of order: sequential continuation, forward skips, seeks back, and more places than decoders.
+        const Frame length = streamed->length();
+        const std::vector<Frame> starts{0, 1000, 1512, 8191, frames(3) + 7, frames(7) + 12345, 400, frames(9), frames(2), frames(5) + 1, frames(11), length - 600, 30};
+        float worst = 0;
+        for (const Frame start : starts) {
+            const auto count = static_cast<std::size_t>(std::min<Frame>(512, length - start));
+            std::vector<float> a(count * 2), b(count * 2);
+            prepared->storage->read(start, a.data(), count); streamed->storage->read(start, b.data(), count);
+            for (std::size_t i = 0; i < a.size(); ++i) worst = std::max(worst, std::abs(a[i] - b[i]));
+        }
+        // Same decoder, pre-roll and resampling phase: seeked output is bit-identical.
+        QCOMPARE(worst, 0.f);
+        // Reopening reuses the waveform summary.
+        QCOMPARE(loadMedia(file).audio->peaks, streamed->peaks);
+        QCOMPARE(caches.entryList({"*.stream"}, QDir::Files).isEmpty(), false);
+    }
+    void streamedAudioPlaysAndDetectsChanges() {
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; const auto path = dir.filePath("resample.wav");
+        writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 * 3));
+        const auto asset = loadMedia(path); QVERIFY(asset.audio->storage->decodes()); QCOMPARE(asset.audio->length(), frames(3));
+        auto show = std::make_shared<Show>(); show->duration = asset.audio->length();
+        show->tracks.push_back({"audio", "Audio", false, false, false, 1, 0, 0, 1});
+        Clip clip; clip.audio = asset.audio; clip.duration = show->duration; show->clips.push_back(clip);
+        Transport transport; transport.configure(show); QVERIFY(!transport.audioReadFailed()); transport.command({Action::Play});
+        std::vector<float> out(4000); transport.render(out.data(), 2000, 2);
+        QCOMPARE(transport.bufferWaits(), 0u);
+        for (Frame i = 0; i < 2000; ++i) QCOMPARE(out[i * 2], std::clamp(sampleAt(*asset.audio, i), -1.f, 1.f));
+        // A rewritten source is a change, a missing one a retryable read failure.
+        const auto time = QFileInfo(path).lastModified();
+        writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 * 2)); setModified(path, time.addSecs(5));
+        float sample[2]; QVERIFY_THROWS_EXCEPTION(AudioSourceChanged, asset.audio->storage->read(10, sample, 1));
+        QVERIFY(QFile::remove(path));
+        try { asset.audio->storage->read(10, sample, 1); QFAIL("missing source read"); }
+        catch (const AudioSourceChanged&) { QFAIL("a missing source can come back"); } catch (const std::runtime_error&) {}
+    }
+    void playbackPreferencesPersistAndSwapAudioWithoutUndo() {
+        QSettings().setValue("audio/sources", "stream"); QSettings().setValue("audio/late", "gap");
+        {
+            Controller c; QCOMPARE(audioPreparation(), AudioPreparation::Stream); QCOMPARE(c.transport.lateAudio(), LateAudio::Gap);
+            c.setLateAudio(LateAudio::Freeze); c.setAudioPreparation(AudioPreparation::Prepared);
+        }
+        QCOMPARE(QSettings().value("audio/late").toString(), QString("freeze")); QCOMPARE(QSettings().value("audio/sources").toString(), QString("prepared"));
+        QTemporaryDir dir; const auto path = dir.filePath("resample.wav"); writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 * 2));
+        setAudioPreparation(AudioPreparation::Stream); auto streamed = loadMedia(path);
+        setAudioPreparation(AudioPreparation::Prepared); const auto prepared = loadMedia(path).audio;
+        Controller c; auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}};
+        project.assets.insert(streamed.id, streamed);
+        Clip clip; clip.id = "a"; clip.assetId = streamed.id.toStdString(); clip.audio = streamed.audio; clip.duration = streamed.audio->length(); project.show.clips.push_back(clip);
+        c.replace(project);
+        const auto streaming = [&] { return c.preflight().filter("Audio streams from the original media files").size() == 1; };
+        QVERIFY(streaming());
+        QVERIFY(c.edit([](Project& p) { p.show.clips[0].gain = .5; }));
+        QVERIFY(c.replaceAudio({{streamed.id, prepared}}));
+        QVERIFY(!streaming()); QCOMPARE(c.project.show.clips[0].audio, prepared);
+        // Swapping storage is not an edit, and undo keeps the chosen preparation.
+        c.undo(); QCOMPARE(c.project.show.clips[0].gain, 1.); QCOMPARE(c.project.show.clips[0].audio, prepared);
+    }
     void diskAudioCacheHasBoundedMemoryAndPersists() {
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
         QTemporaryDir dir; const QString file = dir.filePath("long-silence.flac"); QProcess process;
@@ -1467,6 +1568,8 @@ private slots:
         QTemporaryDir dir; const QString file = dir.filePath("offset.mkv"); QProcess process;
         process.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=red:s=160x90:r=24:d=2", "-itsoffset", "0.5", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-map", "0:v", "-map", "1:a", "-c:v", "ffv1", "-c:a", "pcm_s16le", file});
         QVERIFY(process.waitForFinished(15000)); QCOMPARE(process.exitCode(), 0);
+        for (const auto preparation : {AudioPreparation::Prepared, AudioPreparation::Stream}) {
+        setAudioPreparation(preparation);
         const auto asset = loadMedia(file); QVERIFY(asset.audio); QCOMPARE(asset.audio->length(), frames(1.5));
         for (Frame i = 0; i < frames(.5); ++i) QCOMPARE(sampleAt(*asset.audio, i), 0.f);
         float peak = 0; for (Frame i = frames(.5); i < frames(.6); ++i) peak = std::max(peak, std::abs(sampleAt(*asset.audio, i))); QVERIFY(peak > .1);
@@ -1478,6 +1581,7 @@ private slots:
         QCOMPARE(transport.bufferWaits(), 0u);
         for (Frame i = 0; i < frames(.6); ++i) {
             QCOMPARE(out[i * 2], sampleAt(*asset.audio, i)); QCOMPARE(out[i * 2 + 1], 0.f);
+        }
         }
     }
     void timelineTrimStopsAtNonLoopingSourceEnd() {

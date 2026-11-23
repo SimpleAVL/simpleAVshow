@@ -120,7 +120,7 @@ void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
     locate(position_);
     state_ = State::Stopped; heldMarker_ = -1;
     epoch_.fetch_add(1);
-    clipped_.store(false); overflow_.store(false); bufferWaits_.store(0); readRetries_.store(0);
+    clipped_.store(false); overflow_.store(false); bufferWaits_.store(0); readRetries_.store(0); audioGaps_.store(0);
     if (std::any_of(buffers_.begin(), buffers_.end(), [](const auto& buffer) { return bool(buffer); })) {
         audioStop_.store(false);
         audioWorker_ = std::thread([this] {
@@ -181,7 +181,8 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
     if (!show_) return;
     Command command;
     while (commands_.pop(command)) apply(command);
-    float peak = 0; bool waiting = false;
+    float peak = 0; bool waiting = false, gapped = false;
+    const bool gap = lateAudio_.load(std::memory_order_relaxed) == LateAudio::Gap;
     for (unsigned f = 0; f < count; ++f) {
         if (waiting && releasing_.empty()) break; // Remaining device samples stay silent; retry at the same show/source time.
         float* const frame = output ? output + static_cast<std::size_t>(f) * channels : nullptr;
@@ -204,8 +205,9 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 }
             }
             bool ready = true;
-            // Resolve all sources before mixing: a cache miss freezes the whole
-            // sample clock, so tracks remain aligned and no source frames are lost.
+            // Resolve all sources before mixing. Under Freeze a miss stops the whole sample
+            // clock, so tracks remain aligned and no source frames are lost; under Gap only
+            // the late voice falls silent while show time and async cursors keep moving.
             for (std::size_t cursor = 0; cursor < active_.size();) {
                 const auto i = active_[cursor]; const auto& clip = show_->clips[i]; const auto& track = show_->tracks[clip.track]; auto& voice = voices_[i];
                 voice.ready = false;
@@ -234,11 +236,16 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 if (track.async) voice.source = source; // Keep loops' cursors bounded, including long holds.
                 if (track.muted || track.visual) continue;
                 if (buffers_[i]) {
-                    if (!buffers_[i]->sample(source, voice.left, voice.right)) { ready = false; continue; }
+                    if (!buffers_[i]->sample(source, voice.left, voice.right)) {
+                        if (gap) { voice.missed = gapped = true; continue; }
+                        ready = false; continue;
+                    }
                 } else {
                     voice.left = clip.audio->samples[source * 2]; voice.right = clip.audio->samples[source * 2 + 1];
                 }
-                if (!voice.audible && !track.async && source != clip.offset) voice.attack = fadeFrames; // Entering mid-source fades in.
+                // Entering mid-source, or returning after a gap, fades in.
+                if (!voice.audible && ((!track.async && source != clip.offset) || voice.missed)) voice.attack = fadeFrames;
+                voice.missed = false;
                 voice.at = source; voice.ready = true;
             }
             if (!ready) { bufferWaits_.fetch_add(1, std::memory_order_relaxed); waiting = true; }
@@ -288,6 +295,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
         }
         if (!waiting && state_ == State::Playing) ++position_;
     }
+    if (gapped) audioGaps_.fetch_add(1, std::memory_order_relaxed);
     publish(peak);
 }
 void Transport::publish(float peak) noexcept {
