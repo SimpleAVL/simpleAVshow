@@ -13,7 +13,7 @@ SimpleAVShow includes both a built-in **Agent chat** panel powered by the **Agen
 The quickest way to collaborate with an AI agent is directly inside SimpleAVShow:
 
 1. Click **Agent chat** in the top bar (or choose **Project → Agent chat**, `Ctrl+Shift+A`).
-2. Pick an installed ACP-compatible agent from the dropdown — such as **OpenCode** (`opencode acp`), **Claude Code (ACP)** (`claude-agent-acp`), **Codex (ACP)** (`codex-acp`), **Gemini CLI** (`gemini --experimental-acp`), **Pi** (`pi-acp`), or **Custom ACP command…**.
+2. Pick an installed ACP-compatible agent from the dropdown — such as **OpenCode** (`opencode acp`), **Claude Code (ACP)** (`claude-agent-acp`), **Codex (ACP)** (`codex-acp`), **Antigravity (agy)** (`agy acp`), **Pi** (`pi-acp`), or **Custom ACP command…**.
 3. Click **Connect**. SimpleAVShow automatically starts its local MCP server and attaches it to the agent session—no JSON configuration or bearer tokens to copy. *(For agents that only support stdio MCP servers, SimpleAVShow automatically bridges the connection using its built-in `--mcp-proxy` mode.)*
 4. Ask the agent to inspect the show, run preflight checks, preview a frame, or check **Allow show edits** to let it build and modify the show together with you.
 5. Any permission requests from the agent appear directly as **Allow / Reject / Cancel** cards above the prompt box. Click **Undo edit** (or **Edit → Undo**) at any time to revert an agent batch in one step.

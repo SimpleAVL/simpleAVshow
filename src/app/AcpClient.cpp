@@ -63,7 +63,7 @@ std::vector<AcpAgentPreset> defaultAcpPresets() {
         {"opencode", "OpenCode", "opencode", {"acp"}, "Install OpenCode from opencode.ai and run `opencode auth` once."},
         {"claude", "Claude Code (ACP)", "claude-agent-acp", {}, "Install with `npm install -g @zed-industries/claude-agent-acp`."},
         {"codex", "Codex (ACP)", "codex-acp", {}, "Install with `npm install -g @zed-industries/codex-acp`."},
-        {"gemini", "Gemini CLI", "gemini", {"--experimental-acp"}, "Install with `npm install -g @google/gemini-cli`."},
+        {"antigravity", "Antigravity (agy)", "agy", {"acp"}, "Install Google Antigravity CLI (`agy`) and run `agy acp --login` once."},
         {"pi", "Pi (pi-acp)", "pi-acp", {}, "Install with `npm install -g pi-acp` alongside Pi."},
         {"custom", "Custom ACP command…", {}, {}, "Enter any ACP-compatible executable and arguments (e.g. `my-agent acp`)."}
     };

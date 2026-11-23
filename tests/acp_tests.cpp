@@ -32,6 +32,16 @@ private slots:
     void commandLineSplittingAndPresets() {
         const auto presets = defaultAcpPresets();
         QVERIFY(presets.size() >= 6);
+        bool hasAntigravity = false;
+        for (const auto& p : presets) {
+            QVERIFY(p.id != "gemini");
+            if (p.id == "antigravity") {
+                hasAntigravity = true;
+                QCOMPARE(p.program, QString("agy"));
+                QCOMPARE(p.args, QStringList({"acp"}));
+            }
+        }
+        QVERIFY(hasAntigravity);
         QCOMPARE(splitCommandLine("opencode acp"), QStringList({"opencode", "acp"}));
         QCOMPARE(splitCommandLine("\"/path/with spaces/agent\" --flag 'hello world'"),
                  QStringList({"/path/with spaces/agent", "--flag", "hello world"}));

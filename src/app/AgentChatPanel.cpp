@@ -632,7 +632,7 @@ void AgentChatPanel::renderTranscript() {
     if (entries_.empty()) {
         html += "<div style='color:#8fa6c4;padding:12px 8px;line-height:1.45;'>"
                 "<div style='font-weight:600;color:#c7daf5;margin-bottom:6px;'>Co-edit this show with an ACP agent</div>"
-                "<div>Choose an installed ACP agent above (such as OpenCode, Claude Code, Codex, Gemini CLI, or Pi) and click <b>Connect</b>. "
+                "<div>Choose an installed ACP agent above (such as OpenCode, Claude Code, Codex, Antigravity, or Pi) and click <b>Connect</b>. "
                 "SimpleAVShow automatically connects its local MCP tools—no JSON or bearer tokens to copy.</div>"
                 "<div style='margin-top:8px;color:#7890b0;'>Starts in read-only mode unless <b>Allow show edits</b> is checked. "
                 "Every agent edit batch can be reversed with a single Undo.</div>"
