@@ -20,6 +20,7 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(QWidget* parent = nullptr);
+    ~MainWindow() override;
     Controller& controller() { return c_; }
     McpServer& mcpServer() { return mcp_; }
     RemoteServer& remoteServer() { return remote_; }

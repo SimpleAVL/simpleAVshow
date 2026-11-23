@@ -342,11 +342,11 @@ void VideoReader::run() {
     }
 }
 
-QImage videoFrameAt(const QString& path, double time, QSize maximum) {
+QImage videoFrameAt(const QString& path, double time, QSize maximum, QString* error) {
     try {
         Input input; input.open(path);
         const int index = av_find_best_stream(input.format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-        if (index < 0) return {};
+        if (index < 0) { if (error) *error = "No video stream found"; return {}; }
         input.decoder(index);
         auto* stream = input.format->streams[index];
         const double start = mediaOrigin(input.format);
@@ -357,13 +357,13 @@ QImage videoFrameAt(const QString& path, double time, QSize maximum) {
         avcodec_flush_buffers(input.codec);
         const AVRational frameRate = av_guess_frame_rate(input.format, stream, nullptr);
         const double rate = frameRate.num && frameRate.den ? av_q2d(frameRate) : 24;
-        QImage best; double last = -1; int decoded = 0;
+        QImage best; double last = -1; int decoded = 0; bool reached = false;
         while (decoded < 240) {
             int result = avcodec_receive_frame(input.codec, input.frame);
-            if (result == AVERROR_EOF) break;
+            if (result == AVERROR_EOF) { reached = !best.isNull(); break; }
             if (result == AVERROR(EAGAIN)) {
                 while ((result = av_read_frame(input.format, input.packet)) >= 0 && input.packet->stream_index != index) av_packet_unref(input.packet);
-                if (result == AVERROR_EOF) { if (avcodec_send_packet(input.codec, nullptr) < 0) break; }
+                if (result == AVERROR_EOF) { if (avcodec_send_packet(input.codec, nullptr) < 0) { reached = !best.isNull(); break; } }
                 else if (result < 0) break;
                 else { result = avcodec_send_packet(input.codec, input.packet); av_packet_unref(input.packet); if (result < 0) break; }
                 continue;
@@ -383,10 +383,20 @@ QImage videoFrameAt(const QString& path, double time, QSize maximum) {
                 if (frameTime <= target + .0001 || best.isNull()) best = std::move(image);
             }
             av_frame_unref(input.frame);
-            if (frameTime >= target - .0001) break;
+            if (frameTime >= target - .0001) { reached = true; break; }
+        }
+        if (!reached || best.isNull()) {
+            if (error) *error = decoded >= 240
+                ? QString("Could not reach video frame at %1 s within preview decode budget").arg(target, 0, 'f', 2)
+                : QString("Could not decode video frame at %1 s").arg(target, 0, 'f', 2);
+            return {};
         }
         return best;
+    } catch (const std::exception& e) {
+        if (error) *error = QString::fromUtf8(e.what());
+        return {};
     } catch (...) {
+        if (error) *error = "Unexpected video decode failure";
         return {};
     }
 }

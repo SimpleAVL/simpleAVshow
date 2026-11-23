@@ -45,6 +45,11 @@ private slots:
         QCOMPARE(splitCommandLine("opencode acp"), QStringList({"opencode", "acp"}));
         QCOMPARE(splitCommandLine("\"/path/with spaces/agent\" --flag 'hello world'"),
                  QStringList({"/path/with spaces/agent", "--flag", "hello world"}));
+        // Windows paths with backslashes must stay intact both quoted and unquoted.
+        QCOMPARE(splitCommandLine("\"C:\\Program Files\\Agent\\agent.exe\" --cwd C:\\Shows\\Act1"),
+                 QStringList({"C:\\Program Files\\Agent\\agent.exe", "--cwd", "C:\\Shows\\Act1"}));
+        QCOMPARE(splitCommandLine("agent --msg \"say \\\"hi\\\"\""),
+                 QStringList({"agent", "--msg", "say \"hi\""}));
         QCOMPARE(splitCommandLine("  "), QStringList());
     }
 
@@ -121,30 +126,52 @@ private slots:
         auto sendLine = [&](const QJsonObject& obj) {
             proxy.write(QJsonDocument(obj).toJson(QJsonDocument::Compact) + "\n");
         };
+        auto readLineJson = [&](QByteArray& buffer) -> QJsonObject {
+            QElapsedTimer timer; timer.start();
+            while (timer.elapsed() < 8000) {
+                const qsizetype nl = buffer.indexOf('\n');
+                if (nl >= 0) {
+                    const QByteArray line = buffer.left(nl).trimmed();
+                    buffer.remove(0, nl + 1);
+                    if (!line.isEmpty()) return QJsonDocument::fromJson(line).object();
+                }
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                buffer.append(proxy.readAllStandardOutput());
+            }
+            return {};
+        };
+
+        QByteArray outBuf;
+        // Wait for initialize before issuing subsequent calls, then match concurrent replies by JSON-RPC id.
         sendLine({{"jsonrpc", "2.0"}, {"id", 1}, {"method", "initialize"}, {"params", QJsonObject{
             {"protocolVersion", "2025-11-25"},
             {"clientInfo", QJsonObject{{"name", "proxy-test"}, {"version", "1"}}},
             {"capabilities", QJsonObject{}}
         }}});
+        const auto initResp = readLineJson(outBuf);
+        QCOMPARE(initResp["id"].toInt(), 1);
+        QCOMPARE(initResp["result"].toObject()["serverInfo"].toObject()["name"].toString(), QString("simpleavshow"));
+
         sendLine({{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}});
         sendLine({{"jsonrpc", "2.0"}, {"id", 2}, {"method", "tools/call"}, {"params", QJsonObject{
             {"name", "get_preflight"}, {"arguments", QJsonObject{}}
         }}});
+        sendLine({{"jsonrpc", "2.0"}, {"id", 3}, {"method", "tools/call"}, {"params", QJsonObject{
+            {"name", "get_app_guide"}, {"arguments", QJsonObject{{"topic", "overview"}}}
+        }}});
         proxy.closeWriteChannel();
 
-        QByteArray output;
+        QMap<int, QJsonObject> replies;
+        while (replies.size() < 2) {
+            const auto obj = readLineJson(outBuf);
+            QVERIFY(!obj.isEmpty());
+            replies.insert(obj["id"].toInt(), obj);
+        }
         QTRY_VERIFY_WITH_TIMEOUT(proxy.state() == QProcess::NotRunning, 8000);
-        output = proxy.readAllStandardOutput();
         QCOMPARE(proxy.exitCode(), 0);
-        const auto lines = output.trimmed().split('\n');
-        QCOMPARE(lines.size(), 2);
-        const auto initResp = QJsonDocument::fromJson(lines[0]).object();
-        QCOMPARE(initResp["id"].toInt(), 1);
-        QCOMPARE(initResp["result"].toObject()["serverInfo"].toObject()["name"].toString(), QString("simpleavshow"));
-        const auto preflightResp = QJsonDocument::fromJson(lines[1]).object();
-        QCOMPARE(preflightResp["id"].toInt(), 2);
-        QCOMPARE(preflightResp["result"].toObject()["structuredContent"].toObject()["summary"].toObject()["title"].toString(),
+        QCOMPARE(replies[2]["result"].toObject()["structuredContent"].toObject()["summary"].toObject()["title"].toString(),
                  QString("The opening scene"));
+        QVERIFY(replies[3]["result"].toObject()["structuredContent"].toObject()["content"].toString().contains("Seven rules"));
         server.stop();
     }
 
@@ -160,12 +187,50 @@ private slots:
         QTRY_COMPARE(client.state(), AcpState::Ready);
         client.sendPrompt("Need approval");
         QTRY_VERIFY(receivedPerm.requestKey > 0);
-        QCOMPARE(receivedPerm.title, QString("Apply edits to show"));
+        QCOMPARE(receivedPerm.title, QString("<b>Apply edits to show</b>"));
         QCOMPARE(receivedPerm.options.size(), size_t(2));
         client.respondPermission(receivedPerm.requestKey, "allow-once");
         QTRY_COMPARE(finishedReason, QString("end_turn"));
         QVERIFY(message.contains("perm=selected:allow-once"));
         client.disconnectFromAgent();
+
+        // Incompatible / missing protocolVersion must fail before session/new
+        {
+            AcpClient bad;
+            bad.connectToAgent(SAV_MOCK_ACP_AGENT, {"--bad-protocol"}, QDir::tempPath(), {});
+            QTRY_COMPARE(bad.state(), AcpState::Error);
+            QVERIFY(bad.sessionId().isEmpty());
+            bad.disconnectFromAgent();
+
+            AcpClient missing;
+            missing.connectToAgent(SAV_MOCK_ACP_AGENT, {"--missing-protocol"}, QDir::tempPath(), {});
+            QTRY_COMPARE(missing.state(), AcpState::Error);
+            QVERIFY(missing.sessionId().isEmpty());
+            missing.disconnectFromAgent();
+        }
+
+        // Switching sessions during an active prompt must ignore stale session output/completion
+        {
+            AcpClient client2;
+            QString msg2, finished2;
+            connect(&client2, &AcpClient::messageChunk, [&](const QString& m) { msg2 += m; });
+            connect(&client2, &AcpClient::promptFinished, [&](const QString& r) { finished2 = r; });
+            client2.connectToAgent(SAV_MOCK_ACP_AGENT, {"--http-mcp", "--hold-prompt", "--stale-on-new-session"}, QDir::tempPath(), {});
+            QTRY_COMPARE(client2.state(), AcpState::Ready);
+            QCOMPARE(client2.sessionId(), QString("mock-session-1"));
+            client2.sendPrompt("Old prompt");
+            QCOMPARE(client2.state(), AcpState::Prompting);
+            client2.startNewSession(QDir::tempPath(), {});
+            QTRY_COMPARE(client2.sessionId(), QString("mock-session-2"));
+            QTRY_COMPARE(client2.state(), AcpState::Ready);
+            QVERIFY(!msg2.contains("STALE_SESSION_OUTPUT"));
+            QVERIFY(finished2.isEmpty());
+            client2.sendPrompt("Fresh prompt");
+            QTRY_COMPARE(finished2, QString("end_turn"));
+            QVERIFY(msg2.contains("Mock reply: ok"));
+            QVERIFY(!msg2.contains("STALE_SESSION_OUTPUT"));
+            client2.disconnectFromAgent();
+        }
 
         // Cancellation test
         finishedReason.clear();
@@ -223,7 +288,7 @@ private slots:
         const int customIdx = presetCombo->findData("custom");
         QVERIFY(customIdx >= 0);
         presetCombo->setCurrentIndex(customIdx);
-        customCommand->setText(QString("\"%1\" --http-mcp --require-permission").arg(SAV_MOCK_ACP_AGENT));
+        customCommand->setText(QString("\"%1\" --http-mcp --require-permission --long-permission").arg(SAV_MOCK_ACP_AGENT));
 
         QVERIFY(!window.mcpServer().running());
         connectButton->click();
@@ -239,10 +304,23 @@ private slots:
         window.controller().setShowMode(false);
         QVERIFY(allowEditing->isEnabled());
 
-        // Send prompt and approve permission card
+        // Revoking write access externally must NOT be silently restored on reconnect
+        window.mcpServer().setEditingEnabled(false);
+        QVERIFY(!allowEditing->isChecked());
+        connectButton->click(); // Disconnect (stops auto-started MCP)
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
+        connectButton->click(); // Reconnect
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
+        QVERIFY(!window.mcpServer().editingEnabled());
+        QVERIFY(!allowEditing->isChecked());
+
+        // Send prompt and verify permission card shows full untruncated plain-text request
         promptInput->setPlainText("Inspect the show");
         sendButton->click();
         QTRY_VERIFY(permissionBox->isVisible());
+        auto* detailView = permissionBox->findChild<QPlainTextEdit*>("permissionDetailText");
+        QVERIFY(detailView);
+        QVERIFY(detailView->toPlainText().contains("TAIL_MARKER_END"));
         QPushButton* allowBtn = nullptr;
         for (auto* btn : permissionBox->findChildren<QPushButton*>())
             if (btn->property("optionId").toString() == "allow-once") { allowBtn = btn; break; }
@@ -256,6 +334,25 @@ private slots:
         QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
         QVERIFY(!window.mcpServer().running());
         window.controller().dirty = false;
+    }
+
+    void destroyingConnectedWindowIsSafe() {
+        auto* window = new MainWindow;
+        window->show();
+        auto* chatButton = window->findChild<QPushButton*>("agentChatButton");
+        auto* panel = window->findChild<AgentChatPanel*>("agentChatPanel");
+        QVERIFY(chatButton && panel);
+        chatButton->click();
+        auto* presetCombo = panel->findChild<QComboBox*>("agentPresetCombo");
+        auto* customCommand = panel->findChild<QLineEdit*>("agentCustomCommand");
+        auto* connectButton = panel->findChild<QPushButton*>("agentConnectButton");
+        presetCombo->setCurrentIndex(presetCombo->findData("custom"));
+        customCommand->setText(QString("\"%1\" --http-mcp").arg(SAV_MOCK_ACP_AGENT));
+        connectButton->click();
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
+        QVERIFY(window->mcpServer().running());
+        // Direct deletion skips closeEvent; destructor must shut down panel before members die.
+        delete window;
     }
 };
 

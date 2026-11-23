@@ -51,10 +51,10 @@ private:
     std::vector<AcpAgentPreset> presets_;
     std::vector<ChatEntry> entries_;
     bool autoStartedMcp_ = false;
-    bool wantEditing_ = false;
     bool sentContextPreamble_ = false;
     bool hasAgentEdit_ = false;
     bool lastCanEdit_ = true;
+    bool shuttingDown_ = false;
 
     QLabel* statusLabel_ = nullptr;
     QComboBox* presetCombo_ = nullptr;

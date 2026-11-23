@@ -145,11 +145,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
     };
     host.closeDisplay = [this] { if (outputWindow_) outputWindow_->hide(); };
     host.remoteStatus = [this] {
-        QJsonArray links;
-        for (const auto& link : remote_.links()) links.append(link);
         return QJsonObject{{"available", true}, {"running", remote_.running()},
             {"port", remote_.running() ? static_cast<int>(remote_.port()) : QSettings().value("remote/port", 48124).toInt()},
-            {"clients", remote_.clients()}, {"links", links}};
+            {"clients", remote_.clients()}, {"has_network", !remote_.links().isEmpty()}};
     };
     host.configureRemote = [this](bool enable, int port, bool changeKey, QString& error) {
         if (changeKey) remote_.changeKey();
@@ -402,6 +400,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
     outputScreen_ = QSettings().value("display/screen").toString();
     setAcceptDrops(true);
     qApp->installEventFilter(this); refresh();
+}
+
+MainWindow::~MainWindow() {
+    // Destroy child widgets that hold references to mcp_/c_ before member destructors run.
+    if (agentChat_) {
+        agentChat_->shutdown();
+        delete agentChat_;
+        agentChat_ = nullptr;
+    }
+    mcp_.setHost({});
+    mcp_.stop();
+    remote_.stop();
 }
 
 void MainWindow::buildInspector() {
@@ -1258,14 +1268,16 @@ void MainWindow::setAgentChatVisible(bool visible) {
 }
 
 void MainWindow::agentSettings() {
-    QDialog dialog(this); dialog.setWindowTitle("Agent collaboration · MCP"); dialog.resize(620, 360);
+    QDialog dialog(this); dialog.setWindowTitle("Agent collaboration · MCP"); dialog.resize(620, 380);
     auto* layout = new QVBoxLayout(&dialog);
-    auto* hint = new QLabel("Connect an agent to this open show. Agent changes appear immediately and use the same Undo history. Playback, Show mode, outputs and saving stay with the operator.");
+    auto* hint = new QLabel("Connect an agent to this open show. Read-only mode lets the agent inspect the show, settings, and user manual. "
+        "Allowing edits and controls permits show edits (single-step Undo), media import/relink, output and phone remote configuration, "
+        "saving/opening/exporting files, and rehearsal playback. Show mode always stays operator-only.");
     hint->setWordWrap(true); layout->addWidget(hint);
     auto* enabled = new QCheckBox("Enable local MCP server"); enabled->setObjectName("agentServerEnabled"); layout->addWidget(enabled);
     auto* form = new QFormLayout; layout->addLayout(form);
     auto* port = intSpin(1024, 65535); port->setObjectName("agentServerPort"); port->setValue(mcp_.running() ? QUrl(mcp_.endpoint()).port() : 48123); form->addRow("Local port", port);
-    auto* editing = new QCheckBox("Allow the agent to edit this show and import media"); editing->setObjectName("agentEditingEnabled"); form->addRow(editing);
+    auto* editing = new QCheckBox("Allow agent edits and controls (show, media, outputs, remote, files, rehearsal)"); editing->setObjectName("agentEditingEnabled"); form->addRow(editing);
     auto* endpoint = new QLineEdit; endpoint->setReadOnly(true); form->addRow("MCP URL", endpoint);
     auto* token = new QLineEdit; token->setReadOnly(true); token->setEchoMode(QLineEdit::Password); form->addRow("Bearer token", token);
     auto* copy = button("Copy connection configuration", layout);
@@ -1277,7 +1289,7 @@ void MainWindow::agentSettings() {
         port->setEnabled(!mcp_.running()); editing->setEnabled(mcp_.running());
         copy->setEnabled(mcp_.running()); copyToken->setEnabled(mcp_.running());
         endpoint->setText(mcp_.endpoint()); token->setText(mcp_.token());
-        status->setText(mcp_.running() ? (mcp_.editingEnabled() ? "Agent editing enabled. Playback and Show mode still lock edits." : "Read only. Allow editing above to build the show together.") : "Disabled. Connections and tokens last for this app session only.");
+        status->setText(mcp_.running() ? (mcp_.editingEnabled() ? "Agent edits and controls enabled. Project edits use Undo; Show mode locks all changes and transport." : "Read only. Enable edits and controls above to let the agent modify the show or settings.") : "Disabled. Connections and tokens last for this app session only.");
     };
     connect(&mcp_, &McpServer::stateChanged, &dialog, refresh);
     connect(enabled, &QCheckBox::toggled, &dialog, [&](bool on) {
@@ -1290,7 +1302,7 @@ void MainWindow::agentSettings() {
     });
     connect(editing, &QCheckBox::toggled, &dialog, [&](bool on) {
         commitInspector(); mcp_.setEditingEnabled(on);
-        c_.report(on ? "Agent editing enabled. Changes can be undone from Edit." : "Agent collaboration is read only.");
+        c_.report(on ? "Agent edits and controls enabled. Project edits can be undone from Edit; Show mode stays operator-only." : "Agent collaboration is read only.");
     });
     connect(copy, &QPushButton::clicked, &dialog, [&] {
         QApplication::clipboard()->setText(QString::fromUtf8(QJsonDocument(mcp_.clientConfig()).toJson(QJsonDocument::Indented)));

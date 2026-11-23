@@ -314,21 +314,24 @@ private slots:
         QCOMPARE(sysex["bytes"].toArray(), QJsonArray({0xF0, 0x7D, 0x01, 0xF7}));
         QVERIFY(call(server, "encode_midi", {{"type", "raw_hex"}, {"hex", "F0 7D"}})["isError"].toBool());
 
-        // 4. Show mode blocks every mutating/control tool even when editing is enabled
+        // 4. Show mode blocks every mutating/control tool (including list_media_files) even when editing is enabled
         server.setEditingEnabled(true);
         QVERIFY(call(server, "transport_control", {{"action", "seek"}, {"time", frameJson(4)}})["isError"].toBool());
         QVERIFY(call(server, "seek_and_select", {{"time", frameJson(4)}})["isError"].toBool());
+        QVERIFY(call(server, "list_media_files", {{"directory", QDir::tempPath()}})["isError"].toBool());
         QVERIFY(call(server, "configure_remote", {{"enabled", true}})["isError"].toBool());
         QVERIFY(call(server, "project_action", {{"action", "new_show"}, {"discard_unsaved", true}})["isError"].toBool());
         window.controller().setShowMode(false);
 
-        // Now stopped & out of Show mode: get_environment probes safely
+        // Now stopped & out of Show mode: get_environment probes safely and never leaks remote links
         const auto envUnlocked = call(server, "get_environment")["structuredContent"].toObject();
         QCOMPARE(envUnlocked["audio"].toObject()["probed"].toBool(), true);
         QVERIFY(envUnlocked["displays"].toObject()["screens"].toArray().size() >= 1);
+        QVERIFY(!envUnlocked["remote"].toObject().contains("links"));
 
-        // 5. move_track reorders tracks and remaps clip indices, and history undoes/redoes
+        // 5. move_track reorders tracks and remaps clip indices, rejects oversized index, and history undoes/redoes
         const QString overlayId = QString::fromStdString(window.controller().project.show.tracks[1].id);
+        QVERIFY(edits(server, {operation("move_track", overlayId, {{"index", 1e12}})})["isError"].toBool());
         QVERIFY(!edits(server, {operation("move_track", overlayId, {{"index", 0}})})["isError"].toBool());
         QCOMPARE(QString::fromStdString(window.controller().project.show.tracks[0].id), overlayId);
         // Backdrop clip (originally on track 0) shifted to track 1; Title clip (originally on track 1) shifted to track 0.
@@ -362,12 +365,19 @@ private slots:
         QCOMPARE(listed["structuredContent"].toObject()["count"].toInt(), 1);
         QCOMPARE(listed["structuredContent"].toObject()["files"].toArray().first().toObject()["kind"].toString(), QString("image"));
 
-        // Save, export package, refuse discard_unsaved=false when dirty, open_project, and relink offline asset
+        // Save, verify preflight flags closed audience display on a saved picture show, and verify failed Save As errors on a clean show
         const QString showPath = dir.filePath("agent-show.savshow");
         const QString packPath = dir.filePath("agent-show.savpack");
         QVERIFY(!call(server, "project_action", {{"action", "save_as"}, {"path", showPath}})["isError"].toBool());
         QVERIFY(QFileInfo::exists(showPath));
         QVERIFY(!window.controller().dirty);
+        const auto savedPf = call(server, "get_preflight")["structuredContent"].toObject();
+        QCOMPARE(savedPf["ready"].toBool(), false);
+        bool sawClosedDisplay = false;
+        for (const auto& p : savedPf["problems"].toArray())
+            if (p.toString().contains("program output is not open")) sawClosedDisplay = true;
+        QVERIFY(sawClosedDisplay);
+        QVERIFY(call(server, "project_action", {{"action", "save_as"}, {"path", dir.filePath("no-such-subdir/fail.savshow")}})["isError"].toBool());
         QVERIFY(!call(server, "project_action", {{"action", "export_package"}, {"path", packPath}})["isError"].toBool());
         QVERIFY(QFileInfo::exists(packPath));
         QVERIFY(!call(server, "project_action", {{"action", "new_show"}})["isError"].toBool());
@@ -386,7 +396,7 @@ private slots:
         QCOMPARE(relinked["structuredContent"].toObject()["relink"].toObject()["relinked"].toInt(), 1);
         QVERIFY(!window.controller().project.assets["off-1"].offline);
 
-        // 8. configure_remote toggles the phone remote cleanly
+        // 8. configure_remote toggles the phone remote cleanly, validates types, and never exposes keyed links
         QTcpServer probe;
         QVERIFY(probe.listen(QHostAddress::LocalHost, 0));
         const int freeRemotePort = probe.serverPort();
@@ -394,11 +404,18 @@ private slots:
         const auto remOn = call(server, "configure_remote", {{"enabled", true}, {"port", freeRemotePort}});
         QVERIFY(!remOn["isError"].toBool());
         QVERIFY(window.remoteServer().running());
+        QVERIFY(!remOn["structuredContent"].toObject().contains("links"));
+        // Malformed enabled type must fail without stopping the running remote
+        QVERIFY(call(server, "configure_remote", {{"enabled", "false"}})["isError"].toBool());
+        QVERIFY(window.remoteServer().running());
         const auto remOff = call(server, "configure_remote", {{"enabled", false}});
         QVERIFY(!remOff["isError"].toBool());
         QVERIFY(!window.remoteServer().running());
 
-        // 9. configure_outputs display guard (refuses covering editor unless allow_cover_editor=true) & midi off
+        // 9. configure_outputs validates nested schemas before side effects & guards editor display
+        QVERIFY(call(server, "configure_outputs", {{"midi", QJsonObject{}}})["isError"].toBool());
+        QVERIFY(call(server, "configure_outputs", {{"display", QJsonObject{}}})["isError"].toBool());
+        QVERIFY(call(server, "configure_outputs", {{"display", QJsonObject{{"open", "yes"}}}})["isError"].toBool());
         QVERIFY(call(server, "configure_outputs", {{"display", QJsonObject{{"open", true}, {"screen", 0}}}})["isError"].toBool());
         QVERIFY(!call(server, "configure_outputs", {{"midi", QJsonObject{{"port", "none"}}}})["isError"].toBool());
 

@@ -5,6 +5,7 @@
 #include <QJsonDocument>
 #include <QProcessEnvironment>
 #include <QStandardPaths>
+#include <cmath>
 
 namespace sav {
 namespace {
@@ -90,8 +91,10 @@ QStringList splitCommandLine(const QString& commandLine) {
         if (!quote.isNull()) {
             if (c == quote) {
                 quote = QChar();
-            } else if (c == '\\' && quote == '"' && i + 1 < commandLine.size()) {
-                current += commandLine[++i];
+            } else if (quote == '"' && c == '\\' && i + 1 < commandLine.size() && commandLine[i + 1] == '"') {
+                // Only unescape \" inside double quotes so Windows paths like "C:\Program Files\..." stay intact.
+                current += '"';
+                ++i;
             } else {
                 current += c;
             }
@@ -103,10 +106,6 @@ QStringList splitCommandLine(const QString& commandLine) {
         }
         if (c == '"' || c == '\'') {
             quote = c; inToken = true;
-            continue;
-        }
-        if (c == '\\' && i + 1 < commandLine.size()) {
-            current += commandLine[++i]; inToken = true;
             continue;
         }
         current += c; inToken = true;
@@ -207,6 +206,7 @@ void AcpClient::connectToAgent(const QString& program, const QStringList& args, 
 void AcpClient::startNewSession(const QString& cwd, const AcpMcpConfig& mcp) {
     if (!process_ || process_->state() != QProcess::Running) return;
     if (state_ == AcpState::Prompting) cancelPrompt();
+    else cancelAllPendingPermissions();
     cwd_ = cwd.isEmpty() ? cwd_ : cwd;
     mcp_ = mcp;
     sessionId_.clear();
@@ -225,12 +225,12 @@ void AcpClient::sendPrompt(const QString& text) {
         {"sessionId", sessionId_},
         {"prompt", QJsonArray{QJsonObject{{"type", "text"}, {"text", text}}}}
     };
-    sendRequest("session/prompt", params, PendingKind::Prompt);
+    sendRequest("session/prompt", params, PendingKind::Prompt, sessionId_);
 }
 
 void AcpClient::cancelPrompt() {
     if (!process_ || sessionId_.isEmpty()) return;
-    cancelAllPendingPermissions();
+    cancelAllPendingPermissions(sessionId_);
     if (state_ == AcpState::Prompting) {
         sendNotification("session/cancel", {{"sessionId", sessionId_}});
     }
@@ -238,11 +238,11 @@ void AcpClient::cancelPrompt() {
 
 void AcpClient::respondPermission(int requestKey, const QString& optionId) {
     if (!pendingPermissions_.contains(requestKey)) return;
-    const QJsonValue id = pendingPermissions_.take(requestKey);
+    const PendingPermission pending = pendingPermissions_.take(requestKey);
     QJsonObject outcome;
     if (optionId.isEmpty()) outcome = {{"outcome", "cancelled"}};
     else outcome = {{"outcome", "selected"}, {"optionId", optionId}};
-    sendResponse(id, {{"outcome", outcome}});
+    sendResponse(pending.rpcId, {{"outcome", outcome}});
 }
 
 void AcpClient::disconnectFromAgent() {
@@ -276,9 +276,9 @@ void AcpClient::sendJson(const QJsonObject& payload) {
     process_->write(line);
 }
 
-int AcpClient::sendRequest(const QString& method, const QJsonObject& params, PendingKind kind) {
+int AcpClient::sendRequest(const QString& method, const QJsonObject& params, PendingKind kind, const QString& sessionId) {
     const int id = nextId_++;
-    pending_.insert(id, kind);
+    pending_.insert(id, {kind, sessionId});
     sendJson({{"jsonrpc", "2.0"}, {"id", id}, {"method", method}, {"params", params}});
     return id;
 }
@@ -330,12 +330,19 @@ void AcpClient::handleLine(const QByteArray& line) {
 
 void AcpClient::handleResponse(int id, const QJsonObject& msg) {
     if (!pending_.contains(id)) return;
-    const PendingKind kind = pending_.take(id);
+    const PendingRequest req = pending_.take(id);
+    const PendingKind kind = req.kind;
+    if (kind == PendingKind::Prompt && (sessionId_.isEmpty() || req.sessionId != sessionId_)) {
+        // Ignore stale prompt completion from a superseded session.
+        cancelAllPendingPermissions(req.sessionId);
+        return;
+    }
     if (msg.contains("error") && msg["error"].isObject()) {
         const auto errObj = msg["error"].toObject();
         const int code = errObj["code"].toInt();
         const QString errMessage = errObj["message"].toString("ACP request failed");
         if (kind == PendingKind::Prompt) {
+            cancelAllPendingPermissions(req.sessionId);
             setState(AcpState::Ready);
             emit errorOccurred(errMessage);
             emit promptFinished("error");
@@ -350,6 +357,13 @@ void AcpClient::handleResponse(int id, const QJsonObject& msg) {
     }
     const auto result = msg["result"].toObject();
     if (kind == PendingKind::Initialize) {
+        const auto protoVal = result["protocolVersion"];
+        if (!protoVal.isDouble() || std::floor(protoVal.toDouble()) != protoVal.toDouble() || protoVal.toInt() != 1) {
+            failConnection(protoVal.isUndefined() || protoVal.isNull()
+                ? QString("ACP agent did not return a supported protocolVersion.")
+                : QString("Incompatible ACP protocolVersion (%1); SimpleAVShow supports protocolVersion 1.").arg(protoVal.toVariant().toString()));
+            return;
+        }
         const auto info = result["agentInfo"].toObject();
         agentName_ = info["name"].toString();
         agentVersion_ = info["version"].toString();
@@ -370,7 +384,7 @@ void AcpClient::handleResponse(int id, const QJsonObject& msg) {
         setState(AcpState::Ready);
         emit connected(agentName_.isEmpty() ? QString("ACP agent") : agentName_, sessionId_);
     } else if (kind == PendingKind::Prompt) {
-        cancelAllPendingPermissions();
+        cancelAllPendingPermissions(req.sessionId);
         setState(AcpState::Ready);
         emit promptFinished(result["stopReason"].toString("end_turn"));
     }
@@ -378,6 +392,8 @@ void AcpClient::handleResponse(int id, const QJsonObject& msg) {
 
 void AcpClient::handleNotification(const QString& method, const QJsonObject& params) {
     if (method != "session/update") return;
+    const QString updateSession = params["sessionId"].toString();
+    if (sessionId_.isEmpty() || (!updateSession.isEmpty() && updateSession != sessionId_)) return;
     const auto update = params["update"].toObject();
     const QString kind = update.contains("sessionUpdate") ? update["sessionUpdate"].toString() : update["type"].toString();
     if (kind == "agent_message_chunk") {
@@ -410,6 +426,11 @@ void AcpClient::handleNotification(const QString& method, const QJsonObject& par
 
 void AcpClient::handleAgentRequest(const QJsonValue& id, const QString& method, const QJsonObject& params) {
     if (method == "session/request_permission") {
+        const QString reqSession = params["sessionId"].toString();
+        if (sessionId_.isEmpty() || (!reqSession.isEmpty() && reqSession != sessionId_)) {
+            sendResponse(id, {{"outcome", QJsonObject{{"outcome", "cancelled"}}}});
+            return;
+        }
         AcpPermissionRequest request;
         request.requestKey = nextPermissionKey_++;
         const auto toolCall = params["toolCall"].toObject();
@@ -424,7 +445,7 @@ void AcpClient::handleAgentRequest(const QJsonValue& id, const QString& method, 
                 request.options.push_back({opt["optionId"].toString(), opt["name"].toString(opt["optionId"].toString()), opt["kind"].toString()});
             }
         }
-        pendingPermissions_.insert(request.requestKey, id);
+        pendingPermissions_.insert(request.requestKey, {id, reqSession.isEmpty() ? sessionId_ : reqSession});
         emit permissionRequested(request);
         return;
     }
@@ -460,9 +481,12 @@ QJsonArray AcpClient::buildMcpServers() {
     return servers;
 }
 
-void AcpClient::cancelAllPendingPermissions() {
+void AcpClient::cancelAllPendingPermissions(const QString& onlySessionId) {
     const auto keys = pendingPermissions_.keys();
-    for (int key : keys) respondPermission(key, {});
+    for (int key : keys) {
+        if (!onlySessionId.isEmpty() && pendingPermissions_[key].sessionId != onlySessionId) continue;
+        respondPermission(key, {});
+    }
 }
 
 void AcpClient::failConnection(const QString& message) {

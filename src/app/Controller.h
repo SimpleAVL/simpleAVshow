@@ -36,9 +36,9 @@ public:
     std::size_t undoCount() const { return undo_.size(); }
     std::size_t redoCount() const { return redo_.size(); }
     void replace(Project next, QString projectPath = {});
-    void toggle();
-    void seek(Frame position);
-    void stopAll();
+    bool toggle();
+    bool seek(Frame position);
+    bool stopAll();
     bool configureAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer);
     bool configureMidi(int port);
     bool testMidi(const std::vector<unsigned char>& message);
@@ -51,12 +51,16 @@ public:
     void setShowMode(bool enabled);
     QImage compose();
     // Side-effect-free composition at an arbitrary show time (safe during playback and Show mode).
-    QImage composeAt(Frame position, QSize maximum = QSize()) const;
-    void save(QString target);
+    // Pre-decoded video frames keyed by clip ID may be supplied from a worker thread so the GUI thread stays non-blocking.
+    static QImage composeProjectAt(const Project& project, Frame position, QSize maximum = QSize(), const QMap<std::string, QImage>* videoFrames = nullptr);
+    QImage composeAt(Frame position, QSize maximum = QSize(), const QMap<std::string, QImage>* videoFrames = nullptr) const {
+        return composeProjectAt(project, position, maximum, videoFrames);
+    }
+    bool save(QString target);
     // Saving an opened package or generated media copies files; MainWindow runs that part on a worker.
     bool savingCopiesMedia() const;
     static QString mediaDirectory(const QString& target);
-    void commitSave(Project candidate, QString target);
+    bool commitSave(Project candidate, QString target);
     void report(QString message);
     // Sidecar for crash recovery: next to the show, or in app data while untitled.
     QString autosavePath() const;

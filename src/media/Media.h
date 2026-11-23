@@ -21,7 +21,8 @@ struct MediaAsset {
 };
 MediaAsset loadMedia(const QString& path);
 // Decodes a single video frame at time (seconds) for offline previews without disturbing active readers.
-QImage videoFrameAt(const QString& path, double time, QSize maximum = QSize(1920, 1080));
+// Returns a null image (and populates optional error) if the target timestamp cannot be reached.
+QImage videoFrameAt(const QString& path, double time, QSize maximum = QSize(1920, 1080), QString* error = nullptr);
 
 // One worker per video clip. No decoding or disk access on the audio thread.
 // Corrupt packets and transient read/seek failures are skipped and counted; only

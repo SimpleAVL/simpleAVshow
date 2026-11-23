@@ -139,36 +139,39 @@ bool Controller::routesValid() const {
     }
     return true;
 }
-void Controller::toggle() {
-    if (busy) return;
+bool Controller::toggle() {
+    if (busy) return false;
     const State state = transport.state(); const bool playing = state == State::Playing;
     if (!playing) {
         playbackProblem.clear();
         // Re-arming retries sources that were briefly unavailable; changed sources still need reopening.
         if (transport.audioReadFailed() && state != State::Held && !transport.asyncVoices()) arm(position());
-        if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and press Play to retry, or reopen the project to rebuild changed or damaged caches."); playbackProblem = status; return; }
+        if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and press Play to retry, or reopen the project to rebuild changed or damaged caches."); playbackProblem = status; return false; }
         // Resuming a live show never blocks on picture or MIDI; it warns and continues.
         const bool resuming = state == State::Held || transport.asyncVoices() || (state == State::Paused && device.running());
         if (const auto missing = missingMedia(); !missing.isEmpty()) {
             report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
             playbackProblem = status;
-            if (!resuming) return;
+            if (!resuming) return false;
         }
-        if (needsMidi() && !prepareMidi()) { playbackProblem = status; if (!resuming) return; }
-        if (!prepareAudio()) { playbackProblem = status; return; }
-        if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return; }
+        if (needsMidi() && !prepareMidi()) { playbackProblem = status; if (!resuming) return false; }
+        if (!prepareAudio()) { playbackProblem = status; return false; }
+        if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return false; }
     }
-    if (!transport.command({playing ? Action::Pause : Action::Play})) report("Transport command queue is full");
+    if (!transport.command({playing ? Action::Pause : Action::Play})) { report("Transport command queue is full"); return false; }
+    return true;
 }
-void Controller::seek(Frame time) {
-    if (busy || showMode) { report(showMode ? "Leave show mode to jump on the timeline" : "Media is loading"); return; }
-    if (!transport.command({Action::Seek, time})) report("Transport command queue is full");
+bool Controller::seek(Frame time) {
+    if (busy || showMode) { report(showMode ? "Leave show mode to jump on the timeline" : "Media is loading"); return false; }
+    if (!transport.command({Action::Seek, time})) { report("Transport command queue is full"); return false; }
     if (!device.running()) transport.render(nullptr, 0, 0);
     lastComposed_ = -1;
+    return true;
 }
-void Controller::stopAll() {
-    if (!transport.command({Action::StopAll})) { report("Transport command queue is full"); return; }
+bool Controller::stopAll() {
+    if (!transport.command({Action::StopAll})) { report("Transport command queue is full"); return false; }
     if (!device.running()) transport.render(nullptr, 0, 0);
+    return true;
 }
 bool Controller::configureAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer) {
     if (!canEdit()) return false;
@@ -397,10 +400,14 @@ QImage Controller::compose() {
     }
     lastComposed_ = frame; lastClocks_ = std::move(clocks); lastPicture_ = picture; return picture;
 }
-QImage Controller::composeAt(Frame position, QSize maximum) const {
-    const QSize target = maximum.isValid() ? maximum : QSize(project.width, project.height);
-    QImage picture(project.width, project.height, QImage::Format_RGB32); picture.fill(Qt::black);
+QImage Controller::composeProjectAt(const Project& project, Frame position, QSize maximum, const QMap<std::string, QImage>* videoFrames) {
+    QSize outSize(project.width, project.height);
+    if (maximum.isValid() && (outSize.width() > maximum.width() || outSize.height() > maximum.height()))
+        outSize = outSize.scaled(maximum, Qt::KeepAspectRatio);
+    QImage picture(outSize, QImage::Format_RGB32); picture.fill(Qt::black);
     QPainter painter(&picture); painter.setRenderHint(QPainter::SmoothPixmapTransform); painter.setRenderHint(QPainter::TextAntialiasing);
+    painter.scale(static_cast<double>(outSize.width()) / std::max(1, project.width),
+                  static_cast<double>(outSize.height()) / std::max(1, project.height));
     for (std::size_t track = 0; track < project.show.tracks.size(); ++track) {
         if (!project.show.tracks[track].visual || project.show.tracks[track].muted) continue;
         for (const auto& c : project.show.clips) {
@@ -422,9 +429,13 @@ QImage Controller::composeAt(Frame position, QSize maximum) const {
                 if (asset != project.assets.cend() && !asset->offline) {
                     QImage source = asset->still;
                     if (asset->video) {
-                        double time = seconds(c.offset + local);
-                        if (c.loop) time = seconds(c.offset) + std::fmod(seconds(local), std::max(.001, asset->duration - seconds(c.offset)));
-                        source = videoFrameAt(asset->path, std::min(time, std::max(0., asset->duration - 1. / std::max(1., asset->fps))), target);
+                        if (videoFrames) {
+                            source = videoFrames->value(c.id);
+                        } else {
+                            double time = seconds(c.offset + local);
+                            if (c.loop) time = seconds(c.offset) + std::fmod(seconds(local), std::max(.001, asset->duration - seconds(c.offset)));
+                            source = videoFrameAt(asset->path, std::min(time, std::max(0., asset->duration - 1. / std::max(1., asset->fps))), outSize);
+                        }
                     }
                     if (!source.isNull()) {
                         const QSizeF fitted = QSizeF(source.size()).scaled(bounds.size(), Qt::KeepAspectRatio);
@@ -436,8 +447,6 @@ QImage Controller::composeAt(Frame position, QSize maximum) const {
         }
     }
     painter.end();
-    if (maximum.isValid() && (picture.width() > maximum.width() || picture.height() > maximum.height()))
-        return picture.scaled(maximum, Qt::KeepAspectRatio, Qt::SmoothTransformation);
     return picture;
 }
 QString Controller::mediaDirectory(const QString& target) {
@@ -446,12 +455,12 @@ QString Controller::mediaDirectory(const QString& target) {
 bool Controller::savingCopiesMedia() const {
     return project.packageDirectory || std::any_of(project.assets.cbegin(), project.assets.cend(), [](const MediaAsset& a) { return a.path.isEmpty(); });
 }
-void Controller::save(QString target) {
-    if (!canEdit()) return;
-    try { Project candidate = project; materializeProjectMedia(candidate, mediaDirectory(target)); commitSave(std::move(candidate), target); }
-    catch (const std::exception& e) { report("Save failed: " + QString::fromUtf8(e.what())); }
+bool Controller::save(QString target) {
+    if (!canEdit()) return false;
+    try { Project candidate = project; materializeProjectMedia(candidate, mediaDirectory(target)); return commitSave(std::move(candidate), target); }
+    catch (const std::exception& e) { report("Save failed: " + QString::fromUtf8(e.what())); return false; }
 }
-void Controller::commitSave(Project candidate, QString target) {
+bool Controller::commitSave(Project candidate, QString target) {
     try {
         const auto sourceDirectory = project.packageDirectory;
         const QString previous = path;
@@ -471,7 +480,8 @@ void Controller::commitSave(Project candidate, QString target) {
         for (const auto& saved : {target, previous}) if (!saved.isEmpty()) QFile::remove(saved + ".autosave");
         QFile::remove(untitledAutosavePath());
         report("Saved " + QFileInfo(target).fileName()); emit changed();
-    } catch (const std::exception& e) { report("Save failed: " + QString::fromUtf8(e.what())); }
+        return true;
+    } catch (const std::exception& e) { report("Save failed: " + QString::fromUtf8(e.what())); return false; }
 }
 
 }

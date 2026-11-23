@@ -306,12 +306,11 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         appendEntry({ChatEntry::Kind::System, {}, {}, {}, "Reverted last show edit (Undo).", {}, {}});
     });
     connect(allowEditing_, &QCheckBox::toggled, this, [this](bool on) {
-        wantEditing_ = on;
-        if (mcp_.running()) {
-            emit aboutToEdit();
-            mcp_.setEditingEnabled(on);
-            c_.report(on ? "Agent editing enabled. Changes can be undone from Edit." : "Agent collaboration is read only.");
-        }
+        if (!mcp_.running()) return;
+        emit aboutToEdit();
+        mcp_.setEditingEnabled(on);
+        c_.report(on ? "Agent edits and controls enabled. Show edits can be undone from Edit; Show mode remains operator-only."
+                     : "Agent collaboration is read only.");
         updateControls();
     });
 
@@ -404,6 +403,12 @@ AgentChatPanel::~AgentChatPanel() {
 }
 
 void AgentChatPanel::shutdown() {
+    if (shuttingDown_) return;
+    shuttingDown_ = true;
+    renderTimer_.stop();
+    acp_.disconnect(this);
+    mcp_.disconnect(this);
+    c_.disconnect(this);
     clearPermissionCards();
     acp_.disconnectFromAgent();
     if (autoStartedMcp_ && mcp_.running()) {
@@ -483,12 +488,14 @@ void AgentChatPanel::updateControls() {
 
     {
         QSignalBlocker block(allowEditing_);
-        allowEditing_->setChecked(mcp_.running() ? mcp_.editingEnabled() : wantEditing_);
+        allowEditing_->setChecked(mcp_.running() && mcp_.editingEnabled());
     }
-    allowEditing_->setEnabled(!c_.showMode);
+    allowEditing_->setEnabled(mcp_.running() && !c_.showMode);
     allowEditing_->setToolTip(c_.showMode
-        ? "Show mode locks editing. Leave Show mode to allow agent edits."
-        : "Allow the agent to edit this show and import media. Every batch is one Undo step.");
+        ? "Show mode locks all agent edits and controls. Leave Show mode first."
+        : !mcp_.running()
+        ? "Connect an agent (or start the local MCP server) before granting edits and controls."
+        : "Allow the agent to edit this show, import/relink media, configure outputs and phone remote, save/open/export files, and run rehearsal playback. Project edits use Undo; Show mode stays operator-only.");
 
     undoButton_->setVisible(hasAgentEdit_);
     undoButton_->setEnabled(editable);
@@ -541,6 +548,7 @@ void AgentChatPanel::toggleConnection() {
     }
 
     // Ensure the local MCP server is running so the ACP session receives live show tools automatically.
+    // Never silently re-elevate write permissions: the running server stays authoritative and starts read-only.
     if (!mcp_.running()) {
         emit aboutToEdit();
         if (!mcp_.start(48123) && !mcp_.start(0)) {
@@ -548,10 +556,6 @@ void AgentChatPanel::toggleConnection() {
             return;
         }
         autoStartedMcp_ = true;
-    }
-    if (wantEditing_ && !c_.showMode && !mcp_.editingEnabled()) {
-        emit aboutToEdit();
-        mcp_.setEditingEnabled(true);
     }
 
     AcpMcpConfig mcpConfig;
@@ -633,8 +637,9 @@ void AgentChatPanel::renderTranscript() {
                 "<div style='font-weight:600;color:#c7daf5;margin-bottom:6px;'>Co-edit this show with an ACP agent</div>"
                 "<div>Choose an installed ACP agent above (such as OpenCode, Claude Code, Codex, Antigravity, or Pi) and click <b>Connect</b>. "
                 "SimpleAVShow automatically connects its local MCP tools—no JSON or bearer tokens to copy.</div>"
-                "<div style='margin-top:8px;color:#7890b0;'>Starts in read-only mode unless <b>Allow show edits</b> is checked. "
-                "Every agent edit batch can be reversed with a single Undo.</div>"
+                "<div style='margin-top:8px;color:#7890b0;'>Starts in read-only mode until you check <b>Allow edits &amp; controls</b> "
+                "(grants show edits, media import/relink, output &amp; remote settings, file save/open/export, and rehearsal transport; "
+                "project edits use Undo and Show mode remains operator-only).</div>"
                 "</div>";
     } else {
         for (const auto& entry : entries_) {
@@ -694,17 +699,33 @@ void AgentChatPanel::addPermissionCard(const AcpPermissionRequest& request) {
     layout->setSpacing(6);
 
     auto* heading = new QLabel("Permission requested: " + request.title);
+    heading->setTextFormat(Qt::PlainText);
     heading->setWordWrap(true);
     heading->setStyleSheet("color: #f2d38b; font-weight: 600; border: none; background: transparent;");
     layout->addWidget(heading);
 
     if (!request.detail.isEmpty()) {
-        QString detail = request.detail;
-        if (detail.size() > 260) detail = detail.left(260) + "…";
-        auto* detailLabel = new QLabel(detail);
-        detailLabel->setWordWrap(true);
-        detailLabel->setStyleSheet("color: #d6c8a8; font-family: Menlo, Consolas, monospace; font-size: 11px; border: none; background: transparent;");
-        layout->addWidget(detailLabel);
+        auto* detailView = new QPlainTextEdit;
+        detailView->setObjectName("permissionDetailText");
+        detailView->setReadOnly(true);
+        detailView->setPlainText(request.detail);
+        detailView->setStyleSheet("QPlainTextEdit { background: #1c1811; color: #e6d8b8; border: 1px solid #594626; "
+                                  "border-radius: 4px; font-family: Menlo, Consolas, monospace; font-size: 11px; padding: 4px; }");
+        const bool isLong = request.detail.size() > 180 || request.detail.count('\n') > 2;
+        detailView->setFixedHeight(isLong ? 64 : 44);
+        layout->addWidget(detailView);
+        if (isLong) {
+            auto* expand = new QToolButton;
+            expand->setObjectName("permissionDetailToggle");
+            expand->setText("Expand full request");
+            expand->setCheckable(true);
+            expand->setStyleSheet("padding: 2px 6px; font-size: 11px; color: #f2d38b; background: #332a1d; border: 1px solid #6b532c;");
+            connect(expand, &QToolButton::toggled, detailView, [detailView, expand](bool expanded) {
+                detailView->setFixedHeight(expanded ? 180 : 64);
+                expand->setText(expanded ? "Collapse request" : "Expand full request");
+            });
+            layout->addWidget(expand, 0, Qt::AlignLeft);
+        }
     }
 
     auto* buttons = new QHBoxLayout;

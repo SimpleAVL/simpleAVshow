@@ -9,6 +9,7 @@
 #include <QFutureWatcher>
 #include <QGuiApplication>
 #include <QJsonDocument>
+#include <QPointer>
 #include <QScreen>
 #include <QSettings>
 #include <QSysInfo>
@@ -266,8 +267,9 @@ void applyOperations(Project& p, const QJsonArray& operations) {
             int from = -1;
             for (std::size_t i = 0; i < p.show.tracks.size(); ++i) if (p.show.tracks[i].id == id.toStdString()) { from = static_cast<int>(i); break; }
             if (from < 0) fail("Unknown track ID");
-            const int to = idxVal.toInt();
-            if (to < 0 || to >= static_cast<int>(p.show.tracks.size())) fail("Target track index is out of range");
+            const double toDouble = idxVal.toDouble();
+            if (toDouble < 0 || toDouble >= static_cast<double>(p.show.tracks.size())) fail("Target track index is out of range");
+            const int to = static_cast<int>(toDouble);
             if (from != to) {
                 Track moved = std::move(p.show.tracks[from]);
                 p.show.tracks.erase(p.show.tracks.begin() + from);
@@ -428,9 +430,9 @@ QJsonObject McpServer::environmentReport() const {
         displays = {{"screens", screens}, {"remembered_screen", settings.value("display/screen").toString()}, {"output_open", false}};
     }
 
-    // Phone remote
+    // Phone remote: never expose persistent keyed remote URLs over MCP.
     QJsonObject remote = host_.remoteStatus ? host_.remoteStatus() : QJsonObject{{"available", false}};
-    if (!editing_) remote.remove("links");
+    remote.remove("links");
 
     return {
         {"revision", static_cast<double>(revision_)},
@@ -472,7 +474,11 @@ void McpServer::checkWrite(const QJsonObject& arguments, bool requireRevision) {
 }
 
 QJsonObject McpServer::preflightReport() const {
-    const auto problems = c_.preflight();
+    auto problems = c_.preflight();
+    const bool hasPicture = std::any_of(c_.project.show.clips.begin(), c_.project.show.clips.end(),
+        [this](const Clip& clip) { return c_.project.show.tracks[clip.track].visual; });
+    if (hasPicture && host_.displayStatus && !host_.displayStatus()["output_open"].toBool(false))
+        problems << "The program output is not open. Open it from Audience display.";
     const auto missing = c_.missingMedia();
     QJsonArray problemList, missingList, disconnectedTracks, unusedAssets;
     for (const auto& item : problems) problemList.append(item);
@@ -509,7 +515,7 @@ QJsonObject McpServer::preflightReport() const {
             {"markers", static_cast<int>(c_.project.show.markers.size())}, {"assets", c_.project.assets.size()}}}};
 }
 
-QJsonObject McpServer::renderPreview(const QJsonObject& arguments) const {
+void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::function<void(QJsonObject)> finish) const {
     Frame time = c_.position();
     if (arguments.contains("time")) {
         const auto v = arguments["time"];
@@ -526,34 +532,100 @@ QJsonObject McpServer::renderPreview(const QJsonObject& arguments) const {
         maxWidth = v.toInt();
     }
     const int maxHeight = std::max(1, static_cast<int>(std::llround(static_cast<double>(maxWidth) * c_.project.height / std::max(1, c_.project.width))));
-    const QImage image = c_.composeAt(time, QSize(maxWidth, maxHeight));
-    QByteArray png;
-    QBuffer buffer(&png);
-    buffer.open(QIODevice::WriteOnly);
-    if (!image.save(&buffer, "PNG")) fail("Failed to encode preview PNG");
+    const QSize targetSize(maxWidth, maxHeight);
+    const Project projectSnapshot = c_.project;
+    const quint64 rev = revision_;
+
+    struct VideoRequest { std::string clipId; QString path; double sourceTime; };
+    std::vector<VideoRequest> videoRequests;
     QJsonArray activeClips, activeMarkers;
-    for (const auto& clip : c_.project.show.clips) {
+    for (const auto& clip : projectSnapshot.show.clips) {
         if (!clip.contains(time)) continue;
-        const auto& track = c_.project.show.tracks[clip.track];
+        const auto& track = projectSnapshot.show.tracks[clip.track];
         activeClips.append(QJsonObject{{"id", QString::fromStdString(clip.id)}, {"track", clip.track},
             {"track_name", QString::fromStdString(track.name)}, {"visual", track.visual}, {"muted", track.muted},
             {"asset", QString::fromStdString(clip.assetId)}, {"text", QString::fromStdString(clip.text)},
             {"start", static_cast<double>(clip.start)}, {"duration", static_cast<double>(clip.duration)}});
+        if (track.visual && !track.muted && clip.text.empty()) {
+            const Frame local = time - clip.start;
+            if (clip.alpha.at(local, clip.opacity) > 0) {
+                const auto asset = projectSnapshot.assets.constFind(QString::fromStdString(clip.assetId));
+                if (asset != projectSnapshot.assets.cend() && asset->video && !asset->offline) {
+                    double t = seconds(clip.offset + local);
+                    if (clip.loop) t = seconds(clip.offset) + std::fmod(seconds(local), std::max(.001, asset->duration - seconds(clip.offset)));
+                    t = std::min(t, std::max(0., asset->duration - 1. / std::max(1., asset->fps)));
+                    videoRequests.push_back({clip.id, asset->path, t});
+                }
+            }
+        }
     }
-    for (const auto& marker : c_.project.show.markers) {
+    for (const auto& marker : projectSnapshot.show.markers) {
         if (marker.time != time) continue;
         activeMarkers.append(QJsonObject{{"id", QString::fromStdString(marker.id)},
             {"name", QString::fromStdString(marker.name)}, {"hold", marker.hold}});
     }
-    QJsonObject meta{{"revision", static_cast<double>(revision_)}, {"time", static_cast<double>(time)},
-        {"seconds", seconds(time)}, {"timecode", timecode(time, c_.project.fps)},
-        {"width", image.width()}, {"height", image.height()},
-        {"project_width", c_.project.width}, {"project_height", c_.project.height},
-        {"active_clips", activeClips}, {"active_markers", activeMarkers}};
-    return {{"content", QJsonArray{
-            QJsonObject{{"type", "image"}, {"data", QString::fromLatin1(png.toBase64())}, {"mimeType", "image/png"}},
-            QJsonObject{{"type", "text"}, {"text", QString::fromUtf8(QJsonDocument(meta).toJson(QJsonDocument::Compact))}}}},
-        {"structuredContent", meta}, {"isError", false}};
+
+    auto sharedFinish = std::make_shared<std::function<void(QJsonObject)>>(std::move(finish));
+    auto encodeAndFinish = [this, time, projectSnapshot, activeClips, activeMarkers, rev, sharedFinish](QImage image) {
+        struct Encoded { QByteArray png; QString error; int width = 0, height = 0; };
+        auto* watcher = new QFutureWatcher<Encoded>(const_cast<McpServer*>(this));
+        connect(watcher, &QFutureWatcher<Encoded>::finished, const_cast<McpServer*>(this),
+            [watcher, time, projectSnapshot, activeClips, activeMarkers, rev, sharedFinish]() {
+                const auto encoded = watcher->result(); watcher->deleteLater();
+                if (!encoded.error.isEmpty()) {
+                    (*sharedFinish)(toolResult({{"error", encoded.error}, {"revision", static_cast<double>(rev)}}, true));
+                    return;
+                }
+                QJsonObject meta{{"revision", static_cast<double>(rev)}, {"time", static_cast<double>(time)},
+                    {"seconds", seconds(time)}, {"timecode", timecode(time, projectSnapshot.fps)},
+                    {"width", encoded.width}, {"height", encoded.height},
+                    {"project_width", projectSnapshot.width}, {"project_height", projectSnapshot.height},
+                    {"active_clips", activeClips}, {"active_markers", activeMarkers}};
+                (*sharedFinish)({{"content", QJsonArray{
+                        QJsonObject{{"type", "image"}, {"data", QString::fromLatin1(encoded.png.toBase64())}, {"mimeType", "image/png"}},
+                        QJsonObject{{"type", "text"}, {"text", QString::fromUtf8(QJsonDocument(meta).toJson(QJsonDocument::Compact))}}}},
+                    {"structuredContent", meta}, {"isError", false}});
+            });
+        watcher->setFuture(QtConcurrent::run([image = std::move(image)] {
+            Encoded out; out.width = image.width(); out.height = image.height();
+            QBuffer buffer(&out.png);
+            buffer.open(QIODevice::WriteOnly);
+            if (!image.save(&buffer, "PNG")) out.error = "Failed to encode preview PNG";
+            return out;
+        }));
+    };
+
+    if (videoRequests.empty()) {
+        // Text and still composition at targetSize is sub-millisecond on the GUI thread; PNG encoding stays off-thread.
+        QMap<std::string, QImage> emptyVideos;
+        encodeAndFinish(Controller::composeProjectAt(projectSnapshot, time, targetSize, &emptyVideos));
+        return;
+    }
+
+    struct DecodedVideos { QMap<std::string, QImage> frames; QString error; };
+    auto* watcher = new QFutureWatcher<DecodedVideos>(const_cast<McpServer*>(this));
+    connect(watcher, &QFutureWatcher<DecodedVideos>::finished, const_cast<McpServer*>(this),
+        [watcher, projectSnapshot, time, targetSize, rev, sharedFinish, encodeAndFinish = std::move(encodeAndFinish)]() mutable {
+            const auto decoded = watcher->result(); watcher->deleteLater();
+            if (!decoded.error.isEmpty()) {
+                (*sharedFinish)(toolResult({{"error", decoded.error}, {"revision", static_cast<double>(rev)}}, true));
+                return;
+            }
+            encodeAndFinish(Controller::composeProjectAt(projectSnapshot, time, targetSize, &decoded.frames));
+        });
+    watcher->setFuture(QtConcurrent::run([videoRequests = std::move(videoRequests), targetSize] {
+        DecodedVideos result;
+        for (const auto& req : videoRequests) {
+            QString err;
+            QImage frame = videoFrameAt(req.path, req.sourceTime, targetSize, &err);
+            if (frame.isNull()) {
+                result.error = err.isEmpty() ? QString("Failed to decode preview frame for %1").arg(QFileInfo(req.path).fileName()) : err;
+                return result;
+            }
+            result.frames.insert(req.clipId, std::move(frame));
+        }
+        return result;
+    }));
 }
 
 QJsonObject McpServer::appGuide(const QJsonObject& arguments) const {
@@ -661,35 +733,55 @@ QJsonObject McpServer::encodeMidiTool(const QJsonObject& a) const {
     return toolResult({{"bytes", jsonBytes}, {"hex", midiHex(bytes)}, {"summary", midiSummary(bytes)}});
 }
 
-QJsonObject McpServer::listMediaFiles(const QJsonObject& a) const {
-    if (!editing_) fail("Agent editing must be enabled to browse local media folders");
-    QString dirPath = a["directory"].toString().trimmed();
+void McpServer::listMediaFilesAsync(const QJsonObject& a, std::function<void(QJsonObject)> finish) {
+    checkEnabledAndUnlocked(true);
+    QString dirPath;
+    if (a.contains("directory")) {
+        if (!a["directory"].isString()) fail("directory must be a string");
+        dirPath = a["directory"].toString().trimmed();
+    }
     if (dirPath.isEmpty()) {
         if (c_.path.isEmpty()) fail("Supply an absolute directory path (current show is unsaved)");
         dirPath = QFileInfo(c_.path).absolutePath();
     }
+    if (a.contains("recursive") && !a["recursive"].isBool()) fail("recursive must be a boolean");
+    const bool recursive = a["recursive"].toBool(false);
     const QFileInfo dirInfo(dirPath);
     if (!dirInfo.isAbsolute() || !dirInfo.exists() || !dirInfo.isDir())
         fail("Directory must be an existing absolute local folder");
-    const bool recursive = a["recursive"].toBool(false);
-    QStringList paths;
-    QDirIterator it(dirInfo.absoluteFilePath(), QDir::Files, recursive ? QDirIterator::Subdirectories : QDirIterator::NoIteratorFlags);
-    bool truncated = false;
-    while (it.hasNext()) {
-        const QString file = it.next();
-        if (mediaKindForSuffix(QFileInfo(file).suffix()).isEmpty()) continue;
-        if (paths.size() >= 256) { truncated = true; break; }
-        paths << file;
-    }
-    paths.sort(Qt::CaseInsensitive);
-    QJsonArray files;
-    for (const auto& path : paths) {
-        const QFileInfo info(path);
-        files.append(QJsonObject{{"name", info.fileName()}, {"path", info.absoluteFilePath()},
-            {"kind", mediaKindForSuffix(info.suffix())}, {"size_bytes", static_cast<double>(info.size())}});
-    }
-    return toolResult({{"directory", dirInfo.absoluteFilePath()}, {"recursive", recursive},
-        {"files", files}, {"count", files.size()}, {"truncated", truncated}});
+    const QString rootPath = dirInfo.absoluteFilePath();
+
+    struct ScanResult { QJsonArray files; bool truncated = false; };
+    auto* watcher = new QFutureWatcher<ScanResult>(this);
+    connect(watcher, &QFutureWatcher<ScanResult>::finished, this, [watcher, rootPath, recursive, finish = std::move(finish)]() mutable {
+        const auto res = watcher->result(); watcher->deleteLater();
+        finish(toolResult({{"directory", rootPath}, {"recursive", recursive},
+            {"files", res.files}, {"count", res.files.size()}, {"truncated", res.truncated}}));
+    });
+    watcher->setFuture(QtConcurrent::run([rootPath, recursive] {
+        constexpr int maxMatches = 256;
+        constexpr int maxScanned = 4096;
+        QStringList paths;
+        bool truncated = false;
+        int scanned = 0;
+        QDirIterator it(rootPath, QDir::Files, recursive ? QDirIterator::Subdirectories : QDirIterator::NoIteratorFlags);
+        while (it.hasNext()) {
+            const QString file = it.next();
+            if (++scanned > maxScanned) { truncated = true; break; }
+            if (mediaKindForSuffix(QFileInfo(file).suffix()).isEmpty()) continue;
+            if (paths.size() >= maxMatches) { truncated = true; break; }
+            paths << file;
+        }
+        paths.sort(Qt::CaseInsensitive);
+        ScanResult result;
+        result.truncated = truncated;
+        for (const auto& path : paths) {
+            const QFileInfo info(path);
+            result.files.append(QJsonObject{{"name", info.fileName()}, {"path", info.absoluteFilePath()},
+                {"kind", mediaKindForSuffix(info.suffix())}, {"size_bytes", static_cast<double>(info.size())}});
+        }
+        return result;
+    }));
 }
 
 QJsonObject McpServer::relinkMediaTool(const QJsonObject& a) {
@@ -770,29 +862,40 @@ QJsonObject McpServer::historyTool(const QJsonObject& a) {
 
 QJsonObject McpServer::seekAndSelectTool(const QJsonObject& a) {
     checkEnabledAndUnlocked(true);
+    std::optional<Frame> targetTime;
     if (a.contains("time")) {
         const auto v = a["time"];
         if (!v.isDouble() || !std::isfinite(v.toDouble()) || v.toDouble() < 0 || v.toDouble() > maxFrame || std::floor(v.toDouble()) != v.toDouble())
             fail("Invalid timeline time");
         const Frame target = static_cast<Frame>(v.toDouble());
         if (target > c_.project.show.duration) fail("Seek time exceeds project duration");
-        c_.seek(target);
+        targetTime = target;
     }
     int track = -1;
     if (a.contains("track")) {
         const auto v = a["track"];
-        if (!v.isDouble() || std::floor(v.toDouble()) != v.toDouble() || v.toInt() < 0 || v.toInt() >= static_cast<int>(c_.project.show.tracks.size()))
+        if (!v.isDouble() || !std::isfinite(v.toDouble()) || std::floor(v.toDouble()) != v.toDouble() ||
+            v.toDouble() < 0 || v.toDouble() >= static_cast<double>(c_.project.show.tracks.size()))
             fail("Track index out of range");
-        track = v.toInt();
+        track = static_cast<int>(v.toDouble());
     }
-    const QString clipId = a["clip_id"].toString();
-    if (!clipId.isEmpty() && std::none_of(c_.project.show.clips.begin(), c_.project.show.clips.end(),
-            [&](const Clip& c) { return c.id == clipId.toStdString(); }))
-        fail("Unknown clip ID");
-    const QString markerId = a["marker_id"].toString();
-    if (!markerId.isEmpty() && std::none_of(c_.project.show.markers.begin(), c_.project.show.markers.end(),
-            [&](const Marker& m) { return m.id == markerId.toStdString(); }))
-        fail("Unknown marker ID");
+    QString clipId;
+    if (a.contains("clip_id")) {
+        if (!a["clip_id"].isString()) fail("clip_id must be a string");
+        clipId = a["clip_id"].toString();
+        if (!clipId.isEmpty() && std::none_of(c_.project.show.clips.begin(), c_.project.show.clips.end(),
+                [&](const Clip& c) { return c.id == clipId.toStdString(); }))
+            fail("Unknown clip ID");
+    }
+    QString markerId;
+    if (a.contains("marker_id")) {
+        if (!a["marker_id"].isString()) fail("marker_id must be a string");
+        markerId = a["marker_id"].toString();
+        if (!markerId.isEmpty() && std::none_of(c_.project.show.markers.begin(), c_.project.show.markers.end(),
+                [&](const Marker& m) { return m.id == markerId.toStdString(); }))
+            fail("Unknown marker ID");
+    }
+    if (targetTime && !c_.seek(*targetTime)) fail(c_.status);
     if (host_.selectItem && (track >= 0 || !clipId.isEmpty() || !markerId.isEmpty()))
         host_.selectItem(track, clipId, markerId);
     return toolResult({{"position", static_cast<double>(c_.position())}, {"seconds", seconds(c_.position())},
@@ -806,12 +909,23 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
     if (!a.contains("audio") && !a.contains("midi") && !a.contains("display") && !a.contains("test_midi"))
         fail("Provide at least one of audio, midi, display, or test_midi");
 
+    // Phase 1: Validate every nested field and resolve targets before mutating any real outputs.
+    struct PlannedAudio { RtAudio::Api api; unsigned deviceId; QString name; unsigned channels; unsigned buffer; };
+    std::optional<PlannedAudio> plannedAudio;
+    std::optional<int> plannedMidiPort;
+    struct PlannedDisplay { bool open = false; int screen = 0; bool allowCover = false; };
+    std::optional<PlannedDisplay> plannedDisplay;
+    std::optional<std::vector<unsigned char>> plannedTestMidi;
+
     if (a.contains("audio")) {
         if (!a["audio"].isObject()) fail("audio must be an object");
         const auto cfg = a["audio"].toObject();
+        knownFields(cfg, {{"api", {}}, {"device", {}}, {"channels", {}}, {"buffer", {}}});
+        if (cfg.isEmpty()) fail("audio must specify at least one setting");
         QSettings settings;
         RtAudio::Api api = static_cast<RtAudio::Api>(settings.value("audio/api", static_cast<int>(RtAudio::UNSPECIFIED)).toInt());
         if (cfg.contains("api")) {
+            if (!cfg["api"].isString()) fail("audio.api must be a string");
             const QString wantedApi = cfg["api"].toString().trimmed();
             bool matched = false;
             for (const auto& [id, name] : c_.device.apis()) {
@@ -821,8 +935,12 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
             }
             if (!matched) fail("Unknown audio driver/API: " + wantedApi);
         }
+        QString wantedDevice;
+        if (cfg.contains("device")) {
+            if (!cfg["device"].isString()) fail("audio.device must be a string");
+            wantedDevice = cfg["device"].toString().trimmed();
+        }
         const auto devices = c_.device.devices(api);
-        const QString wantedDevice = cfg["device"].toString().trimmed();
         std::optional<DeviceDescription> chosen;
         if (wantedDevice.isEmpty()) {
             chosen = playbackDevice(devices, settings.value("audio/device").toString());
@@ -832,19 +950,33 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
             if (!chosen) fail("Audio device not found: " + wantedDevice);
         }
         if (!chosen) fail("No available audio output device found");
-        const unsigned channels = cfg.contains("channels") ? static_cast<unsigned>(cfg["channels"].toInt()) : settings.value("audio/channels", 2).toUInt();
+        unsigned channels = settings.value("audio/channels", 2).toUInt();
+        if (cfg.contains("channels")) {
+            const auto v = cfg["channels"];
+            if (!v.isDouble() || !std::isfinite(v.toDouble()) || std::floor(v.toDouble()) != v.toDouble() || v.toDouble() < 1 || v.toDouble() > 256)
+                fail("audio.channels must be an integer between 1 and 256");
+            channels = static_cast<unsigned>(v.toDouble());
+        }
         if (channels < 1 || channels > chosen->channels)
             fail(QString("Requested %1 channels, but %2 provides %3 outputs").arg(channels).arg(chosen->name).arg(chosen->channels));
-        const unsigned buffer = cfg.contains("buffer") ? static_cast<unsigned>(cfg["buffer"].toInt()) : settings.value("audio/buffer", 512).toUInt();
-        if (buffer < 32 || buffer > 8192) fail("Buffer size must be between 32 and 8192 samples");
-        if (!c_.configureAudio(api, chosen->id, chosen->name, channels, buffer)) fail(c_.status);
+        unsigned buffer = settings.value("audio/buffer", 512).toUInt();
+        if (cfg.contains("buffer")) {
+            const auto v = cfg["buffer"];
+            if (!v.isDouble() || !std::isfinite(v.toDouble()) || std::floor(v.toDouble()) != v.toDouble() || v.toDouble() < 32 || v.toDouble() > 8192)
+                fail("audio.buffer must be an integer between 32 and 8192 samples");
+            buffer = static_cast<unsigned>(v.toDouble());
+        }
+        plannedAudio = PlannedAudio{api, chosen->id, chosen->name, channels, buffer};
     }
 
     if (a.contains("midi")) {
         if (!a["midi"].isObject()) fail("midi must be an object");
-        const QString portName = a["midi"].toObject()["port"].toString().trimmed();
+        const auto cfg = a["midi"].toObject();
+        knownFields(cfg, {{"port", {}}});
+        if (!cfg.contains("port") || !cfg["port"].isString()) fail("midi.port must be a string");
+        const QString portName = cfg["port"].toString().trimmed();
         if (portName.isEmpty() || portName.compare("none", Qt::CaseInsensitive) == 0 || portName.compare("off", Qt::CaseInsensitive) == 0) {
-            if (!c_.configureMidi(-1)) fail(c_.status);
+            plannedMidiPort = -1;
         } else {
             const auto ports = c_.midi.ports();
             int index = ports.indexOf(portName);
@@ -853,35 +985,65 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
                     if (ports[i].compare(portName, Qt::CaseInsensitive) == 0) { index = i; break; }
             }
             if (index < 0) fail("MIDI port not found: " + portName);
-            if (!c_.configureMidi(index)) fail(c_.status);
+            plannedMidiPort = index;
         }
     }
 
     if (a.contains("display")) {
         if (!a["display"].isObject()) fail("display must be an object");
         const auto disp = a["display"].toObject();
-        const bool open = disp["open"].toBool();
-        if (!open) {
-            if (host_.closeDisplay) host_.closeDisplay();
-        } else {
-            if (!host_.openDisplay) fail("Audience display control is unavailable without a main window");
-            const int screenIndex = disp.contains("screen") ? disp["screen"].toInt(-1) : 0;
-            const bool allowCover = disp["allow_cover_editor"].toBool(false);
-            QString error;
-            if (!host_.openDisplay(screenIndex, allowCover, error)) fail(error.isEmpty() ? "Could not open audience display" : error);
+        knownFields(disp, {{"open", {}}, {"screen", {}}, {"allow_cover_editor", {}}});
+        if (!disp.contains("open") || !disp["open"].isBool()) fail("display.open must be a boolean");
+        PlannedDisplay d;
+        d.open = disp["open"].toBool();
+        if (disp.contains("screen")) {
+            const auto v = disp["screen"];
+            if (!v.isDouble() || !std::isfinite(v.toDouble()) || std::floor(v.toDouble()) != v.toDouble() || v.toDouble() < 0 || v.toDouble() > 64)
+                fail("display.screen must be an integer between 0 and 64");
+            d.screen = static_cast<int>(v.toDouble());
         }
+        if (disp.contains("allow_cover_editor")) {
+            if (!disp["allow_cover_editor"].isBool()) fail("display.allow_cover_editor must be a boolean");
+            d.allowCover = disp["allow_cover_editor"].toBool();
+        }
+        if (d.open && !host_.openDisplay) fail("Audience display control is unavailable without a main window");
+        plannedDisplay = d;
     }
 
     if (a.contains("test_midi")) {
         if (!a["test_midi"].isObject()) fail("test_midi must be an object");
-        const auto arr = a["test_midi"].toObject()["message"].toArray();
+        const auto cfg = a["test_midi"].toObject();
+        knownFields(cfg, {{"message", {}}});
+        if (!cfg["message"].isArray() || cfg["message"].toArray().isEmpty()) fail("test_midi.message must be a non-empty byte array");
         std::vector<unsigned char> bytes;
-        for (const auto& v : arr) {
-            if (!v.isDouble() || std::floor(v.toDouble()) != v.toDouble() || v.toInt() < 0 || v.toInt() > 255)
+        for (const auto& v : cfg["message"].toArray()) {
+            if (!v.isDouble() || !std::isfinite(v.toDouble()) || std::floor(v.toDouble()) != v.toDouble() || v.toDouble() < 0 || v.toDouble() > 255)
                 fail("Invalid MIDI byte");
-            bytes.push_back(static_cast<unsigned char>(v.toInt()));
+            bytes.push_back(static_cast<unsigned char>(v.toDouble()));
         }
-        if (!c_.testMidi(bytes)) fail(c_.status);
+        if (!validMidi(bytes)) fail("Complete the MIDI message before testing it");
+        plannedTestMidi = std::move(bytes);
+    }
+
+    // Phase 2: Apply validated changes.
+    if (plannedAudio) {
+        if (!c_.configureAudio(plannedAudio->api, plannedAudio->deviceId, plannedAudio->name, plannedAudio->channels, plannedAudio->buffer))
+            fail(c_.status);
+    }
+    if (plannedMidiPort) {
+        if (!c_.configureMidi(*plannedMidiPort)) fail(c_.status);
+    }
+    if (plannedDisplay) {
+        if (!plannedDisplay->open) {
+            if (host_.closeDisplay) host_.closeDisplay();
+        } else {
+            QString error;
+            if (!host_.openDisplay(plannedDisplay->screen, plannedDisplay->allowCover, error))
+                fail(error.isEmpty() ? "Could not open audience display" : error);
+        }
+    }
+    if (plannedTestMidi) {
+        if (!c_.testMidi(*plannedTestMidi)) fail(c_.status);
     }
 
     return toolResult(environmentReport());
@@ -890,18 +1052,34 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
 QJsonObject McpServer::configureRemoteTool(const QJsonObject& a) {
     checkEnabledAndUnlocked(false);
     if (!host_.configureRemote) fail("Phone remote control is unavailable without a main window");
+    if (!a["enabled"].isBool()) fail("enabled must be a boolean");
     const bool enabled = a["enabled"].toBool();
-    const int port = a.contains("port") ? a["port"].toInt() : -1;
+    int port = -1;
+    if (a.contains("port")) {
+        const auto v = a["port"];
+        if (!v.isDouble() || !std::isfinite(v.toDouble()) || std::floor(v.toDouble()) != v.toDouble() || v.toDouble() < 1024 || v.toDouble() > 65535)
+            fail("port must be an integer between 1024 and 65535");
+        port = static_cast<int>(v.toDouble());
+    }
+    if (a.contains("change_key") && !a["change_key"].isBool()) fail("change_key must be a boolean");
     const bool changeKey = a["change_key"].toBool(false);
     QString error;
     if (!host_.configureRemote(enabled, port, changeKey, error)) fail(error.isEmpty() ? "Could not configure phone remote" : error);
-    return toolResult(host_.remoteStatus ? host_.remoteStatus() : QJsonObject{{"running", enabled}});
+    QJsonObject status = host_.remoteStatus ? host_.remoteStatus() : QJsonObject{{"running", enabled}};
+    status.remove("links");
+    return toolResult(status);
 }
 
 QJsonObject McpServer::projectActionTool(const QJsonObject& a) {
     checkEnabledAndUnlocked(true);
+    if (!a["action"].isString()) fail("action must be a string");
     const QString action = a["action"].toString();
-    QString path = a["path"].toString().trimmed();
+    QString path;
+    if (a.contains("path")) {
+        if (!a["path"].isString()) fail("path must be a string");
+        path = a["path"].toString().trimmed();
+    }
+    if (a.contains("discard_unsaved") && !a["discard_unsaved"].isBool()) fail("discard_unsaved must be a boolean");
     const bool discard = a["discard_unsaved"].toBool(false);
 
     if (action == "save" || action == "save_as") {
@@ -909,8 +1087,8 @@ QJsonObject McpServer::projectActionTool(const QJsonObject& a) {
         if (target.isEmpty()) fail("Provide an absolute path to save an untitled show");
         if (!QFileInfo(target).isAbsolute()) fail("Save path must be an absolute local file path");
         if (!target.endsWith(".savshow", Qt::CaseInsensitive)) target += ".savshow";
-        c_.save(target);
-        if (c_.dirty) fail(c_.status);
+        if (!c_.save(target)) fail(c_.status);
+        path = target;
     } else if (action == "export_package") {
         if (path.isEmpty() || !QFileInfo(path).isAbsolute()) fail("Provide an absolute local path for .savpack export");
         if (!isProjectPackage(path)) path += ".savpack";
@@ -946,31 +1124,39 @@ QJsonObject McpServer::projectActionTool(const QJsonObject& a) {
 
 QJsonObject McpServer::transportControlTool(const QJsonObject& a) {
     checkEnabledAndUnlocked(false);
+    if (!a["action"].isString()) fail("action must be a string");
     const QString action = a["action"].toString();
     const State state = c_.transport.state();
+    bool accepted = true;
     if (action == "play" || action == "continue") {
         if (state != State::Playing) {
-            c_.toggle();
-            if (!c_.playbackProblem.isEmpty()) fail(c_.playbackProblem);
+            accepted = c_.toggle();
+            if (!accepted) fail(c_.playbackProblem.isEmpty() ? c_.status : c_.playbackProblem);
         }
     } else if (action == "pause") {
-        if (state == State::Playing) c_.toggle();
+        if (state == State::Playing) {
+            accepted = c_.toggle();
+            if (!accepted) fail(c_.status);
+        }
     } else if (action == "stop_all") {
-        c_.stopAll();
+        accepted = c_.stopAll();
+        if (!accepted) fail(c_.status);
     } else if (action == "seek") {
         const auto v = a["time"];
         if (!v.isDouble() || !std::isfinite(v.toDouble()) || v.toDouble() < 0 || v.toDouble() > maxFrame || std::floor(v.toDouble()) != v.toDouble())
             fail("Provide a valid integer frame time for seek");
         const Frame target = static_cast<Frame>(v.toDouble());
         if (target > c_.project.show.duration) fail("Seek time exceeds project duration");
-        c_.seek(target);
+        accepted = c_.seek(target);
+        if (!accepted) fail(c_.status);
     } else {
         fail("Unknown transport action: " + action);
     }
-    return toolResult({{"action", action}, {"transport", stateName(c_.transport.state())},
+    return toolResult({{"action", action}, {"accepted", accepted}, {"transport", stateName(c_.transport.state())},
         {"position", static_cast<double>(c_.position())}, {"seconds", seconds(c_.position())},
         {"timecode", timecode(c_.position(), c_.project.fps)},
         {"async_voices", static_cast<int>(c_.transport.asyncVoices())},
+        {"warning", c_.playbackProblem},
         {"playback_problem", c_.playbackProblem}});
 }
 
@@ -979,30 +1165,30 @@ QJsonObject McpServer::importStatus() const {
     return {{"job_id", importId_}, {"state", importState_}, {"error", importError_}, {"assets", assets}};
 }
 
-QJsonObject McpServer::callTool(const QString& name, const QJsonObject& a) {
+void McpServer::callTool(const QString& name, const QJsonObject& a, std::function<void(QJsonObject)> finish) {
     try {
         QJsonObject schema;
         for (const auto& t : tools()) if (t.toObject()["name"] == name) schema = t.toObject()["inputSchema"].toObject();
         if (schema.isEmpty()) fail("Unknown tool: " + name);
         knownFields(a, schema["properties"].toObject());
         for (const auto& key : schema["required"].toArray()) if (!a.contains(key.toString())) fail("Missing argument: " + key.toString());
-        if (name == "get_show") return toolResult(snapshot());
-        if (name == "get_preflight") return toolResult(preflightReport());
-        if (name == "render_preview") return renderPreview(a);
-        if (name == "get_environment") return toolResult(environmentReport());
-        if (name == "get_app_guide") return appGuide(a);
-        if (name == "encode_midi") return encodeMidiTool(a);
-        if (name == "list_media_files") return listMediaFiles(a);
-        if (name == "relink_media") return relinkMediaTool(a);
-        if (name == "history") return historyTool(a);
-        if (name == "seek_and_select") return seekAndSelectTool(a);
-        if (name == "configure_outputs") return configureOutputsTool(a);
-        if (name == "configure_remote") return configureRemoteTool(a);
-        if (name == "project_action") return projectActionTool(a);
-        if (name == "transport_control") return transportControlTool(a);
+        if (name == "get_show") { finish(toolResult(snapshot())); return; }
+        if (name == "get_preflight") { finish(toolResult(preflightReport())); return; }
+        if (name == "render_preview") { renderPreviewAsync(a, finish); return; }
+        if (name == "get_environment") { finish(toolResult(environmentReport())); return; }
+        if (name == "get_app_guide") { finish(appGuide(a)); return; }
+        if (name == "encode_midi") { finish(encodeMidiTool(a)); return; }
+        if (name == "list_media_files") { listMediaFilesAsync(a, finish); return; }
+        if (name == "relink_media") { finish(relinkMediaTool(a)); return; }
+        if (name == "history") { finish(historyTool(a)); return; }
+        if (name == "seek_and_select") { finish(seekAndSelectTool(a)); return; }
+        if (name == "configure_outputs") { finish(configureOutputsTool(a)); return; }
+        if (name == "configure_remote") { finish(configureRemoteTool(a)); return; }
+        if (name == "project_action") { finish(projectActionTool(a)); return; }
+        if (name == "transport_control") { finish(transportControlTool(a)); return; }
         if (name == "get_import" || name == "commit_import") {
             if (!a["job_id"].isString() || importId_.isEmpty() || a["job_id"].toString() != importId_) fail("Unknown import job");
-            if (name == "get_import") return toolResult(importStatus());
+            if (name == "get_import") { finish(toolResult(importStatus())); return; }
             checkWrite(a);
             if (importState_ != "ready") fail("Import job is not ready to commit");
             if (!c_.edit([&](Project& p) { for (const auto& asset : imported_) p.assets.insert(asset.id, asset); })) fail(c_.status);
@@ -1010,7 +1196,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& a) {
             const QString summary = QString("Agent imported %1 media file%2.").arg(imported_.size()).arg(imported_.size() == 1 ? "" : "s");
             c_.report(summary + " Undo restores the previous show.");
             emit showModified(summary);
-            auto result = snapshot(); result.insert("import", importStatus()); imported_.clear(); return toolResult(result);
+            auto result = snapshot(); result.insert("import", importStatus()); imported_.clear(); finish(toolResult(result)); return;
         }
         checkWrite(a);
         if (name == "apply_edits") {
@@ -1020,7 +1206,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& a) {
             const QString summary = QString("Agent applied %1 edit%2.").arg(count).arg(count == 1 ? "" : "s");
             c_.report(summary + " Undo restores the previous show.");
             emit showModified(summary);
-            return toolResult(snapshot());
+            finish(toolResult(snapshot())); return;
         }
         if (!a["paths"].isArray() || a["paths"].toArray().isEmpty() || a["paths"].toArray().size() > 64) fail("Supply between 1 and 64 local file paths");
         if (importState_ == "preparing") fail("Media preparation is already running");
@@ -1044,23 +1230,25 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& a) {
             catch (const std::exception& e) { result.error = QString::fromUtf8(e.what()); result.assets.clear(); }
             return result;
         }));
-        return toolResult(importStatus());
+        finish(toolResult(importStatus()));
     } catch (const std::exception& e) {
-        return toolResult({{"error", QString::fromUtf8(e.what())}, {"revision", static_cast<double>(revision_)}}, true);
+        finish(toolResult({{"error", QString::fromUtf8(e.what())}, {"revision", static_cast<double>(revision_)}}, true));
     }
 }
 
-QJsonObject McpServer::dispatch(const QJsonObject& request) {
+void McpServer::dispatch(const QJsonObject& request, std::function<void(QJsonObject)> finish) {
     const auto id = request["id"];
-    auto error = [&](int code, const QString& message) { return QJsonObject{{"jsonrpc", "2.0"}, {"id", id.isUndefined() ? QJsonValue(QJsonValue::Null) : id}, {"error", QJsonObject{{"code", code}, {"message", message}}}}; };
+    auto error = [&](int code, const QString& message) {
+        finish(QJsonObject{{"jsonrpc", "2.0"}, {"id", id.isUndefined() ? QJsonValue(QJsonValue::Null) : id}, {"error", QJsonObject{{"code", code}, {"message", message}}}});
+    };
     if (request["jsonrpc"] != "2.0" || !request["method"].isString() ||
-        (!id.isUndefined() && !id.isString() && (!id.isDouble() || std::floor(id.toDouble()) != id.toDouble()))) return error(-32600, "Invalid JSON-RPC request");
-    if (request.contains("params") && !request["params"].isObject()) return error(-32602, "Parameters must be an object");
+        (!id.isUndefined() && !id.isString() && (!id.isDouble() || std::floor(id.toDouble()) != id.toDouble()))) { error(-32600, "Invalid JSON-RPC request"); return; }
+    if (request.contains("params") && !request["params"].isObject()) { error(-32602, "Parameters must be an object"); return; }
     const auto method = request["method"].toString(); const auto params = request["params"].toObject();
-    if (id.isUndefined()) return {}; // Notifications never produce JSON-RPC responses.
+    if (id.isUndefined()) { finish({}); return; } // Notifications never produce JSON-RPC responses.
     QJsonObject result;
     if (method == "initialize") {
-        if (!params["protocolVersion"].isString() || !params["capabilities"].isObject() || !params["clientInfo"].isObject()) return error(-32602, "Invalid initialization parameters");
+        if (!params["protocolVersion"].isString() || !params["capabilities"].isObject() || !params["clientInfo"].isObject()) { error(-32602, "Invalid initialization parameters"); return; }
         result = {{"protocolVersion", versions.contains(params["protocolVersion"].toString()) ? params["protocolVersion"] : QJsonValue(versions.front())},
             {"capabilities", QJsonObject{{"tools", QJsonObject{}}, {"resources", QJsonObject{}}}},
             {"serverInfo", QJsonObject{{"name", "simpleavshow"}, {"version", "1.1.0"}}},
@@ -1068,10 +1256,13 @@ QJsonObject McpServer::dispatch(const QJsonObject& request) {
     } else if (method == "ping") result = {};
     else if (method == "tools/list") result = {{"tools", tools()}};
     else if (method == "tools/call") {
-        if (!params["name"].isString() || (params.contains("arguments") && !params["arguments"].isObject())) return error(-32602, "Invalid tool call");
+        if (!params["name"].isString() || (params.contains("arguments") && !params["arguments"].isObject())) { error(-32602, "Invalid tool call"); return; }
         bool found = false; for (const auto& t : tools()) found |= t.toObject()["name"] == params["name"];
-        if (!found) return error(-32602, "Unknown tool");
-        result = callTool(params["name"].toString(), params["arguments"].toObject());
+        if (!found) { error(-32602, "Unknown tool"); return; }
+        callTool(params["name"].toString(), params["arguments"].toObject(), [id, finish = std::move(finish)](QJsonObject toolRes) {
+            finish({{"jsonrpc", "2.0"}, {"id", id}, {"result", toolRes}});
+        });
+        return;
     } else if (method == "resources/list") {
         QJsonArray resources{
             QJsonObject{{"uri", "simpleavshow://show"}, {"name", "Current shared show"}, {"mimeType", "application/json"}},
@@ -1097,10 +1288,10 @@ QJsonObject McpServer::dispatch(const QJsonObject& request) {
                     matched = true; break;
                 }
             }
-            if (!matched) return error(-32602, "Unknown documentation resource");
-        } else return error(-32602, "Unknown resource");
-    } else return error(-32601, "Method not found");
-    return {{"jsonrpc", "2.0"}, {"id", id}, {"result", result}};
+            if (!matched) { error(-32602, "Unknown documentation resource"); return; }
+        } else { error(-32602, "Unknown resource"); return; }
+    } else { error(-32601, "Method not found"); return; }
+    finish({{"jsonrpc", "2.0"}, {"id", id}, {"result", result}});
 }
 
 void McpServer::acceptConnection() {
@@ -1112,10 +1303,11 @@ void McpServer::acceptConnection() {
         auto* timeout = new QTimer(socket); timeout->setSingleShot(true); timeout->start(10000);
         connect(timeout, &QTimer::timeout, socket, &QTcpSocket::abort);
         auto buffer = std::make_shared<QByteArray>(); auto done = std::make_shared<bool>(false);
-        connect(socket, &QTcpSocket::readyRead, this, [this, socket, buffer, done] {
+        connect(socket, &QTcpSocket::readyRead, this, [this, socket, timeout, buffer, done] {
             if (*done) return;
-            auto respond = [&](int status, const QByteArray& reason, const QByteArray& body = QByteArray(), const QByteArray& extra = QByteArray()) {
+            auto respond = [socket = QPointer<QTcpSocket>(socket), done](int status, const QByteArray& reason, const QByteArray& body = QByteArray(), const QByteArray& extra = QByteArray()) {
                 *done = true;
+                if (!socket || socket->state() != QAbstractSocket::ConnectedState) return;
                 socket->write("HTTP/1.1 " + QByteArray::number(status) + " " + reason + "\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size()) +
                     "\r\nConnection: close\r\nCache-Control: no-store\r\n" + extra + "\r\n" + body);
                 socket->disconnectFromHost();
@@ -1161,9 +1353,12 @@ void McpServer::acceptConnection() {
                     {"error", QJsonObject{{"code", parseError.error == QJsonParseError::NoError ? -32600 : -32700}, {"message", "Invalid JSON-RPC message"}}}};
                 respond(400, "Bad Request", QJsonDocument(error).toJson(QJsonDocument::Compact)); return;
             }
-            const auto result = dispatch(doc.object());
-            if (result.isEmpty()) respond(202, "Accepted");
-            else respond(200, "OK", QJsonDocument(result).toJson(QJsonDocument::Compact));
+            *done = true;
+            timeout->start(15000);
+            dispatch(doc.object(), [respond](QJsonObject result) {
+                if (result.isEmpty()) respond(202, "Accepted");
+                else respond(200, "OK", QJsonDocument(result).toJson(QJsonDocument::Compact));
+            });
         });
     }
 }

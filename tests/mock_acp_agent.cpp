@@ -21,12 +21,18 @@ int main(int argc, char** argv) {
     const bool httpMcp = args.contains("--http-mcp");
     const bool requirePermission = args.contains("--require-permission");
     const bool holdPrompt = args.contains("--hold-prompt");
+    const bool badProtocol = args.contains("--bad-protocol");
+    const bool missingProtocol = args.contains("--missing-protocol");
+    const bool staleOnNewSession = args.contains("--stale-on-new-session");
+    const bool longPermission = args.contains("--long-permission");
 
+    int sessionCounter = 0;
     QString sessionId = "mock-session-1";
     QJsonArray lastMcpServers;
     bool waitingPermission = false;
     bool waitingCancel = false;
     QJsonValue pendingPromptId;
+    QString pendingPromptSession;
     QString pendingPromptText;
 
     auto finishPrompt = [&](const QString& note) {
@@ -99,45 +105,68 @@ int main(int argc, char** argv) {
 
         if (method == "initialize") {
             std::cerr << "mock-acp-agent initialized\n" << std::flush;
-            send({{"jsonrpc", "2.0"}, {"id", id}, {"result", QJsonObject{
-                {"protocolVersion", 1},
+            QJsonObject initResult{
                 {"agentInfo", QJsonObject{{"name", "MockACP"}, {"version", "1.0"}}},
                 {"agentCapabilities", QJsonObject{
                     {"mcpCapabilities", QJsonObject{{"http", httpMcp}, {"sse", false}}}
                 }}
-            }}});
+            };
+            if (badProtocol) initResult.insert("protocolVersion", 99);
+            else if (!missingProtocol) initResult.insert("protocolVersion", 1);
+            send({{"jsonrpc", "2.0"}, {"id", id}, {"result", initResult}});
         } else if (method == "session/new") {
             lastMcpServers = params["mcpServers"].toArray();
+            const QString previousSession = pendingPromptSession;
+            const QJsonValue stalePromptId = pendingPromptId;
+            sessionId = QString("mock-session-%1").arg(++sessionCounter);
             send({{"jsonrpc", "2.0"}, {"id", id}, {"result", QJsonObject{{"sessionId", sessionId}}}});
+            if (staleOnNewSession && !stalePromptId.isUndefined() && !stalePromptId.isNull()) {
+                // Emit stale update and stale prompt completion for the superseded session.
+                send({{"jsonrpc", "2.0"}, {"method", "session/update"}, {"params", QJsonObject{
+                    {"sessionId", previousSession},
+                    {"update", QJsonObject{
+                        {"sessionUpdate", "agent_message_chunk"},
+                        {"content", QJsonObject{{"type", "text"}, {"text", "STALE_SESSION_OUTPUT"}}}
+                    }}
+                }}});
+                send({{"jsonrpc", "2.0"}, {"id", stalePromptId}, {"result", QJsonObject{{"stopReason", "cancelled"}}}});
+                pendingPromptId = QJsonValue();
+                pendingPromptSession.clear();
+                waitingCancel = false;
+            }
         } else if (method == "session/prompt") {
             pendingPromptId = id;
+            pendingPromptSession = params["sessionId"].toString(sessionId);
             const auto blocks = params["prompt"].toArray();
             pendingPromptText = blocks.isEmpty() ? QString() : blocks.first().toObject()["text"].toString();
             if (requirePermission) {
                 waitingPermission = true;
+                QJsonObject rawInput{{"action", "apply_edits"}};
+                if (longPermission) rawInput.insert("payload", QString(320, 'X') + "TAIL_MARKER_END");
                 send({{"jsonrpc", "2.0"}, {"id", "perm-1"}, {"method", "session/request_permission"}, {"params", QJsonObject{
-                    {"sessionId", sessionId},
+                    {"sessionId", pendingPromptSession},
                     {"toolCall", QJsonObject{
                         {"toolCallId", "tc-perm"},
-                        {"title", "Apply edits to show"},
+                        {"title", "<b>Apply edits to show</b>"},
                         {"kind", "edit"},
-                        {"rawInput", QJsonObject{{"action", "apply_edits"}}}
+                        {"rawInput", rawInput}
                     }},
                     {"options", QJsonArray{
                         QJsonObject{{"optionId", "allow-once"}, {"name", "Allow once"}, {"kind", "allow_once"}},
                         QJsonObject{{"optionId", "reject-once"}, {"name", "Reject"}, {"kind", "reject_once"}}
                     }}
                 }}});
-            } else if (holdPrompt) {
+            } else if (holdPrompt && (!staleOnNewSession || sessionCounter == 1)) {
                 waitingCancel = true;
             } else {
                 finishPrompt("ok");
             }
         } else if (method == "session/cancel") {
-            if (waitingCancel && !pendingPromptId.isUndefined() && !pendingPromptId.isNull()) {
+            if (waitingCancel && !staleOnNewSession && !pendingPromptId.isUndefined() && !pendingPromptId.isNull()) {
                 waitingCancel = false;
                 send({{"jsonrpc", "2.0"}, {"id", pendingPromptId}, {"result", QJsonObject{{"stopReason", "cancelled"}}}});
                 pendingPromptId = QJsonValue();
+                pendingPromptSession.clear();
             }
         }
     }

@@ -100,6 +100,14 @@ signals:
 
 private:
     enum class PendingKind { Initialize, SessionNew, Prompt };
+    struct PendingRequest {
+        PendingKind kind = PendingKind::Initialize;
+        QString sessionId;
+    };
+    struct PendingPermission {
+        QJsonValue rpcId;
+        QString sessionId;
+    };
 
     QProcess* process_ = nullptr;
     AcpState state_ = AcpState::Disconnected;
@@ -112,12 +120,12 @@ private:
     QByteArray stdoutBuffer_;
     int nextId_ = 1;
     int nextPermissionKey_ = 1;
-    QMap<int, PendingKind> pending_;
-    QMap<int, QJsonValue> pendingPermissions_;
+    QMap<int, PendingRequest> pending_;
+    QMap<int, PendingPermission> pendingPermissions_;
 
     void setState(AcpState next);
     void sendJson(const QJsonObject& payload);
-    int sendRequest(const QString& method, const QJsonObject& params, PendingKind kind);
+    int sendRequest(const QString& method, const QJsonObject& params, PendingKind kind, const QString& sessionId = {});
     void sendNotification(const QString& method, const QJsonObject& params);
     void sendResponse(const QJsonValue& id, const QJsonObject& result);
     void sendErrorResponse(const QJsonValue& id, int code, const QString& message);
@@ -127,7 +135,7 @@ private:
     void handleNotification(const QString& method, const QJsonObject& params);
     void handleAgentRequest(const QJsonValue& id, const QString& method, const QJsonObject& params);
     QJsonArray buildMcpServers();
-    void cancelAllPendingPermissions();
+    void cancelAllPendingPermissions(const QString& onlySessionId = {});
     void failConnection(const QString& message);
 };
 
