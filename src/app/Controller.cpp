@@ -144,6 +144,7 @@ bool Controller::routesValid() const {
 void Controller::toggle() {
     if (busy) return;
     const State state = transport.state(); const bool playing = state == State::Playing;
+    const bool recovering = !playing && !playbackProblem.isEmpty();
     if (!playing) {
         playbackProblem.clear();
         // Re-arming retries sources that were briefly unavailable; changed sources still need reopening.
@@ -161,6 +162,7 @@ void Controller::toggle() {
         if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return; }
     }
     if (!transport.command({playing ? Action::Pause : Action::Play})) report("Transport command queue is full");
+    else if (recovering) report("Playback resumed."); // Replaces the resolved problem in the status bar.
 }
 void Controller::seek(Frame time) {
     if (busy || showMode) { report(showMode ? "Leave show mode to jump on the timeline" : "Media is loading"); return; }
