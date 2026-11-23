@@ -46,6 +46,9 @@ void retime(Clip& clip, Frame start, Frame duration, Frame offset);
 void retimeLinked(Project& project, const std::string& id, Frame start, Frame duration, Frame offset);
 // The clip followed by its linked partners.
 std::vector<std::string> linkedClips(const Project& project, const std::string& id);
+// Splits a clip and any linked partner at timeline frame time, preserving automation across the cut.
+// Returns the primary right-half clip ID.
+std::string splitLinked(Project& project, const std::string& id, Frame time, const std::string& tailId = {});
 const Envelope* envelope(const Clip& clip, int property);
 double propertyValue(const Clip& clip, int property);
 // Valid automation values for a property (the same ranges as its base value).

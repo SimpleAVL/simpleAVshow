@@ -397,6 +397,49 @@ QImage Controller::compose() {
     }
     lastComposed_ = frame; lastClocks_ = std::move(clocks); lastPicture_ = picture; return picture;
 }
+QImage Controller::composeAt(Frame position, QSize maximum) const {
+    const QSize target = maximum.isValid() ? maximum : QSize(project.width, project.height);
+    QImage picture(project.width, project.height, QImage::Format_RGB32); picture.fill(Qt::black);
+    QPainter painter(&picture); painter.setRenderHint(QPainter::SmoothPixmapTransform); painter.setRenderHint(QPainter::TextAntialiasing);
+    for (std::size_t track = 0; track < project.show.tracks.size(); ++track) {
+        if (!project.show.tracks[track].visual || project.show.tracks[track].muted) continue;
+        for (const auto& c : project.show.clips) {
+            if (c.track != static_cast<int>(track) || !c.contains(position)) continue;
+            const Frame local = position - c.start;
+            const double opacity = c.alpha.at(local, c.opacity);
+            if (opacity <= 0) continue;
+            painter.save(); painter.setOpacity(opacity);
+            painter.translate(project.width * (.5 + c.positionX.at(local, c.x)), project.height * (.5 + c.positionY.at(local, c.y)));
+            const double scale = c.size.at(local, c.scale); painter.scale(scale, scale);
+            const QRectF bounds(-project.width * .5, -project.height * .5, project.width, project.height);
+            if (!c.text.empty()) {
+                QFont font("Arial"); font.setPixelSize(project.height / 22); font.setWeight(QFont::Medium);
+                painter.setFont(font); painter.setPen(Qt::white);
+                painter.drawText(bounds.adjusted(project.width * .08, project.height * .08, -project.width * .08, -project.height * .08),
+                    Qt::AlignCenter | Qt::TextWordWrap, QString::fromStdString(c.text));
+            } else {
+                const auto asset = project.assets.constFind(QString::fromStdString(c.assetId));
+                if (asset != project.assets.cend() && !asset->offline) {
+                    QImage source = asset->still;
+                    if (asset->video) {
+                        double time = seconds(c.offset + local);
+                        if (c.loop) time = seconds(c.offset) + std::fmod(seconds(local), std::max(.001, asset->duration - seconds(c.offset)));
+                        source = videoFrameAt(asset->path, std::min(time, std::max(0., asset->duration - 1. / std::max(1., asset->fps))), target);
+                    }
+                    if (!source.isNull()) {
+                        const QSizeF fitted = QSizeF(source.size()).scaled(bounds.size(), Qt::KeepAspectRatio);
+                        painter.drawImage(QRectF(-fitted.width() / 2, -fitted.height() / 2, fitted.width(), fitted.height()), source);
+                    }
+                }
+            }
+            painter.restore();
+        }
+    }
+    painter.end();
+    if (maximum.isValid() && (picture.width() > maximum.width() || picture.height() > maximum.height()))
+        return picture.scaled(maximum, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    return picture;
+}
 QString Controller::mediaDirectory(const QString& target) {
     return QFileInfo(target).absolutePath() + "/" + QFileInfo(target).completeBaseName() + ".media";
 }

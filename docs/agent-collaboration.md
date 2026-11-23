@@ -2,13 +2,27 @@
 
 [Manual contents](README.md) · Previous: [7. Saving and recovery](saving-and-recovery.md) · Next: [9. Reference and troubleshooting](reference-and-troubleshooting.md)
 
-SimpleAVShow includes an optional local **MCP (Model Context Protocol)** server so an AI coding or production assistant on your computer can inspect and help build the live show right alongside you. Changes appear immediately on your timeline, and **Edit → Undo** reverses an entire agent batch in a single step.
+SimpleAVShow includes both a built-in **Agent chat** panel powered by the **Agent Client Protocol (ACP)** and an optional local **MCP (Model Context Protocol)** server so an AI assistant on your computer can inspect and help build the live show right alongside you. Changes appear immediately on your timeline, and **Edit → Undo** reverses an entire agent batch in a single step.
 
 ![Agent collaboration dialog showing the local MCP URL, editing toggle, and copy configuration buttons](screenshots/08-agent-collaboration.png)
 
 ---
 
-## Connect an MCP agent
+## Use the built-in Agent chat (ACP)
+
+The quickest way to collaborate with an AI agent is directly inside SimpleAVShow:
+
+1. Click **Agent chat** in the top bar (or choose **Project → Agent chat**, `Ctrl+Shift+A`).
+2. Pick an installed ACP-compatible agent from the dropdown — such as **OpenCode** (`opencode acp`), **Claude Code (ACP)** (`claude-agent-acp`), **Codex (ACP)** (`codex-acp`), **Gemini CLI** (`gemini --experimental-acp`), **Pi** (`pi-acp`), or **Custom ACP command…**.
+3. Click **Connect**. SimpleAVShow automatically starts its local MCP server and attaches it to the agent session—no JSON configuration or bearer tokens to copy. *(For agents that only support stdio MCP servers, SimpleAVShow automatically bridges the connection using its built-in `--mcp-proxy` mode.)*
+4. Ask the agent to inspect the show, run preflight checks, preview a frame, or check **Allow show edits** to let it build and modify the show together with you.
+5. Any permission requests from the agent appear directly as **Allow / Reject / Cancel** cards above the prompt box. Click **Undo edit** (or **Edit → Undo**) at any time to revert an agent batch in one step.
+
+> **Keyboard safety:** Typing `Space`, `Backspace`, or `Delete` inside the chat prompt box edits your prompt as expected and never triggers playback or deletes timeline clips.
+
+---
+
+## Connect an external MCP agent
 
 1. Open **Project → Agent collaboration…**, or click **Agent · off** in the top bar.
 2. Check **Enable local MCP server**. It starts in **read-only** mode at `http://127.0.0.1:48123/mcp`. *(If port `48123` is already in use, pick a different port before enabling.)*
@@ -64,7 +78,9 @@ The top-bar button always tells you what the agent can do right now: **Agent · 
 | Tool | Purpose |
 | --- | --- |
 | `get_show` | Returns the full project snapshot, library metadata, operator state, and current `revision`. *(Also available as MCP resource `simpleavshow://show`.)* |
-| `apply_edits` | Atomically applies up to 256 `project`, `track`, `clip`, `marker`, `delete_clip`, or `delete_marker` operations. |
+| `get_preflight` | Runs Show-mode readiness checks and reports missing media, disconnected audio tracks containing clips, unused assets, next cue, and show summary. Safe during playback and Show mode. |
+| `render_preview` | Renders the composed program picture at any timeline frame (`time`, defaulting to the current playhead) as a PNG image plus active clip/marker metadata, without moving the playhead or disturbing playback. |
+| `apply_edits` | Atomically applies up to 256 `project`, `track`, `clip`, `marker`, `split_clip`, `delete_clip`, `delete_marker`, `delete_track`, or `delete_asset` operations. |
 | `import_media` | Starts background preparation for up to 64 absolute local file paths; returns a `job_id`. |
 | `get_import` | Polls an import job until `ready` or `failed`, returning prepared asset IDs and metadata. |
 | `commit_import` | Adds the staged assets to the Media library as one undo step using a fresh show `revision`. |

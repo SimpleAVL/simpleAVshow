@@ -22,6 +22,7 @@ signals:
     void stateChanged();
     // Flush in-progress inspector fields before checking the caller's revision.
     void aboutToEdit();
+    void showModified(const QString& summary);
 private:
     Controller& c_;
     QTcpServer server_;
@@ -34,6 +35,8 @@ private:
     QJsonObject dispatch(const QJsonObject& request);
     QJsonObject callTool(const QString& name, const QJsonObject& arguments);
     QJsonObject snapshot() const;
+    QJsonObject preflightReport() const;
+    QJsonObject renderPreview(const QJsonObject& arguments) const;
     QJsonObject importStatus() const;
     void checkWrite(const QJsonObject& arguments);
 };

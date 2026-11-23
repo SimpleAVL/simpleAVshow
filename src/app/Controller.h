@@ -48,6 +48,8 @@ public:
     QString midiDestination() const { return midiName_; }
     void setShowMode(bool enabled);
     QImage compose();
+    // Side-effect-free composition at an arbitrary show time (safe during playback and Show mode).
+    QImage composeAt(Frame position, QSize maximum = QSize()) const;
     void save(QString target);
     // Saving an opened package or generated media copies files; MainWindow runs that part on a worker.
     bool savingCopiesMedia() const;

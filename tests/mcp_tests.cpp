@@ -60,7 +60,7 @@ private slots:
         const auto init = rpc(server, "initialize", {{"protocolVersion", "2025-11-25"}, {"clientInfo", QJsonObject{{"name", "test"}, {"version", "1"}}}, {"capabilities", QJsonObject{}}});
         QCOMPARE(init.status, 200); QCOMPARE(init.body["id"].toString(), "test");
         QCOMPARE(init.body["result"].toObject()["protocolVersion"].toString(), "2025-11-25");
-        QCOMPARE(rpc(server, "tools/list").body["result"].toObject()["tools"].toArray().size(), 5);
+        QCOMPARE(rpc(server, "tools/list").body["result"].toObject()["tools"].toArray().size(), 7);
         QCOMPARE(http(server, "{}", "POST", {{"Authorization", "Bearer wrong"}}).status, 401);
         QCOMPARE(http(server, "{}", "POST", {{"Origin", "https://example.com"}}).status, 403);
         QCOMPARE(http(server, "{}", "POST", {{"Host", "example.com"}}).status, 403);
@@ -194,6 +194,90 @@ private slots:
         QCOMPARE(window.controller().project.show.tracks.front().name, std::string("Operator background"));
         QCOMPARE(window.controller().project.show.markers.size(), size_t(1));
         window.controller().dirty = false; server.stop();
+    }
+    void previewPreflightAndExtendedEditOperations() {
+        Controller c;
+        c.replace(demoProject());
+        McpServer server(c);
+        QVERIFY(server.start(0));
+
+        // 1. render_preview works read-only, does not move playhead, and works in Show mode.
+        const Frame beforePos = c.position();
+        c.setShowMode(true);
+        const auto preview = call(server, "render_preview", {{"time", frameJson(6)}, {"width", 320}});
+        QVERIFY(!preview["isError"].toBool());
+        QCOMPARE(c.position(), beforePos);
+        const auto content = preview["content"].toArray();
+        QCOMPARE(content.size(), 2);
+        QCOMPARE(content[0].toObject()["type"].toString(), QString("image"));
+        QCOMPARE(content[0].toObject()["mimeType"].toString(), QString("image/png"));
+        const QByteArray pngBytes = QByteArray::fromBase64(content[0].toObject()["data"].toString().toLatin1());
+        QImage rendered;
+        QVERIFY(rendered.loadFromData(pngBytes, "PNG"));
+        QCOMPARE(rendered.width(), 320);
+        QVERIFY(rendered.pixelColor(160, 90) != QColor(Qt::black));
+        const auto meta = preview["structuredContent"].toObject();
+        QCOMPARE(meta["width"].toInt(), 320);
+        QVERIFY(meta["active_clips"].toArray().size() >= 2);
+        QVERIFY(call(server, "render_preview", {{"width", 50}})["isError"].toBool());
+        QVERIFY(call(server, "render_preview", {{"time", frameJson(999)}})["isError"].toBool());
+        c.setShowMode(false);
+
+        // 2. get_preflight reports disconnected tracks with clips, unused assets, next cue, and summary.
+        const auto preflight = call(server, "get_preflight");
+        QVERIFY(!preflight["isError"].toBool());
+        const auto pf = preflight["structuredContent"].toObject();
+        QCOMPARE(pf["summary"].toObject()["title"].toString(), QString("The opening scene"));
+        // Demo Click track (index 5) has a clip and starts disconnected (-1/-1).
+        QVERIFY(pf["disconnected_audio_tracks"].toArray().size() >= 1);
+        QCOMPARE(pf["next_cue"].toObject()["name"].toString(), QString("Wait for the actor"));
+
+        // 3. split_clip preserves automation and splits linked partners atomically.
+        server.setEditingEnabled(true);
+        c.replace(newProject());
+        QVERIFY(!edits(server, {
+            operation("clip", "p1", {{"track", 0}, {"text", "Title"}, {"link", "av"}, {"start", frameJson(2)}, {"duration", frameJson(10)},
+                {"alpha", QJsonArray{QJsonArray{0, 0}, QJsonArray{frameJson(10), 1}}}}),
+            operation("clip", "p2", {{"track", 1}, {"text", "Sub"}, {"link", "av"}, {"start", frameJson(2)}, {"duration", frameJson(10)}})
+        })["isError"].toBool());
+        QVERIFY(!edits(server, {
+            operation("split_clip", "p1", {{"time", frameJson(7)}, {"new_id", "p1-right"}})
+        })["isError"].toBool());
+        QCOMPARE(c.project.show.clips.size(), size_t(4));
+        const auto* right = [&]() -> const Clip* {
+            for (const auto& clip : c.project.show.clips) if (clip.id == "p1-right") return &clip;
+            return nullptr;
+        }();
+        QVERIFY(right);
+        QCOMPARE(right->start, frames(7));
+        QCOMPARE(right->duration, frames(5));
+        QCOMPARE(right->alpha.points.front().value, .5);
+        c.undo();
+        QCOMPARE(c.project.show.clips.size(), size_t(2));
+
+        // 4. delete_track removes clips on that track, re-indexes higher tracks, and rejects deleting last track.
+        const QString bgTrackId = QString::fromStdString(c.project.show.tracks[0].id);
+        QVERIFY(!edits(server, {QJsonObject{{"type", "delete_track"}, {"id", bgTrackId}}})["isError"].toBool());
+        QCOMPARE(c.project.show.clips.size(), size_t(1));
+        QCOMPARE(c.project.show.clips.front().track, 0);
+        c.undo();
+        QCOMPARE(c.project.show.clips.size(), size_t(2));
+        QJsonArray deleteAllTracks;
+        for (const auto& t : c.project.show.tracks) deleteAllTracks.append(QJsonObject{{"type", "delete_track"}, {"id", QString::fromStdString(t.id)}});
+        QVERIFY(edits(server, deleteAllTracks)["isError"].toBool());
+        QCOMPARE(c.project.show.tracks.size(), size_t(6));
+
+        // 5. delete_asset rejects in-use assets and deletes unused assets.
+        c.replace(demoProject());
+        QVERIFY(edits(server, {QJsonObject{{"type", "delete_asset"}, {"id", "demo-backdrop"}}})["isError"].toBool());
+        QVERIFY(!edits(server, {
+            QJsonObject{{"type", "delete_clip"}, {"id", QString::fromStdString(c.project.show.clips.front().id)}},
+            QJsonObject{{"type", "delete_asset"}, {"id", "demo-backdrop"}}
+        })["isError"].toBool());
+        QVERIFY(!c.project.assets.contains("demo-backdrop"));
+        c.undo();
+        QVERIFY(c.project.assets.contains("demo-backdrop"));
+        server.stop();
     }
 };
 QTEST_MAIN(McpTests)

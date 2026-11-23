@@ -1,4 +1,5 @@
 #include "app/MainWindow.h"
+#include "app/AgentChatPanel.h"
 #include "app/MidiMessageEditor.h"
 #include <limits>
 #include <QApplication>
@@ -26,6 +27,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QPlainTextEdit>
 #include <QProgressDialog>
 #include <QPushButton>
 #include <QClipboard>
@@ -206,6 +208,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
     project->addAction("Project settings…", this, &MainWindow::projectSettings);
     auto* agentAction = project->addAction("Agent collaboration…", this, &MainWindow::agentSettings);
     agentAction->setObjectName("agentCollaborationAction");
+    agentChatAction_ = project->addAction("Agent chat", QKeySequence("Ctrl+Shift+A"), this, &MainWindow::setAgentChatVisible);
+    agentChatAction_->setObjectName("agentChatAction");
+    agentChatAction_->setCheckable(true);
     auto* remoteAction = project->addAction("Phone remote…", this, &MainWindow::remoteSettings);
     remoteAction->setObjectName("remoteControlAction");
     outputsAction_ = project->addAction("Outputs…", this, &MainWindow::outputSettings);
@@ -260,8 +265,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
     agentButton_ = button("Agent · off", bar);
     agentButton_->setObjectName("agentCollaborationButton");
     connect(agentButton_, &QPushButton::clicked, this, &MainWindow::agentSettings);
+    agentChatButton_ = button("Agent chat", bar);
+    agentChatButton_->setObjectName("agentChatButton");
+    agentChatButton_->setCheckable(true);
+    agentChatButton_->setToolTip("Open the built-in ACP agent chat panel (Ctrl+Shift+A)");
+    connect(agentChatButton_, &QPushButton::clicked, this, &MainWindow::setAgentChatVisible);
     vertical->addWidget(top);
-    auto* split = new QSplitter(Qt::Vertical); vertical->addWidget(split, 1);
+    workspaceSplit_ = new QSplitter(Qt::Horizontal); vertical->addWidget(workspaceSplit_, 1);
+    auto* split = new QSplitter(Qt::Vertical); workspaceSplit_->addWidget(split);
     auto* upper = new QSplitter(Qt::Horizontal); split->addWidget(upper);
     auto* libraryPane = new QWidget; auto* libraryLayout = new QVBoxLayout(libraryPane); libraryLayout->setContentsMargins(12, 8, 12, 8);
     auto* tabs = new QTabWidget; libraryLayout->addWidget(tabs, 1);
@@ -297,6 +308,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
     auto* follow = button("Follow", toolLayout); follow->setCheckable(true); follow->setChecked(true); follow->setToolTip("Keep the playhead in view while playing");
     lowerLayout->addWidget(tools);
     timeline_ = new Timeline(c_); lowerLayout->addWidget(timeline_, 1); split->addWidget(lower); split->setSizes({430, 420});
+    agentChat_ = new AgentChatPanel(c_, mcp_, this);
+    agentChat_->hide();
+    workspaceSplit_->addWidget(agentChat_);
+    workspaceSplit_->setStretchFactor(0, 1);
+    workspaceSplit_->setStretchFactor(1, 0);
+    connect(agentChat_, &AgentChatPanel::closeRequested, this, [this] { setAgentChatVisible(false); });
+    connect(agentChat_, &AgentChatPanel::mcpSettingsRequested, this, &MainWindow::agentSettings);
+    connect(agentChat_, &AgentChatPanel::aboutToEdit, this, &MainWindow::commitInspector);
     connect(zoom, &QSlider::valueChanged, timeline_, &Timeline::setZoom);
     // Blocking keeps a fitted zoom exact instead of re-applying the slider's rounded value.
     connect(timeline_, &Timeline::zoomChanged, zoom, [zoom](double value) { QSignalBlocker block(zoom); zoom->setValue(qRound(value)); });
@@ -687,32 +706,9 @@ void MainWindow::splitClip() {
     const auto* clip = selectedClip(); if (!clip || !c_.canEdit()) return;
     const Frame time = c_.position();
     if (time <= clip->start || time >= clip->end()) { c_.report("Place the playhead inside the selected clip to split it"); return; }
-    const auto ids = linkedClips(c_.project, clip->id);
-    for (const auto& c : c_.project.show.clips) if (c.loop && std::find(ids.begin(), ids.end(), c.id) != ids.end()) {
-        c_.report("Looping clips cannot be split; their loop starts at the clip's source in"); return;
-    }
-    const auto link = clip->link.empty() ? std::string() : newId().toStdString(); std::string second;
-    const bool done = c_.edit([&](Project& p) {
-        std::vector<Clip> tails;
-        for (auto& c : p.show.clips) {
-            if (std::find(ids.begin(), ids.end(), c.id) == ids.end() || time <= c.start || time >= c.end()) continue;
-            const Frame cut = time - c.start;
-            Clip tail = c; tail.id = newId().toStdString(); tail.link = link; tail.start = time; tail.duration = c.duration - cut; tail.offset = c.offset + cut;
-            if (c.id == ids.front()) second = tail.id;
-            // Clip-relative automation continues across the cut with the value at the cut.
-            for (int property = 0; property < 6; ++property) {
-                auto* head = envelope(c, property); auto* rest = envelope(tail, property);
-                if (head->points.empty()) continue;
-                Keyframe at = cutPoint(*head, cut, propertyValue(c, property)); at.time = 0;
-                rest->points.clear(); rest->points.push_back(at);
-                for (auto point : head->points) if (point.time > cut) { point.time -= cut; rest->points.push_back(point); }
-                std::erase_if(head->points, [=](const Keyframe& point) { return point.time >= cut; }); head->points.push_back({cut, at.value});
-            }
-            c.duration = cut; tails.push_back(std::move(tail));
-        }
-        p.show.clips.insert(p.show.clips.end(), tails.begin(), tails.end());
-    });
-    if (done) timeline_->selectClip(QString::fromStdString(second));
+    const std::string id = clip->id;
+    std::string second;
+    if (c_.edit([&](Project& p) { second = splitLinked(p, id, time); })) timeline_->selectClip(QString::fromStdString(second));
 }
 void MainWindow::nudge(int step) {
     if (!c_.canEdit()) return;
@@ -1164,13 +1160,15 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         if (box.clickedButton() != quit) { event->ignore(); return; }
     }
     if (!checkDiscard()) { event->ignore(); return; }
+    if (agentChat_) agentChat_->shutdown();
     c_.stopAll(); event->accept();
 }
 bool MainWindow::eventFilter(QObject* object, QEvent* event) {
     if (event->type() != QEvent::KeyPress || !isVisible()) return QMainWindow::eventFilter(object, event);
     auto* key = static_cast<QKeyEvent*>(event); auto* widget = qobject_cast<QWidget*>(object);
     if (!widget || (widget->window() != this && widget->window() != outputWindow_)) return QMainWindow::eventFilter(object, event);
-    const bool editing = qobject_cast<QLineEdit*>(widget) || qobject_cast<QTextEdit*>(widget) || qobject_cast<QAbstractSpinBox*>(widget) || qobject_cast<QComboBox*>(widget);
+    const bool editing = qobject_cast<QLineEdit*>(widget) || qobject_cast<QTextEdit*>(widget) ||
+        qobject_cast<QPlainTextEdit*>(widget) || qobject_cast<QAbstractSpinBox*>(widget) || qobject_cast<QComboBox*>(widget);
     // Outside Show mode Escape is Stop All unless it cancels a field edit. In Show mode a stray press
     // must not end the performance: two presses within 600 ms stop everything (the button still takes one click).
     if (key->key() == Qt::Key_Escape && !key->isAutoRepeat() && (c_.showMode || !editing)) {
@@ -1182,6 +1180,22 @@ bool MainWindow::eventFilter(QObject* object, QEvent* event) {
     if (key->key() == Qt::Key_Space && !editing && key->modifiers() == Qt::NoModifier) { if (!key->isAutoRepeat()) c_.toggle(); return true; }
     if ((key->key() == Qt::Key_Delete || key->key() == Qt::Key_Backspace) && !editing && !qobject_cast<QTableWidget*>(widget)) { if (!key->isAutoRepeat()) deleteSelection(); return true; }
     return QMainWindow::eventFilter(object, event);
+}
+
+void MainWindow::setAgentChatVisible(bool visible) {
+    if (!agentChat_) return;
+    {
+        QSignalBlocker a(agentChatButton_), b(agentChatAction_);
+        agentChatButton_->setChecked(visible);
+        agentChatAction_->setChecked(visible);
+    }
+    agentChat_->setVisible(visible);
+    if (visible) {
+        const int total = std::max(width(), 1100);
+        const int chatWidth = std::clamp(total / 4, 340, 440);
+        workspaceSplit_->setSizes({total - chatWidth, chatWidth});
+        agentChat_->focusPrompt();
+    }
 }
 
 void MainWindow::agentSettings() {

@@ -53,6 +53,37 @@ std::vector<std::string> linkedClips(const Project& p, const std::string& id) {
     if (!link.empty()) for (const auto& c : p.show.clips) if (c.link == link && c.id != id) ids.push_back(c.id);
     return ids;
 }
+std::string splitLinked(Project& p, const std::string& id, Frame time, const std::string& tailId) {
+    const auto primary = std::find_if(p.show.clips.begin(), p.show.clips.end(), [&](const Clip& c) { return c.id == id; });
+    if (primary == p.show.clips.end()) throw std::runtime_error("Unknown clip ID");
+    if (time <= primary->start || time >= primary->end()) throw std::runtime_error("Split time must fall strictly inside the clip");
+    const auto ids = linkedClips(p, id);
+    for (const auto& c : p.show.clips) if (c.loop && std::find(ids.begin(), ids.end(), c.id) != ids.end())
+        throw std::runtime_error("Looping clips cannot be split; their loop starts at the clip's source in");
+    const auto link = primary->link.empty() ? std::string() : newId().toStdString();
+    std::string second;
+    std::vector<Clip> tails;
+    for (auto& c : p.show.clips) {
+        if (std::find(ids.begin(), ids.end(), c.id) == ids.end() || time <= c.start || time >= c.end()) continue;
+        const Frame cut = time - c.start;
+        Clip tail = c;
+        tail.id = (c.id == ids.front() && !tailId.empty()) ? tailId : newId().toStdString();
+        tail.link = link; tail.start = time; tail.duration = c.duration - cut; tail.offset = c.offset + cut;
+        if (c.id == ids.front()) second = tail.id;
+        // Clip-relative automation continues across the cut with the value at the cut.
+        for (int property = 0; property < 6; ++property) {
+            auto* head = envelope(c, property); auto* rest = envelope(tail, property);
+            if (head->points.empty()) continue;
+            Keyframe at = cutPoint(*head, cut, propertyValue(c, property)); at.time = 0;
+            rest->points.clear(); rest->points.push_back(at);
+            for (auto point : head->points) if (point.time > cut) { point.time -= cut; rest->points.push_back(point); }
+            std::erase_if(head->points, [=](const Keyframe& point) { return point.time >= cut; }); head->points.push_back({cut, at.value});
+        }
+        c.duration = cut; tails.push_back(std::move(tail));
+    }
+    p.show.clips.insert(p.show.clips.end(), tails.begin(), tails.end());
+    return second;
+}
 Envelope* envelope(Clip& clip, int property) {
     switch (property) { case 0: return &clip.volume; case 1: return &clip.balance; case 2: return &clip.positionX;
         case 3: return &clip.positionY; case 4: return &clip.size; default: return &clip.alpha; }

@@ -20,6 +20,8 @@ struct MediaAsset {
     std::shared_ptr<const AudioData> audio;
 };
 MediaAsset loadMedia(const QString& path);
+// Decodes a single video frame at time (seconds) for offline previews without disturbing active readers.
+QImage videoFrameAt(const QString& path, double time, QSize maximum = QSize(1920, 1080));
 
 // One worker per video clip. No decoding or disk access on the audio thread.
 // Corrupt packets and transient read/seek failures are skipped and counted; only

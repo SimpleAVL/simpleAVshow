@@ -11,9 +11,10 @@
 
 class QListWidget; class QLabel; class QPushButton; class QComboBox; class QDoubleSpinBox;
 class QSpinBox; class QLineEdit; class QCheckBox; class QTextEdit; class QTableWidget;
-class QStackedWidget; class QGroupBox; class QScrollArea; class QAction;
+class QStackedWidget; class QGroupBox; class QScrollArea; class QAction; class QSplitter;
 
 namespace sav {
+class AgentChatPanel;
 class MidiMessageEditor;
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -22,6 +23,7 @@ public:
     Controller& controller() { return c_; }
     McpServer& mcpServer() { return mcp_; }
     RemoteServer& remoteServer() { return remote_; }
+    AgentChatPanel* agentChatPanel() { return agentChat_; }
     void openPath(const QString& path);
     // Offers the untitled-show sidecar left by a crash; call once after startup.
     void offerUntitledRecovery();
@@ -40,9 +42,12 @@ private:
     QWidget* outputWindow_ = nullptr;
     QListWidget *library_ = nullptr, *cues_ = nullptr;
     QLabel *clock_ = nullptr, *state_ = nullptr, *next_ = nullptr, *health_ = nullptr, *hint_ = nullptr, *projectLabel_ = nullptr;
-    QPushButton *play_ = nullptr, *showButton_ = nullptr, *outputsButton_ = nullptr, *openOutputButton_ = nullptr, *agentButton_ = nullptr, *remoteButton_ = nullptr;
+    QPushButton *play_ = nullptr, *showButton_ = nullptr, *outputsButton_ = nullptr, *openOutputButton_ = nullptr, *agentButton_ = nullptr, *agentChatButton_ = nullptr, *remoteButton_ = nullptr;
     QAction* outputsAction_ = nullptr;
     QAction* exportPackageAction_ = nullptr;
+    QAction* agentChatAction_ = nullptr;
+    AgentChatPanel* agentChat_ = nullptr;
+    QSplitter* workspaceSplit_ = nullptr;
     QStackedWidget* inspector_ = nullptr;
     QScrollArea* inspectorScroll_ = nullptr;
     QLineEdit *trackName_ = nullptr, *markerName_ = nullptr;
@@ -95,6 +100,7 @@ private:
     void deleteSelection();
     void projectSettings();
     void agentSettings();
+    void setAgentChatVisible(bool visible);
     void remoteSettings();
     void outputSettings();
     void openOutput(int screen);

@@ -81,7 +81,8 @@ if(SAV_BUILD_APP)
   add_library(sav_desktop
     src/app/Project.cpp src/app/ProjectPackage.cpp src/app/Controller.cpp
     src/app/Timeline.cpp src/app/ProgramView.cpp src/app/MainWindow.cpp
-    src/app/MidiMessageEditor.cpp src/app/McpServer.cpp src/app/RemoteServer.cpp
+    src/app/MidiMessageEditor.cpp src/app/McpServer.cpp src/app/McpProxy.cpp
+    src/app/AcpClient.cpp src/app/AgentChatPanel.cpp src/app/RemoteServer.cpp
     src/media/Media.cpp src/media/AudioSources.cpp src/media/AudioDevice.cpp src/media/MidiOutput.cpp
   )
   target_include_directories(sav_desktop PUBLIC src ${RTMIDI_HEADER_DIR} PRIVATE ${FFMPEG_INCLUDE_DIR})
@@ -120,6 +121,17 @@ if(SAV_BUILD_APP)
   target_link_libraries(mcp_tests PRIVATE sav_desktop Qt6::Test)
   add_test(NAME mcp COMMAND mcp_tests)
   set_tests_properties(mcp PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+  add_executable(mock_acp_agent tests/mock_acp_agent.cpp)
+  target_link_libraries(mock_acp_agent PRIVATE Qt6::Core)
+  add_executable(acp_tests tests/acp_tests.cpp)
+  target_link_libraries(acp_tests PRIVATE sav_desktop Qt6::Test)
+  target_compile_definitions(acp_tests PRIVATE
+    SAV_MOCK_ACP_AGENT="$<TARGET_FILE:mock_acp_agent>"
+    SAV_APP_EXECUTABLE="$<TARGET_FILE:simpleavshow>"
+  )
+  add_dependencies(acp_tests mock_acp_agent simpleavshow)
+  add_test(NAME acp COMMAND acp_tests)
+  set_tests_properties(acp PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
   add_executable(remote_tests tests/remote_tests.cpp)
   target_link_libraries(remote_tests PRIVATE sav_desktop Qt6::Test)
   add_test(NAME remote COMMAND remote_tests)

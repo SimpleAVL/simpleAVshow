@@ -341,4 +341,53 @@ void VideoReader::run() {
         std::lock_guard lock(mutex_); error_ = QString::fromUtf8(error.what());
     }
 }
+
+QImage videoFrameAt(const QString& path, double time, QSize maximum) {
+    try {
+        Input input; input.open(path);
+        const int index = av_find_best_stream(input.format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+        if (index < 0) return {};
+        input.decoder(index);
+        auto* stream = input.format->streams[index];
+        const double start = mediaOrigin(input.format);
+        const double target = std::max(0., time);
+        const auto timestamp = static_cast<std::int64_t>((target + start) / av_q2d(stream->time_base));
+        if (av_seek_frame(input.format, index, timestamp, AVSEEK_FLAG_BACKWARD) < 0)
+            av_seek_frame(input.format, index, timestamp, AVSEEK_FLAG_BACKWARD | AVSEEK_FLAG_ANY);
+        avcodec_flush_buffers(input.codec);
+        const AVRational frameRate = av_guess_frame_rate(input.format, stream, nullptr);
+        const double rate = frameRate.num && frameRate.den ? av_q2d(frameRate) : 24;
+        QImage best; double last = -1; int decoded = 0;
+        while (decoded < 240) {
+            int result = avcodec_receive_frame(input.codec, input.frame);
+            if (result == AVERROR_EOF) break;
+            if (result == AVERROR(EAGAIN)) {
+                while ((result = av_read_frame(input.format, input.packet)) >= 0 && input.packet->stream_index != index) av_packet_unref(input.packet);
+                if (result == AVERROR_EOF) { if (avcodec_send_packet(input.codec, nullptr) < 0) break; }
+                else if (result < 0) break;
+                else { result = avcodec_send_packet(input.codec, input.packet); av_packet_unref(input.packet); if (result < 0) break; }
+                continue;
+            }
+            if (result < 0) break;
+            ++decoded;
+            const auto pts = input.frame->best_effort_timestamp;
+            const double frameTime = pts == AV_NOPTS_VALUE ? std::max(0., last + 1. / rate) : pts * av_q2d(stream->time_base) - start;
+            last = frameTime;
+            QSize dimensions(input.frame->width, input.frame->height);
+            if (dimensions.width() > maximum.width() || dimensions.height() > maximum.height()) dimensions.scale(maximum, Qt::KeepAspectRatio);
+            QImage image(dimensions, QImage::Format_RGBA8888);
+            input.scaler = sws_getCachedContext(input.scaler, input.frame->width, input.frame->height,
+                static_cast<AVPixelFormat>(input.frame->format), image.width(), image.height(), AV_PIX_FMT_RGBA, SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+            unsigned char* dest[] = {image.bits()}; int strides[] = {static_cast<int>(image.bytesPerLine())};
+            if (!image.isNull() && input.scaler && sws_scale(input.scaler, input.frame->data, input.frame->linesize, 0, input.frame->height, dest, strides) >= 0) {
+                if (frameTime <= target + .0001 || best.isNull()) best = std::move(image);
+            }
+            av_frame_unref(input.frame);
+            if (frameTime >= target - .0001) break;
+        }
+        return best;
+    } catch (...) {
+        return {};
+    }
+}
 }

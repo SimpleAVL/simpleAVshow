@@ -1,4 +1,5 @@
 #include "app/MainWindow.h"
+#include "app/McpProxy.h"
 #include "media/AudioSources.h"
 #include <QApplication>
 #include <QCommandLineParser>
@@ -14,6 +15,12 @@
 #endif
 
 int main(int argc, char** argv) {
+    // Headless stdio-to-HTTP MCP proxy mode (no GUI or audio initialization).
+    for (int i = 1; i < argc; ++i) {
+        const QString arg = QString::fromLocal8Bit(argv[i]);
+        if (arg == "--mcp-proxy" && i + 1 < argc) return sav::runMcpProxy(argc, argv, QString::fromLocal8Bit(argv[i + 1]));
+        if (arg.startsWith("--mcp-proxy=")) return sav::runMcpProxy(argc, argv, arg.mid(QString("--mcp-proxy=").size()));
+    }
 #ifdef Q_OS_WIN
     // The MIDI and disk workers sleep 1 ms between polls; the default 15.6 ms tick would delay cues and read-ahead.
     timeBeginPeriod(1);
@@ -33,6 +40,7 @@ int main(int argc, char** argv) {
     parser.addOption({"demo", "Open the built-in demonstration"});
     parser.addOption({"screenshot", "Save an editor screenshot and exit (for visual QA)", "path"});
     parser.addOption({"preview-time", "Seek before capturing a screenshot (seconds)", "seconds"});
+    parser.addOption({"mcp-proxy", "Bridge stdio JSON-RPC to a local SimpleAVShow MCP endpoint URL", "url"});
     parser.addPositionalArgument("project", "Project or package to open (.savshow, .savpack)"); parser.process(app);
     // Deleting a crashed instance's extraction can take a while for large media.
     QThreadPool::globalInstance()->start([] { sav::removeStalePackageDirectories(); sav::detail::trimAudioCache(); });
