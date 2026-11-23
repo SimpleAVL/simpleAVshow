@@ -5,6 +5,11 @@
 #include <QImageReader>
 #include <QTemporaryFile>
 #include <atomic>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#endif
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -71,9 +76,9 @@ public:
     using SeekPoints = std::shared_ptr<const std::vector<detail::SeekPoint>>;
     explicit AudioDecoder(QString path, SeekPoints points = {}) : path_(std::move(path)), points_(std::move(points)) { open(); }
     bool mono() const noexcept { return mono_; }
-    // Record seek points for coarse timestamps during the coming linear decode (the import pass).
+    // Record seek points during the coming linear decode (the import pass).
     void record() { recording_ = true; }
-    std::vector<detail::SeekPoint> recorded() && { return std::move(recorded_); }
+    std::vector<detail::SeekPoint> recorded() && { return ordered_ ? std::move(recorded_) : std::vector<detail::SeekPoint>{}; }
     // The next decoded run, frames [first, first + samples.size() / 2). False once the source ends.
     bool next(Frame& first, std::vector<float>& samples) {
         samples.clear();
@@ -87,38 +92,37 @@ public:
     }
     // Continue output from at or before frame, so the next runs cover it.
     void seek(Frame frame) {
-        // A linear decode's first frames anchor timestamps to sample positions.
-        if (!anchorTried_) { Frame first; std::vector<float> samples; while (!anchorTried_ && next(first, samples)) {} }
+        if (!started_) {
+            // The first frame's timestamp places the source.
+            if (receive()) { begin(input_->frame->best_effort_timestamp); av_frame_unref(input_->frame); }
+            finished_ = false;
+        }
         const Frame output = std::max<Frame>(0, frame - start_ - preroll);
         // Resume on a resampling phase boundary, where output and input samples coincide exactly.
-        target_ = output / stepOut_ * stepIn_; retries_ = 0;
-        if (target_ == 0 || !anchored_) { restart(); return; }
-        if (!coarse_) { seekInput(target_); return; }
-        // A timestamp tick coarser than one input sample cannot tell which sample a seek landed on;
-        // the import's seek points can. Without one before the target, decode from the start.
-        const auto* point = points_ ? &*std::upper_bound(points_->begin(), points_->end(), target_,
-            [](std::int64_t sample, const detail::SeekPoint& p) { return sample < p.sample; }) : nullptr;
-        if (!point || point == points_->data() || (--point)->sample <= 0) { restart(); return; }
-        landing_ = *point;
-        checked(av_seek_frame(input_->format, stream_, point->pts, AVSEEK_FLAG_BACKWARD), "Seek audio");
+        target_ = output / stepOut_ * stepIn_;
+        // Land on the last seek point at or before the target. Decoding starts one point earlier,
+        // so the decoder has warmed up (some codecs output nothing for the first packet after a
+        // seek) by the time it reaches the landing packet, whose exact sample the import recorded.
+        // Without two such points, decode from the start.
+        if (!points_ || target_ == 0) { restart(); return; }
+        const auto after = std::upper_bound(points_->begin(), points_->end(), target_,
+            [](std::int64_t sample, const detail::SeekPoint& p) { return sample < p.sample; });
+        if (after - points_->begin() < 2) { restart(); return; }
+        landing_ = *(after - 1);
+        checked(av_seek_frame(input_->format, stream_, (after - 2)->pts, AVSEEK_FLAG_BACKWARD), "Seek audio");
         reset();
     }
 private:
     QString path_;
     SeekPoints points_;
     std::vector<detail::SeekPoint> recorded_;
-    std::optional<detail::SeekPoint> landing_; // The seek point a coarse seek aimed at.
-    std::int64_t nextPoint_ = 0;
-    bool coarse_ = false, recording_ = false;
+    std::optional<detail::SeekPoint> landing_; // The seek point a seek aims at.
+    std::int64_t nextPoint_ = 0, lastPts_ = AV_NOPTS_VALUE;
+    bool recording_ = false, ordered_ = true;
     std::unique_ptr<Input> input_;
-    int stream_ = -1, rate_ = 0, retries_ = 0;
-    bool mono_ = false, started_ = false, aligned_ = false, finished_ = false, anchorTried_ = false, anchored_ = false;
+    int stream_ = -1, rate_ = 0, channels_ = 0, format_ = AV_SAMPLE_FMT_NONE;
+    bool mono_ = false, started_ = false, aligned_ = false, finished_ = false;
     double origin_ = 0;
-    std::int64_t firstPts_ = AV_NOPTS_VALUE; // Of the first decoded frame, in stream time base.
-    // Counted input position minus the one a timestamp implies. Decoders trim encoder delay
-    // (MP3, AAC, Opus priming) from the first frame without moving its timestamp, so later
-    // timestamps are offset by the trimmed samples. Measured on the second frame of a linear decode.
-    std::int64_t ptsOffset_ = 0;
     Frame start_ = 0;                        // Show frame of output sample 0.
     std::int64_t stepIn_ = 1, stepOut_ = 1;  // Input and output samples per resampling phase cycle.
     std::int64_t inputAt_ = 0, target_ = 0, produced_ = 0;
@@ -130,11 +134,10 @@ private:
         input_->decoder(stream_);
         if (input_->codec->ch_layout.nb_channels > 2)
             throw std::runtime_error("Import mono or stereo stems separately; multichannel source files are not supported yet");
-        mono_ = input_->codec->ch_layout.nb_channels == 1; rate_ = input_->codec->sample_rate;
+        channels_ = input_->codec->ch_layout.nb_channels; mono_ = channels_ == 1; rate_ = input_->codec->sample_rate; format_ = input_->codec->sample_fmt;
         if (rate_ <= 0) throw std::runtime_error("Audio has no sample rate");
         const auto common = std::gcd(rate_, sampleRate); stepIn_ = rate_ / common; stepOut_ = sampleRate / common;
         origin_ = mediaOrigin(input_->format);
-        coarse_ = av_compare_ts(1, input_->format->streams[stream_]->time_base, 1, {1, rate_}) > 0;
         // Any one-channel layout (including front-left) is centre mono; the transport pans it.
         AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO, mono = AV_CHANNEL_LAYOUT_MONO;
         checked(swr_alloc_set_opts2(&input_->resampler, &stereo, AV_SAMPLE_FMT_FLT, sampleRate,
@@ -160,7 +163,7 @@ private:
         }
     }
     void begin(std::int64_t pts) {
-        started_ = true; firstPts_ = pts; inputAt_ = 0; start_ = 0;
+        started_ = true; inputAt_ = 0; start_ = 0;
         if (pts == AV_NOPTS_VALUE) return;
         const double startTime = pts * av_q2d(input_->format->streams[stream_]->time_base) - origin_;
         if (!std::isfinite(startTime) || std::abs(startTime) > maxSeconds) throw std::runtime_error("Invalid audio stream start time");
@@ -168,11 +171,6 @@ private:
     }
     // Decoding again from the start always matches; also the fallback when seeking cannot be trusted.
     void restart() { target_ = 0; open(); }
-    void seekInput(std::int64_t sample) {
-        const auto base = input_->format->streams[stream_]->time_base;
-        checked(av_seek_frame(input_->format, stream_, firstPts_ + av_rescale_q(sample - ptsOffset_, {1, rate_}, base), AVSEEK_FLAG_BACKWARD), "Seek audio");
-        reset();
-    }
     void reset() {
         avcodec_flush_buffers(input_->codec); swr_close(input_->resampler);
         checked(swr_init(input_->resampler), "Initialize resampling");
@@ -183,33 +181,23 @@ private:
         const std::uint8_t* planes[2]{};
         int count = 0;
         if (frame) {
-            const auto base = input_->format->streams[stream_]->time_base;
             const auto pts = frame->best_effort_timestamp;
-            const auto implied = [&] { return av_rescale_q_rnd(pts - firstPts_, base, {1, rate_}, AV_ROUND_NEAR_INF); };
+            // The resampler and the plane offsets below assume the stream's opening format throughout.
+            if (frame->ch_layout.nb_channels != channels_ || frame->format != format_)
+                throw std::runtime_error("Audio format changes partway through the file; convert it to one format before importing");
             if (!started_) begin(pts);
-            else if (aligned_ && !anchorTried_) {
-                // Without timestamps there is nothing to seek by; seeks then decode from the start.
-                anchorTried_ = true;
-                if (pts != AV_NOPTS_VALUE && firstPts_ != AV_NOPTS_VALUE) { ptsOffset_ = inputAt_ - implied(); anchored_ = true; }
-            }
-            else if (!aligned_ && landing_) {
-                // Frames before the seek point are dropped; the point itself carries its exact sample.
-                if (pts == AV_NOPTS_VALUE || pts > landing_->pts) { restart(); return 0; }
-                if (pts < landing_->pts) return 0;
+            else if (!aligned_) {
+                // After a seek: frames before the landing point only warm the decoder up.
+                if (!landing_ || pts == AV_NOPTS_VALUE || pts < landing_->pts) return 0;
+                if (pts > landing_->pts) { restart(); return 0; } // The landing packet never decoded.
                 inputAt_ = landing_->sample; landing_.reset();
-            } else if (!aligned_) {
-                // The first frame after a seek; its timestamp says where the decoder landed.
-                if (pts == AV_NOPTS_VALUE) { restart(); return 0; }
-                inputAt_ = implied() + ptsOffset_;
-                if (inputAt_ > target_) {
-                    // Landed late (an inexact index): back off further, then decode from the start.
-                    const auto earlier = target_ - 2 * (inputAt_ - target_) - rate_;
-                    if (++retries_ <= 3 && earlier > 0) seekInput(earlier); else restart();
-                    return 0;
-                }
             }
             if (!aligned_) { aligned_ = true; produced_ = target_ / stepIn_ * stepOut_; }
-            if (recording_ && coarse_ && pts != AV_NOPTS_VALUE && inputAt_ >= nextPoint_) { recorded_.push_back({pts, inputAt_}); nextPoint_ = inputAt_ + rate_; }
+            if (recording_) {
+                // Seek points need increasing timestamps; a stream without them seeks by decoding from the start.
+                ordered_ = ordered_ && pts != AV_NOPTS_VALUE && (lastPts_ == AV_NOPTS_VALUE || pts > lastPts_); lastPts_ = pts;
+                if (ordered_ && inputAt_ >= nextPoint_) { recorded_.push_back({pts, inputAt_}); nextPoint_ = inputAt_ + rate_; }
+            }
             const auto skip = static_cast<int>(std::clamp<std::int64_t>(target_ - inputAt_, 0, frame->nb_samples));
             inputAt_ += frame->nb_samples; count = frame->nb_samples - skip;
             if (!count) return 0;
@@ -238,13 +226,30 @@ private:
     }
 };
 
+// The file system's identity of the file at path (device and inode, or volume and file index), which
+// changes when a save replaces the file rather than rewriting it; zero if it cannot be read.
+std::pair<std::uint64_t, std::uint64_t> fileIdentity(const QString& path) {
+#ifdef Q_OS_WIN
+    const HANDLE file = CreateFileW(reinterpret_cast<const wchar_t*>(path.utf16()), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return {};
+    BY_HANDLE_FILE_INFORMATION info{};
+    const bool ok = GetFileInformationByHandle(file, &info); CloseHandle(file);
+    return ok ? std::pair<std::uint64_t, std::uint64_t>{info.dwVolumeSerialNumber, (std::uint64_t{info.nFileIndexHigh} << 32) | info.nFileIndexLow} : std::pair<std::uint64_t, std::uint64_t>{};
+#else
+    struct stat info{};
+    if (::stat(QFile::encodeName(path).constData(), &info)) return {};
+    return {static_cast<std::uint64_t>(info.st_dev), static_cast<std::uint64_t>(info.st_ino)};
+#endif
+}
+
 // Reads decode the original file. The transport's read-ahead worker calls read, never the
 // audio callback. A few decoders stay open so clips reading the same file at different
 // places continue sequentially instead of seeking for every block.
 class StreamStorage final : public AudioStorage {
 public:
     StreamStorage(QString path, Frame length, AudioDecoder::SeekPoints points) : path_(std::move(path)), length_(length), points_(std::move(points)) {
-        const QFileInfo info(path_); size_ = info.size(); modified_ = info.lastModified();
+        const QFileInfo info(path_); size_ = info.size(); modified_ = info.lastModified(); identity_ = fileIdentity(path_);
     }
     Frame length() const noexcept override { return length_; }
     bool decodes() const noexcept override { return true; }
@@ -254,7 +259,9 @@ public:
         if (!count) return;
         const QFileInfo info(path_);
         if (!info.exists()) throw std::runtime_error("Audio source is unavailable: " + path_.toStdString());
-        if (info.size() != size_ || info.lastModified() != modified_) throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString());
+        // File identity also catches a replacement saved with the same size and modification time;
+        // an in-place rewrite that keeps both is not detected.
+        if (info.size() != size_ || info.lastModified() != modified_ || fileIdentity(path_) != identity_) throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString());
         const std::lock_guard lock(mutex_);
         Reader* reader = nullptr;
         try {
@@ -263,7 +270,8 @@ public:
             for (Frame at = first; at < end;) {
                 const Frame have = reader->first + static_cast<Frame>(reader->samples.size() / 2);
                 if (have <= at) {
-                    if (!reader->decoder.next(reader->first, reader->samples)) break;
+                    // The import measured this length; ending early means the source no longer decodes the same.
+                    if (!reader->decoder.next(reader->first, reader->samples)) throw std::runtime_error("Audio source ended early: " + path_.toStdString());
                     continue;
                 }
                 if (reader->first > at) { at = std::min(end, reader->first); continue; } // Leading silence stays zero.
@@ -294,6 +302,7 @@ private:
     AudioDecoder::SeekPoints points_;
     qint64 size_ = 0;
     QDateTime modified_;
+    std::pair<std::uint64_t, std::uint64_t> identity_;
     mutable std::mutex mutex_;
     mutable std::vector<std::unique_ptr<Reader>> readers_;
     mutable std::uint64_t clock_ = 0;

@@ -1670,10 +1670,70 @@ private slots:
         const auto streaming = [&] { return c.preflight().filter("Audio streams from the original media files").size() == 1; };
         QVERIFY(streaming());
         QVERIFY(c.edit([](Project& p) { p.show.clips[0].gain = .5; }));
-        QVERIFY(c.replaceAudio({{streamed.id, prepared}}));
+        QCOMPARE(c.audioSources(), QStringList{streamed.path});
+        QVERIFY(c.replaceAudio({{streamed.path, prepared}}));
         QVERIFY(!streaming()); QCOMPARE(c.project.show.clips[0].audio, prepared);
         // Swapping storage is not an edit, and undo keeps the chosen preparation.
         c.undo(); QCOMPARE(c.project.show.clips[0].gain, 1.); QCOMPARE(c.project.show.clips[0].audio, prepared);
+        // An asset only redo can bring back is still a source to prepare.
+        const auto other = dir.filePath("other.wav"); writeBytes(other, waveBytes(16, 1, 2, 44100, false, 44100));
+        setAudioPreparation(AudioPreparation::Stream); auto added = loadMedia(other);
+        QVERIFY(c.edit([&](Project& p) { p.assets.insert(added.id, added); }));
+        c.undo(); QVERIFY(!c.project.assets.contains(added.id)); QVERIFY(c.audioSources().contains(other));
+        setAudioPreparation(AudioPreparation::Prepared); const auto preparedOther = loadMedia(other).audio;
+        QVERIFY(c.replaceAudio({{other, preparedOther}}));
+        c.redo(); QCOMPARE(c.project.assets[added.id].audio, preparedOther);
+    }
+    void streamedAudioSurvivesTimestampJumps() {
+        // A broadcast recording whose timestamps jump forward: positions follow counted samples, not timestamps.
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
+        QTemporaryDir dir; QByteArray joined;
+        for (const auto& [name, start, offset] : {std::tuple{"a.ts", "0", "0"}, std::tuple{"b.ts", "4", "6"}}) {
+            QProcess process;
+            process.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                "aevalsrc=0.4*sin(2*PI*(100+800*t)*t)+0.1*random(0)|0.3*sin(2*PI*660*t):s=48000:d=18", "-ss", start, "-t", QString(name) == "a.ts" ? "4" : "14",
+                "-c:a", "aac", "-aac_pns", "0", "-output_ts_offset", offset, "-f", "mpegts", dir.filePath(name)});
+            QVERIFY(process.waitForFinished(30000)); QCOMPARE(process.exitCode(), 0);
+            QFile part(dir.filePath(name)); QVERIFY(part.open(QIODevice::ReadOnly)); joined += part.readAll();
+        }
+        const auto file = dir.filePath("jump.ts"); writeBytes(file, joined);
+        const auto prepared = loadMedia(file).audio;
+        setAudioPreparation(AudioPreparation::Stream); const auto streamed = loadMedia(file).audio;
+        QCOMPARE(streamed->length(), prepared->length());
+        for (const Frame start : {frames(10), frames(12.5), frames(2), frames(16), frames(5) + 77}) {
+            std::vector<float> a(1024), b(1024);
+            prepared->storage->read(start, a.data(), 512); streamed->storage->read(start, b.data(), 512);
+            QCOMPARE(b, a);
+        }
+    }
+    void audioFormatChangePartwayIsRejected() {
+        // Stereo ADTS followed by 5.1 ADTS: the decoder changes layout mid-stream.
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
+        QTemporaryDir dir; QByteArray joined;
+        for (const auto& [name, layout] : {std::pair{"a.aac", "stereo"}, std::pair{"b.aac", "5.1"}}) {
+            QProcess process;
+            process.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", QString("sine=frequency=440:sample_rate=48000:duration=1"),
+                "-af", QString("aformat=channel_layouts=") + layout, "-c:a", "aac", dir.filePath(name)});
+            QVERIFY(process.waitForFinished(30000)); QCOMPARE(process.exitCode(), 0);
+            QFile part(dir.filePath(name)); QVERIFY(part.open(QIODevice::ReadOnly)); joined += part.readAll();
+        }
+        const auto file = dir.filePath("changing.aac"); writeBytes(file, joined);
+        for (const auto preparation : {AudioPreparation::Prepared, AudioPreparation::Stream}) {
+            setAudioPreparation(preparation);
+            QVERIFY_THROWS_EXCEPTION(std::runtime_error, loadMedia(file));
+        }
+    }
+    void replacedStreamedSourceIsDetected() {
+        // An editor saving through a new file keeps size and modification time but not the file itself.
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; const auto path = dir.filePath("source.wav");
+        auto bytes = waveBytes(16, 1, 2, 44100, false, 44100); writeBytes(path, bytes);
+        const auto time = QDateTime::currentDateTimeUtc().addDays(-1); setModified(path, time);
+        const auto asset = loadMedia(path); float sample[2]; asset.audio->storage->read(100, sample, 1);
+        bytes[bytes.size() - 2] ^= 0x40; const auto replacement = dir.filePath("replacement.wav"); writeBytes(replacement, bytes);
+        setModified(replacement, time); QVERIFY(QFile::remove(path)); QVERIFY(QFile::rename(replacement, path));
+        QCOMPARE(QFileInfo(path).size(), static_cast<qint64>(bytes.size())); QCOMPARE(QFileInfo(path).lastModified(), time.toLocalTime());
+        QVERIFY_THROWS_EXCEPTION(AudioSourceChanged, asset.audio->storage->read(100, sample, 1));
     }
     void diskAudioCacheHasBoundedMemoryAndPersists() {
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");

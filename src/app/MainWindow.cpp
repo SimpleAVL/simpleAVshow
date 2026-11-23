@@ -794,8 +794,8 @@ void MainWindow::relinkMedia(bool afterOpening) {
     }));
 }
 void MainWindow::reloadAudio() {
-    QMap<QString, QString> paths; // Asset id → source; generated audio has no file to prepare.
-    for (const auto& a : c_.project.assets) if (a.audio && a.audio->storage && !a.offline) paths.insert(a.id, a.path);
+    // Undo and redo can bring back assets the show no longer holds; they are prepared too.
+    const auto paths = c_.audioSources();
     if (paths.isEmpty()) { c_.report(audioPreparation() == AudioPreparation::Prepared ? "Audio will be prepared when imported." : "Audio will stream from media files."); return; }
     c_.busy = true;
     const bool preparing = audioPreparation() == AudioPreparation::Prepared;
@@ -812,8 +812,8 @@ void MainWindow::reloadAudio() {
     });
     watcher->setFuture(QtConcurrent::run([paths]() {
         Reloaded result;
-        for (auto [id, path] : paths.asKeyValueRange()) {
-            try { result.first.insert(id, loadMedia(path).audio); }
+        for (const auto& path : paths) {
+            try { result.first.insert(path, loadMedia(path).audio); }
             catch (const std::exception& e) { result.second << QFileInfo(path).fileName() + ": " + QString::fromUtf8(e.what()); }
         }
         return result;

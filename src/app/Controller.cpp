@@ -207,17 +207,23 @@ void Controller::setLateAudio(LateAudio policy) {
 void Controller::setAudioPreparation(AudioPreparation preparation) {
     sav::setAudioPreparation(preparation); QSettings().setValue("audio/sources", preparation == AudioPreparation::Prepared ? "prepared" : "stream");
 }
+QStringList Controller::audioSources() const {
+    QStringList paths;
+    const auto collect = [&](const Project& p) { for (const auto& a : p.assets) if (a.audio && a.audio->storage && !a.offline && !paths.contains(a.path)) paths << a.path; };
+    collect(project);
+    for (const auto* history : {&undo_, &redo_}) for (const auto& p : *history) collect(p);
+    return paths;
+}
 bool Controller::replaceAudio(const QMap<QString, std::shared_ptr<const AudioData>>& audio) {
     if (!canEdit()) return false;
+    // Matching by path keeps a relinked asset (same id, other file) on its own source.
+    const auto swap = [&](Project& p) {
+        for (auto& a : p.assets) if (a.audio && a.audio->storage && audio.contains(a.path)) a.audio = audio.value(a.path);
+        bindAudio(p);
+    };
     try {
-        Project next = project;
-        for (auto [id, data] : audio.asKeyValueRange()) if (next.assets.contains(id)) next.assets[id].audio = data;
-        bindAudio(next); validate(next);
-        // Undo and redo keep using the chosen preparation too.
-        for (auto* history : {&undo_, &redo_}) for (auto& p : *history) {
-            for (auto [id, data] : audio.asKeyValueRange()) if (p.assets.contains(id)) p.assets[id].audio = data;
-            bindAudio(p);
-        }
+        Project next = project; swap(next); validate(next);
+        for (auto* history : {&undo_, &redo_}) for (auto& p : *history) swap(p);
         project = std::move(next); arm(std::min(position(), project.show.duration)); emit changed(); return true;
     } catch (const std::exception& e) { report(QString::fromUtf8(e.what())); return false; }
 }

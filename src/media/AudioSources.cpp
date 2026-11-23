@@ -29,7 +29,7 @@ namespace {
 constexpr qint64 stereoBytes = 2 * sizeof(float);
 constexpr qint64 legacyHeader = 8 + 8 + 1 + 32 + 32, metadataHeader = legacyHeader + 32;
 constexpr char legacyMagic[] = "SAVPCM01", cacheMagic[] = "SAVMETA2";
-constexpr char indexMagic[] = "SAVIDX01", waveMagic[] = "SAVWAV01", streamMagic[] = "SAVSTRM2";
+constexpr char indexMagic[] = "SAVIDX01", waveMagic[] = "SAVWAV01", streamMagic[] = "SAVSTRM3";
 constexpr qint64 staleAge = 7ll * 24 * 3600 * 1000;
 constexpr qint64 racyWindow = 2000; // Coarse (FAT: 2 s) timestamps can hide a rewrite during hashing.
 constexpr qsizetype maxIndexEntries = 4096;
@@ -329,22 +329,28 @@ StreamSummary::StreamSummary(const QString& source) : source_(source) {
 std::optional<AudioSummary> StreamSummary::reuse(bool mono) const {
     QFile file(path_);
     if (!file.open(QIODevice::ReadOnly)) return {};
-    const auto bytes = file.readAll(); file.close();
+    // Validate the fixed header before trusting any size: lengths bound everything that follows.
     constexpr qint64 header = 8 + 32 + 8 + 1;
-    if (bytes.size() < header + 32 || !bytes.startsWith(QByteArray(streamMagic, 8) + revisionId()) ||
-        QCryptographicHash::hash(QByteArrayView(bytes).first(bytes.size() - 32), QCryptographicHash::Sha256) != bytes.last(32)) return {};
+    const auto head = file.read(header);
+    if (head.size() != header || !head.startsWith(QByteArray(streamMagic, 8) + revisionId())) return {};
     AudioSummary summary;
-    summary.length = qFromLittleEndian<qint64>(bytes.constData() + 40); summary.mono = bytes[48] != 0;
+    summary.length = qFromLittleEndian<qint64>(head.constData() + 40); summary.mono = head[48] != 0;
+    if (summary.length <= 0 || summary.length > maxFrame || summary.mono != mono) return {};
     const auto peakCount = (summary.length + AudioData::peakStride - 1) / AudioData::peakStride;
-    const qint64 peakBytes = peakCount * static_cast<qint64>(sizeof(float));
-    if (summary.length <= 0 || summary.length > maxFrame || summary.mono != mono || bytes.size() < header + peakBytes + 8 + 32) return {};
-    const qint64 points = qFromLittleEndian<qint64>(bytes.constData() + header + peakBytes);
-    if (points < 0 || points > summary.length || bytes.size() != header + peakBytes + 8 + points * 16 + 32) return {};
+    const qint64 peakBytes = peakCount * static_cast<qint64>(sizeof(float)), fixed = header + peakBytes + 8, rest = file.size() - fixed - 32;
+    if (rest < 0 || rest % 16) return {};
+    const auto bytes = head + file.readAll(); file.close();
+    if (bytes.size() != file.size() || qFromLittleEndian<qint64>(bytes.constData() + header + peakBytes) != rest / 16 ||
+        QCryptographicHash::hash(QByteArrayView(bytes).first(bytes.size() - 32), QCryptographicHash::Sha256) != bytes.last(32)) return {};
     summary.peaks.resize(static_cast<std::size_t>(peakCount));
     std::memcpy(summary.peaks.data(), bytes.constData() + header, summary.peaks.size() * sizeof(float));
-    for (const char* at = bytes.constData() + header + peakBytes + 8; summary.seekPoints.size() < static_cast<std::size_t>(points); at += 16)
-        summary.seekPoints.push_back({qFromLittleEndian<qint64>(at), qFromLittleEndian<qint64>(at + 8)});
     if (!std::all_of(summary.peaks.begin(), summary.peaks.end(), [](float value) { return std::isfinite(value) && value >= 0; })) return {};
+    // Seeking searches the points by sample and lands by timestamp; both must increase.
+    for (const char* at = bytes.constData() + fixed; at < bytes.constData() + fixed + rest; at += 16) {
+        const SeekPoint point{qFromLittleEndian<qint64>(at), qFromLittleEndian<qint64>(at + 8)};
+        if (point.sample < 0 || (!summary.seekPoints.empty() && (point.pts <= summary.seekPoints.back().pts || point.sample <= summary.seekPoints.back().sample))) return {};
+        summary.seekPoints.push_back(point);
+    }
     touch(path_); // Least-recently-used trimming.
     return summary;
 }
