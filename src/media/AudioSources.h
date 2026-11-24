@@ -23,10 +23,11 @@ std::wstring windowsPath(const QString& path);
 #endif
 using FileIdentity = std::pair<quint64, quint64>;
 FileIdentity fileIdentity(const QString& path);
-// Whether path names a file that can be opened now. A file deleted while another handle has it open
-// keeps its name until that handle closes wherever deletion is not immediate (Windows on FAT/exFAT
-// drives, older Windows, network shares); such a file exists but is not openable.
-bool openable(const QString& path);
+// Whether a file is at path. A file deleted while another handle has it open keeps its name until that
+// handle closes wherever deletion is not immediate (Windows on FAT/exFAT drives, older Windows, network
+// shares): it is not present. Other open failures (a share briefly unreachable) count as present, so
+// they are retried by reads instead of being reported as missing media.
+bool present(const QString& path);
 // Size, modification time and identity: a file that still has all three is the one that was read.
 struct FileVersion {
     qint64 size = -1, modified = 0; FileIdentity identity;
@@ -71,6 +72,7 @@ public:
 private:
     QString source_, path_;
     QByteArray stamp_, sourceHash_;
+    bool indexed_ = false;
     FileVersion version_;
 };
 

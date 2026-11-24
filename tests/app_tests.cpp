@@ -1893,6 +1893,9 @@ private slots:
         closeIdleStreams(); QCOMPARE(descriptors(), before + 1); // Just read: not idle yet.
         QTest::qWait(3100); closeIdleStreams(); QCOMPARE(descriptors(), before);
         audio->storage->read(4000, sample, 1); QCOMPARE(descriptors(), before + 1); // Reopens on demand.
+        // A deleted source's decoder closes at the next sweep, idle or not, so its name can be reused at once
+        // where deleting an open file only marks it (FAT/exFAT on Windows).
+        QVERIFY(QFile::remove(path)); closeIdleStreams(); QCOMPARE(descriptors(), before);
 #endif
     }
     void rejectedSourceSwitchKeepsThePreviousPreference() {

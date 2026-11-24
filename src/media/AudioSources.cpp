@@ -53,12 +53,15 @@ FileIdentity fileIdentity(const QString& path) {
     return {static_cast<quint64>(info.st_dev), static_cast<quint64>(info.st_ino)};
 #endif
 }
-bool openable(const QString& path) {
+bool present(const QString& path) {
 #ifdef Q_OS_WIN
     const HANDLE file = CreateFileW(windowsPath(path).c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, 0, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-    CloseHandle(file); return true;
+    if (file != INVALID_HANDLE_VALUE) { CloseHandle(file); return true; }
+    // Delete-pending files fail with access denied (as do unreadable ones, which cannot play either).
+    const DWORD error = GetLastError();
+    return error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND && error != ERROR_ACCESS_DENIED &&
+        error != ERROR_DELETE_PENDING && error != ERROR_INVALID_NAME && error != ERROR_BAD_NETPATH;
 #else
     return QFileInfo(path).isFile();
 #endif
@@ -146,10 +149,12 @@ void updateIndex(const Stamp& source, const QByteArray& hash) {
     for (const auto& entry : entries) stream << entry.source.path << entry.source.size << entry.source.modified << entry.source.identity.first << entry.source.identity.second << entry.hash;
     if (stream.status() == QDataStream::Ok) file.commit();
 }
-QByteArray sourceHash(const QString& path) {
+// indexed: set when the hash came from the index rather than from reading the file now.
+QByteArray sourceHash(const QString& path, bool* indexed = nullptr) {
     const auto before = stamp(path);
+    if (indexed) *indexed = false;
     if (!before.path.isEmpty())
-        for (const auto& entry : readIndex()) if (entry.source == before) return entry.hash;
+        for (const auto& entry : readIndex()) if (entry.source == before) { if (indexed) *indexed = true; return entry.hash; }
     const auto started = QDateTime::currentMSecsSinceEpoch();
     auto hash = fileHash(path);
     if (settled(before, stamp(path), started)) updateIndex(before, hash);
@@ -378,7 +383,7 @@ QString audioCacheDirectory() {
 
 StreamSummary::StreamSummary(const QString& source, const QByteArray& format) : source_(source) {
     const auto before = stamp(source);
-    stamp_ = before.key(); version_ = {before.size, before.modified, before.identity}; sourceHash_ = sourceHash(source);
+    stamp_ = before.key(); version_ = {before.size, before.modified, before.identity}; sourceHash_ = sourceHash(source, &indexed_);
     const auto key = QString::fromLatin1(QCryptographicHash::hash(decoderRevision() + format + '\0' + sourceHash_, QCryptographicHash::Sha256).toHex());
     path_ = audioCacheDirectory() + '/' + key + ".stream";
 }
@@ -418,9 +423,10 @@ std::optional<AudioSummary> StreamSummary::reuse(bool mono) const {
 void StreamSummary::verify() const { unchangedSince(source_, stamp_); }
 void StreamSummary::save(const AudioSummary& summary) const {
     verify();
-    // As for the PCM cache: an indexed hash can predate a rewrite that kept size, time and identity,
-    // and the summary is filed under content that other copies share.
-    if (fileHash(source_) != sourceHash_) {
+    // An indexed hash can predate a rewrite that kept size, time and identity, and the summary is filed
+    // under content that other copies share, so it is checked against the file. A hash read just now is
+    // covered by the stamp check above.
+    if (indexed_ && fileHash(source_) != sourceHash_) {
         updateIndex(stamp(source_), {});
         fail("Audio source changed during preparation; import it again");
     }

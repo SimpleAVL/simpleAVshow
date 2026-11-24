@@ -304,7 +304,7 @@ QStringList Controller::preflight() {
 }
 bool Controller::needsRelink(const MediaAsset& a) {
     const bool readsSource = a.audio && a.audio->storage && a.audio->storage->readsSource();
-    return a.offline || ((a.video || readsSource) && !a.path.isEmpty() && !detail::openable(a.path));
+    return a.offline || ((a.video || readsSource) && !a.path.isEmpty() && !detail::present(a.path));
 }
 QStringList Controller::missingMedia() const {
     QStringList missing;
@@ -313,7 +313,7 @@ QStringList Controller::missingMedia() const {
         if (asset == project.assets.cend() || missing.contains(asset->path)) continue;
         // Videos, and audio that plays from its original file rather than a prepared cache, need the file now.
         const bool readsSource = !project.show.tracks[clip.track].visual && asset->audio && asset->audio->storage && asset->audio->storage->readsSource();
-        if (asset->offline || ((asset->video || readsSource) && !detail::openable(asset->path))) missing << asset->path;
+        if (asset->offline || ((asset->video || readsSource) && !detail::present(asset->path))) missing << asset->path;
     }
     return missing;
 }

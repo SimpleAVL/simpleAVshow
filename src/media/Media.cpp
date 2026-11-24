@@ -70,18 +70,18 @@ public:
     SourceFile(const SourceFile&) = delete;
     SourceFile& operator=(const SourceFile&) = delete;
     AVIOContext* io() const noexcept { return io_; }
-    // Identity and size of the file actually open, whatever is at its path by now. Throws (retryably)
-    // when the open handle cannot be queried: that says nothing about whether the file changed.
-    std::pair<detail::FileIdentity, qint64> opened() const {
+    // Identity and size of the file actually open, whatever is at its path by now; none when the handle
+    // cannot be queried (some network servers), in which case the path checks are all there is.
+    std::optional<std::pair<detail::FileIdentity, qint64>> opened() const {
 #ifdef Q_OS_WIN
         BY_HANDLE_FILE_INFORMATION info{};
-        if (!GetFileInformationByHandle(handle_, &info)) throw std::runtime_error("Cannot query open media file");
-        return {{info.dwVolumeSerialNumber, (quint64{info.nFileIndexHigh} << 32) | info.nFileIndexLow},
+        if (!GetFileInformationByHandle(handle_, &info)) return {};
+        return std::pair{detail::FileIdentity{info.dwVolumeSerialNumber, (quint64{info.nFileIndexHigh} << 32) | info.nFileIndexLow},
             static_cast<qint64>((quint64{info.nFileSizeHigh} << 32) | info.nFileSizeLow)};
 #else
         struct stat info{};
-        if (::fstat(fd_, &info)) throw std::runtime_error("Cannot query open media file: " + std::string(std::strerror(errno)));
-        return {{static_cast<quint64>(info.st_dev), static_cast<quint64>(info.st_ino)}, static_cast<qint64>(info.st_size)};
+        if (::fstat(fd_, &info)) return {};
+        return std::pair{detail::FileIdentity{static_cast<quint64>(info.st_dev), static_cast<quint64>(info.st_ino)}, static_cast<qint64>(info.st_size)};
 #endif
     }
 private:
@@ -157,7 +157,10 @@ struct Input {
         const AVInputFormat* detected = nullptr;
         if (sharing == Sharing::AllowReplace) {
             file = std::make_unique<SourceFile>(path);
-            if (expected && file->opened() != std::pair{expected->identity, expected->size})
+            // Identity is compared only where both are known; a file system without IDs still has its size.
+            if (const auto now = expected ? file->opened() : std::nullopt;
+                now && (now->second != expected->size ||
+                    (now->first != detail::FileIdentity{} && expected->identity != detail::FileIdentity{} && now->first != expected->identity)))
                 throw AudioSourceChanged("Audio source changed; reopen the project: " + path.toStdString());
             detected = identify(path, file->io());
             format = avformat_alloc_context();
@@ -439,13 +442,25 @@ public:
     static void closeIdle() {
         constexpr auto idleAfter = std::chrono::seconds(3);
         const auto now = std::chrono::steady_clock::now();
+        std::vector<std::pair<const StreamStorage*, QString>> open;
+        {
+            auto& r = registry(); const std::lock_guard lock(r.mutex);
+            for (const auto* storage : r.storages) {
+                const std::unique_lock other(storage->mutex_, std::try_to_lock); if (!other) continue;
+                std::erase_if(storage->readers_, [&](const auto& reader) { return now - reader->usedAt >= idleAfter; });
+                if (!storage->readers_.empty()) open.emplace_back(storage, storage->path_);
+            }
+        }
+        // A source deleted while open (FAT/exFAT on Windows) keeps its name until its handles close:
+        // release them so the file can be restored or replaced under that name. Checking a file can
+        // stall (network shares), so it happens without holding locks that reads need.
+        std::erase_if(open, [](const auto& entry) { return detail::present(entry.second); });
+        if (open.empty()) return;
         auto& r = registry(); const std::lock_guard lock(r.mutex);
-        for (const auto* storage : r.storages) {
-            const std::unique_lock other(storage->mutex_, std::try_to_lock); if (!other) continue;
-            std::erase_if(storage->readers_, [&](const auto& reader) { return now - reader->usedAt >= idleAfter; });
-            // A source deleted while open (FAT/exFAT on Windows) keeps its name until its handles close:
-            // release them so the file can be restored or replaced under that name.
-            if (!storage->readers_.empty() && !detail::openable(storage->path_)) storage->readers_.clear();
+        for (const auto& [storage, path] : open) {
+            // The storage may have gone meanwhile; one at the same address is only released if it reads the same file.
+            if (std::find(r.storages.begin(), r.storages.end(), storage) == r.storages.end() || storage->path_ != path) continue;
+            const std::unique_lock other(storage->mutex_, std::try_to_lock); if (other) storage->readers_.clear();
         }
     }
 private:
