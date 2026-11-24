@@ -45,7 +45,9 @@ class StreamSummary {
 public:
     // Hashes the source; construct it before opening the source to decode, so a replacement in
     // between is caught by save rather than stored under the replacement's key.
-    explicit StreamSummary(const QString& source);
+    // format: the demuxer chosen for the file. Raw formats are chosen by extension, so identical
+    // bytes can decode differently, and the format is part of the key.
+    StreamSummary(const QString& source, const QByteArray& format);
     // The source as hashed; streamed reads compare against it.
     const FileVersion& version() const noexcept { return version_; }
     std::optional<AudioSummary> reuse(bool mono) const;
@@ -62,7 +64,7 @@ private:
 class AudioCache {
 public:
     // Hashes the source; like StreamSummary, construct it before opening the source to decode.
-    explicit AudioCache(const QString& source);
+    AudioCache(const QString& source, const QByteArray& format); // format as for StreamSummary.
     ~AudioCache();
     std::shared_ptr<const AudioData> reuse(bool mono) const;
     // Throws if the source changed since construction; check before accepting a reused cache.

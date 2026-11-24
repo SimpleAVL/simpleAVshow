@@ -149,9 +149,10 @@ QByteArray peaksHash(const std::vector<float>& peaks) {
     hash.addData(QByteArrayView(reinterpret_cast<const char*>(peaks.data()), static_cast<qsizetype>(peaks.size() * sizeof(float))));
     return hash.result();
 }
-// Bump the revision when decoding changes so stale caches are rebuilt (02: one-channel input is centre mono).
+// Bump the revision when decoding changes so stale caches are rebuilt (02: one-channel input is centre mono;
+// 03: keys include the demuxer).
 const QByteArray& decoderRevision() {
-    static const auto revision = QByteArray("SAVPCM02:") + QByteArray::number(avformat_version()) + ':' +
+    static const auto revision = QByteArray("SAVPCM03:") + QByteArray::number(avformat_version()) + ':' +
         QByteArray::number(avcodec_version()) + ':' + QByteArray::number(swresample_version());
     return revision;
 }
@@ -355,10 +356,10 @@ QString audioCacheDirectory() {
         (QSysInfo::ByteOrder == QSysInfo::LittleEndian ? "/audio-pcm-v1-le" : "/audio-pcm-v1-be");
 }
 
-StreamSummary::StreamSummary(const QString& source) : source_(source) {
+StreamSummary::StreamSummary(const QString& source, const QByteArray& format) : source_(source) {
     const auto before = stamp(source);
     stamp_ = before.key(); version_ = {before.size, before.modified, before.identity};
-    const auto key = QString::fromLatin1(QCryptographicHash::hash(decoderRevision() + sourceHash(source), QCryptographicHash::Sha256).toHex());
+    const auto key = QString::fromLatin1(QCryptographicHash::hash(decoderRevision() + format + '\0' + sourceHash(source), QCryptographicHash::Sha256).toHex());
     path_ = audioCacheDirectory() + '/' + key + ".stream";
 }
 std::optional<AudioSummary> StreamSummary::reuse(bool mono) const {
@@ -412,9 +413,9 @@ void StreamSummary::save(const AudioSummary& summary) const {
     trimAudioCache();
 }
 
-AudioCache::AudioCache(const QString& source) : source_(source), stamp_(stamp(source).key()), sourceHash_(sourceHash(source)) {
+AudioCache::AudioCache(const QString& source, const QByteArray& format) : source_(source), stamp_(stamp(source).key()), sourceHash_(sourceHash(source)) {
     // Content identity also survives moved media and fresh package extraction paths.
-    const auto key = QString::fromLatin1(QCryptographicHash::hash(decoderRevision() + sourceHash_, QCryptographicHash::Sha256).toHex());
+    const auto key = QString::fromLatin1(QCryptographicHash::hash(decoderRevision() + format + '\0' + sourceHash_, QCryptographicHash::Sha256).toHex());
     const QDir directory(audioCacheDirectory());
     if (!QDir().mkpath(directory.path())) fail("Cannot create audio cache directory: " + directory.path());
     pcm_ = directory.filePath(key + ".pcm"); metadata_ = directory.filePath(key + ".meta");

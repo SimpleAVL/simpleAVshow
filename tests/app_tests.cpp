@@ -506,6 +506,13 @@ private slots:
         c.setShowMode(true); c.toggle(); QCOMPARE(c.transport.state(), State::Stopped);
         QVERIFY(c.status.contains("missing")); QVERIFY(c.status.contains("SimpleAVShow absent MIDI test destination"));
         c.setShowMode(false); QVERIFY(c.configureMidi(-1)); QVERIFY(QSettings().value("midi/port").toString().isEmpty()); QVERIFY(c.playbackProblem.isEmpty());
+        // Configuring MIDI clears only the problem MIDI reported, even when another one mentions "MIDI".
+        Controller other; auto missing = newProject();
+        MediaAsset video; video.id = "cue"; video.name = "Cue"; video.video = true; video.duration = 1; video.path = "/MIDI/cue.mov";
+        missing.assets.insert(video.id, video); missing.show.clips.clear(); missing.show.markers.clear();
+        Clip clip; clip.id = "v"; clip.assetId = "cue"; clip.track = 0; clip.duration = frames(1); missing.show.clips.push_back(clip);
+        other.replace(missing); other.toggle(); QVERIFY(other.playbackProblem.contains("/MIDI/cue.mov"));
+        QVERIFY(other.configureMidi(-1)); QVERIFY(other.playbackProblem.contains("/MIDI/cue.mov"));
     }
     void midiTestingRespectsPlaybackAndShowLocks() {
         Controller c; c.setShowMode(true); QVERIFY(!c.testMidi({0x90, 60, 100}));
@@ -1777,6 +1784,17 @@ private slots:
         c.save(dir.filePath("two.savshow")); QVERIFY2(!c.dirty, qPrintable(c.status));
         c.undo(); c.undo();
         QCOMPARE(c.project.assets[asset.id].path, extracted); QVERIFY(QFileInfo::exists(extracted));
+    }
+    void identicalBytesInDifferentRawFormatsDoNotShareCaches() {
+        // Raw formats are chosen by extension: these 44,100 16-bit samples last 1 s as .sw and 5.5 s as .sln (8 kHz).
+        QTemporaryDir dir; QByteArray bytes(88200, '\0');
+        for (qsizetype i = 0; i + 1 < bytes.size(); i += 2) qToLittleEndian<qint16>(static_cast<qint16>((i * 37) % 20000 - 10000), bytes.data() + i);
+        const auto sln = dir.filePath("cue.sln"), sw = dir.filePath("cue.sw"); writeBytes(sln, bytes); writeBytes(sw, bytes);
+        for (const auto preparation : {AudioPreparation::Stream, AudioPreparation::Prepared}) {
+            const auto first = loadMedia(sln, preparation).audio, second = loadMedia(sw, preparation).audio;
+            QCOMPARE(first->length(), Frame{264600}); QCOMPARE(second->length(), Frame{48000});
+            float sample[2]; second->storage->read(second->length() - 1, sample, 1);
+        }
     }
     void manifestsThatReferToOtherFilesAreRejected() {
         // Two identical manifests can name different files, so their bytes cannot identify the audio.

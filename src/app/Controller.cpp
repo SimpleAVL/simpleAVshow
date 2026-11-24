@@ -158,7 +158,7 @@ void Controller::toggle() {
             playbackProblem = warning = status;
             if (!resuming) return;
         }
-        if (needsMidi() && !prepareMidi()) { playbackProblem = status; if (!resuming) return; if (warning.isEmpty()) warning = status; }
+        if (needsMidi() && !prepareMidi()) { playbackProblem = midiProblem_ = status; if (!resuming) return; if (warning.isEmpty()) warning = status; }
         if (!prepareAudio()) { playbackProblem = status; return; }
         if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return; }
     }
@@ -200,8 +200,8 @@ bool Controller::configureMidi(int port) {
 bool Controller::openMidi(int port) {
     stopMidiThread();
     QString error; const bool ok = midi.open(port, error); startMidiThread();
-    // A reconnect resolves MIDI problems only; a missing-media warning outlives it.
-    if (ok) { midiName_ = midi.name(); QSettings().setValue("midi/port", midiName_); if (playbackProblem.contains("MIDI")) playbackProblem.clear(); }
+    // A reconnect resolves the MIDI problem only; a missing-media warning outlives it.
+    if (ok) { midiName_ = midi.name(); QSettings().setValue("midi/port", midiName_); if (!midiProblem_.isEmpty() && playbackProblem == midiProblem_) playbackProblem.clear(); midiProblem_.clear(); }
     report(ok ? (port < 0 ? "MIDI output disconnected" : "MIDI output: " + midi.name()) : error); return ok;
 }
 void Controller::setLateAudio(LateAudio policy) {
@@ -276,7 +276,7 @@ void Controller::watchMidi() {
     const bool present = midi.ports().contains(midiName_);
     if (midi.connected() && !present) {
         stopMidiThread(); midi.close(); startMidiThread();
-        report("MIDI destination “" + midiName_ + "” disconnected. Cues are skipped until it reconnects."); playbackProblem = status;
+        report("MIDI destination “" + midiName_ + "” disconnected. Cues are skipped until it reconnects."); playbackProblem = midiProblem_ = status;
     } else if (!midi.connected() && present && transport.state() != State::Stopped) {
         if (prepareMidi()) report("MIDI destination “" + midiName_ + "” reconnected.");
     }

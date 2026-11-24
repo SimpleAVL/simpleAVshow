@@ -77,6 +77,7 @@ private:
     unsigned deviceId_ = 0, channels_ = 2, buffer_ = 512;
     bool configured_ = false;
     QString midiName_;
+    QString midiProblem_; // The playback problem MIDI last reported; a reconnect clears only that.
     std::map<std::string, std::unique_ptr<VideoReader>> videos_;
     std::shared_ptr<const Show> armed_;
     std::thread midiThread_;

@@ -32,6 +32,27 @@ double mediaOrigin(const AVFormatContext* format) {
     }
     return std::isfinite(origin) ? origin : 0;
 }
+// Local files only: no format may reach the network on its own (an .sdp or HLS playlist would).
+AVDictionary* localOnly() { AVDictionary* options = nullptr; av_dict_set(&options, "protocol_whitelist", "file", 0); return options; }
+// The demuxer for path, from its bytes and name alone. Formats that play other files (playlists,
+// manifests, split recordings, scripts) depend on files that change, move and vanish independently,
+// so neither caches keyed by this file's bytes nor change detection could follow them. Opening runs
+// a format's header reader (which would already fetch segments or evaluate a script), so they are
+// refused here, and the format found is forced on open.
+const AVInputFormat* identify(const QString& path) {
+    const QByteArray encoded = path.toUtf8();
+    const AVInputFormat* detected = nullptr;
+    AVIOContext* probe = nullptr; AVDictionary* options = localOnly();
+    const int opened = avio_open2(&probe, encoded.constData(), AVIO_FLAG_READ, nullptr, &options); av_dict_free(&options);
+    checked(opened, "Open media");
+    const int probed = av_probe_input_buffer2(probe, &detected, encoded.constData(), nullptr, 0, 0); avio_closep(&probe);
+    checked(probed, "Identify media");
+    for (const auto& name : QByteArray(detected->name).split(','))
+        if (name == "concat" || name == "hls" || name == "dash" || name == "imf" || name == "webm_dash_manifest" ||
+            name == "mlv" || name == "sdp" || name == "avisynth" || name == "vapoursynth")
+            throw std::runtime_error("Playlists, manifests and split recordings that refer to other files cannot be imported; import the media files themselves");
+    return detected;
+}
 struct Input {
     AVFormatContext* format = nullptr;
     AVCodecContext* codec = nullptr;
@@ -45,28 +66,9 @@ struct Input {
         avcodec_free_context(&codec); avformat_close_input(&format);
     }
     void open(const QString& path) {
-        const QByteArray encoded = path.toUtf8();
-        // Local files only: no format may reach the network on its own (an .sdp or HLS playlist would).
-        const auto localOnly = [] { AVDictionary* options = nullptr; av_dict_set(&options, "protocol_whitelist", "file", 0); return options; };
-        // Formats that play other files (playlists, manifests, split recordings, scripts) depend on files that
-        // change, move and vanish independently, so neither caches keyed by this file's bytes nor change
-        // detection could follow them. Opening runs a format's header reader (which would already fetch
-        // segments or evaluate a script), so the format is identified from the file's bytes first, refused,
-        // and otherwise forced on open.
-        const AVInputFormat* detected = nullptr;
-        {
-            AVIOContext* probe = nullptr; AVDictionary* options = localOnly();
-            const int opened = avio_open2(&probe, encoded.constData(), AVIO_FLAG_READ, nullptr, &options); av_dict_free(&options);
-            checked(opened, "Open media");
-            const int probed = av_probe_input_buffer2(probe, &detected, encoded.constData(), nullptr, 0, 0); avio_closep(&probe);
-            checked(probed, "Identify media");
-        }
-        for (const auto& name : QByteArray(detected->name).split(','))
-            if (name == "concat" || name == "hls" || name == "dash" || name == "imf" || name == "webm_dash_manifest" ||
-                name == "mlv" || name == "sdp" || name == "avisynth" || name == "vapoursynth")
-                throw std::runtime_error("Playlists, manifests and split recordings that refer to other files cannot be imported; import the media files themselves");
+        const auto* detected = identify(path);
         AVDictionary* options = localOnly();
-        const int opened = avformat_open_input(&format, encoded.constData(), detected, &options); av_dict_free(&options);
+        const int opened = avformat_open_input(&format, path.toUtf8().constData(), detected, &options); av_dict_free(&options);
         checked(opened, "Open media");
         checked(avformat_find_stream_info(format, nullptr), "Read media information");
     }
@@ -381,8 +383,9 @@ std::shared_ptr<const AudioData> loadAudio(const QString& path, AudioPreparation
     // which saving the summary or publishing the cache checks, instead of filing the old decode
     // under the replacement's content key.
     const bool streaming = preparation == AudioPreparation::Stream;
+    const QByteArray format = identify(path)->name;
     std::optional<detail::StreamSummary> summary; std::optional<detail::AudioCache> prepared;
-    if (streaming) summary.emplace(path); else prepared.emplace(path);
+    if (streaming) summary.emplace(path, format); else prepared.emplace(path, format);
     AudioDecoder decoder(path);
     auto data = std::make_shared<AudioData>(); data->mono = decoder.mono();
     Frame first = 0; std::vector<float> samples;
