@@ -1,5 +1,6 @@
 #include "app/McpProxy.h"
 #include <QCoreApplication>
+#include <QHostAddress>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMap>
@@ -57,8 +58,13 @@ bool isOrderedControlCall(const QJsonObject& obj) {
 int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
     QCoreApplication app(argc, argv);
     const QUrl url(endpointUrl);
-    if (!url.isValid() || (url.scheme() != "http" && url.scheme() != "https")) {
-        std::cerr << "Invalid MCP endpoint URL\n";
+    auto isLoopbackHost = [](const QString& host) {
+        if (host.compare("localhost", Qt::CaseInsensitive) == 0) return true;
+        QHostAddress addr;
+        return addr.setAddress(host) && addr.isLoopback();
+    };
+    if (!url.isValid() || (url.scheme() != "http" && url.scheme() != "https") || !isLoopbackHost(url.host())) {
+        std::cerr << "Invalid MCP endpoint URL (only loopback http/https endpoints are allowed)\n";
         return 2;
     }
     const QByteArray token = qgetenv("SAV_MCP_TOKEN");
@@ -345,14 +351,31 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
         }
         const QJsonObject msgObj = doc.object();
         const bool hasId = msgObj.contains("id");
-        const QJsonValue requestId = hasId ? msgObj.value("id") : QJsonValue(QJsonValue::Undefined);
-        const bool validId = !hasId || requestId.isString() || requestId.isDouble() || requestId.isNull();
+        const QJsonValue rawId = hasId ? msgObj.value("id") : QJsonValue(QJsonValue::Undefined);
+        const bool hasMethod = msgObj.contains("method");
+        const bool isClientResponse = msgObj["jsonrpc"].toString() == "2.0" && !hasMethod && hasId &&
+            (rawId.isString() || rawId.isDouble() || rawId.isNull()) &&
+            (msgObj.contains("result") != msgObj.contains("error"));
+        if (isClientResponse) {
+            // Client-to-server JSON-RPC response (e.g. reply to ping/roots/sampling):
+            // forward cleanly without expecting a response body (HTTP 202 is valid) and never echo -32600.
+            if (sessionInvalid) { maybeQuit(); return; }
+            if (reinitializing) {
+                deferredQueue.push_back({trimmed, msgObj, QJsonValue(QJsonValue::Undefined), {}, false});
+                return;
+            }
+            sendRequest(trimmed, msgObj, QJsonValue(QJsonValue::Undefined), {}, false);
+            return;
+        }
+        // Per MCP 2025-11-25 JSON-RPC schema, request IDs must be string or number (never null).
+        const bool validRequestId = !hasId || rawId.isString() || rawId.isDouble();
         const QJsonValue methodVal = msgObj.value("method");
-        if (msgObj["jsonrpc"].toString() != "2.0" || !methodVal.isString() || methodVal.toString().isEmpty() || !validId) {
-            writeError(validId && hasId ? requestId : QJsonValue(QJsonValue::Null), -32600, "Invalid Request");
+        if (msgObj["jsonrpc"].toString() != "2.0" || !methodVal.isString() || methodVal.toString().isEmpty() || !validRequestId) {
+            writeError(validRequestId && hasId ? rawId : QJsonValue(QJsonValue::Null), -32600, "Invalid Request");
             maybeQuit();
             return;
         }
+        const QJsonValue requestId = rawId;
         const QString idKey = requestIdKey(requestId);
         const QString method = methodVal.toString();
         if (method == "initialize") {

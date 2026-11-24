@@ -592,10 +592,14 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
 }
 
 void AcpClient::startNewSession(const QString& cwd, const AcpMcpConfig& mcp) {
-    if (!process_ || process_->state() != QProcess::Running) return;
     const QString prevSession = sessionId_;
     cwd_ = cwd.isEmpty() ? cwd_ : cwd;
     mcp_ = mcp;
+    if (!process_ || process_->state() != QProcess::Running) {
+        if (!program_.isEmpty()) launchProcess(false);
+        else failConnection("ACP agent process is not running.");
+        return;
+    }
     // Agents that lack ACP session/close keep old sessions and their MCP/stdio helpers alive
     // indefinitely if we only send session/new; restart the agent process cleanly instead.
     if (!agentSupportsSessionClose_ && !prevSession.isEmpty() && !program_.isEmpty()) {

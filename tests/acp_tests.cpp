@@ -452,6 +452,51 @@ private slots:
         QVERIFY(sawParseErr);
         QVERIFY(sawInvalidReq);
         QCOMPARE(controlOrder, QStringList({"play-start", "play-done", "stop_all"}));
+
+        // 9. Verify --mcp-proxy rejects non-loopback URLs (token exfiltration guard), rejects id:null requests,
+        //    and forwards client JSON-RPC responses cleanly without echoing -32600.
+        QProcess remoteProxy;
+        remoteProxy.start(SAV_APP_EXECUTABLE, {"--mcp-proxy", "https://example.com/mcp"});
+        QVERIFY(remoteProxy.waitForStarted(5000));
+        QTRY_VERIFY_WITH_TIMEOUT(remoteProxy.state() == QProcess::NotRunning, 5000);
+        QCOMPARE(remoteProxy.exitCode(), 2);
+
+        bool sawClientResp = false;
+        QTcpServer respServer;
+        QVERIFY(respServer.listen(QHostAddress::LocalHost, 0));
+        connect(&respServer, &QTcpServer::newConnection, &respServer, [&respServer, &sawClientResp] {
+            auto* s = respServer.nextPendingConnection();
+            connect(s, &QTcpSocket::readyRead, s, [s, &sawClientResp] {
+                const QByteArray raw = s->readAll();
+                if (raw.contains("\"result\":{}")) {
+                    sawClientResp = true;
+                    s->write("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                } else {
+                    const QByteArray body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"t\",\"version\":\"1\"}}}";
+                    s->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: sid-resp\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                }
+                s->disconnectFromHost();
+            });
+        });
+        QProcess respProxy;
+        respProxy.start(SAV_APP_EXECUTABLE, {"--mcp-proxy", QString("http://127.0.0.1:%1/mcp").arg(respServer.serverPort())});
+        QVERIFY(respProxy.waitForStarted(5000));
+        respProxy.write("{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"ping\"}\n");
+        respProxy.write("{\"jsonrpc\":\"2.0\",\"id\":42,\"result\":{}}\n");
+        respProxy.closeWriteChannel();
+        QTRY_VERIFY_WITH_TIMEOUT(respProxy.state() == QProcess::NotRunning, 8000);
+        QVERIFY(sawClientResp);
+        const auto respLines = respProxy.readAllStandardOutput().split('\n');
+        int errorCount = 0;
+        bool sawNullIdRejected = false;
+        for (const auto& l : respLines) {
+            if (l.trimmed().isEmpty()) continue;
+            const auto o = QJsonDocument::fromJson(l).object();
+            if (o.contains("error")) ++errorCount;
+            if (o["id"].isNull() && o["error"].toObject()["code"].toInt() == -32600) sawNullIdRejected = true;
+        }
+        QVERIFY(sawNullIdRejected);
+        QCOMPARE(errorCount, 1); // Client response (id:42) must NOT produce a -32600 error.
     }
 
     void acpPermissionAndCancel() {
