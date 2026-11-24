@@ -123,16 +123,17 @@ private:
 // so neither caches keyed by this file's bytes nor change detection could follow them. Opening runs
 // a format's header reader (which would already fetch segments or evaluate a script), so they are
 // refused here, and the format found is forced on open.
-const AVInputFormat* identify(const QString& path) {
+// io: an open file to probe, rewound afterwards so it can be opened as detected (no second open of path).
+const AVInputFormat* identify(const QString& path, AVIOContext* io) {
     const AVInputFormat* detected = nullptr;
-    const SourceFile probe(path);
-    checked(av_probe_input_buffer2(probe.io(), &detected, path.toUtf8().constData(), nullptr, 0, 0), "Identify media");
+    checked(av_probe_input_buffer2(io, &detected, path.toUtf8().constData(), nullptr, 0, 0), "Identify media");
     for (const auto& name : QByteArray(detected->name).split(','))
         if (name == "concat" || name == "hls" || name == "dash" || name == "imf" || name == "webm_dash_manifest" ||
             name == "mlv" || name == "sdp" || name == "avisynth" || name == "vapoursynth")
             throw std::runtime_error("Playlists, manifests and split recordings that refer to other files cannot be imported; import the media files themselves");
     return detected;
 }
+const AVInputFormat* identify(const QString& path) { const SourceFile probe(path); return identify(path, probe.io()); }
 struct Input {
     std::unique_ptr<SourceFile> file; // Outlives format, which reads through it.
     AVFormatContext* format = nullptr;
@@ -149,14 +150,19 @@ struct Input {
     // Sharing::Lock keeps FFmpeg's own file protocol, which on Windows stops the file from being deleted
     // or renamed while open: playing videos stay protected during a show, as before streaming existed.
     enum class Sharing { AllowReplace, Lock };
-    void open(const QString& path, Sharing sharing = Sharing::AllowReplace) {
-        const auto* detected = identify(path);
+    // expected: the file as imported; the file actually opened is checked against it before anything
+    // reads it, so a replacement reports as changed rather than as whatever parsing it would fail with.
+    void open(const QString& path, Sharing sharing = Sharing::AllowReplace, const std::optional<detail::FileVersion>& expected = {}) {
+        const AVInputFormat* detected = nullptr;
         if (sharing == Sharing::AllowReplace) {
             file = std::make_unique<SourceFile>(path);
+            if (expected && file->opened() != std::pair{expected->identity, expected->size})
+                throw AudioSourceChanged("Audio source changed; reopen the project: " + path.toStdString());
+            detected = identify(path, file->io());
             format = avformat_alloc_context();
             if (!format) throw std::bad_alloc();
             format->pb = file->io();
-        }
+        } else detected = identify(path);
         AVDictionary* options = localOnly();
         const int opened = avformat_open_input(&format, path.toUtf8().constData(), detected, &options); av_dict_free(&options);
         checked(opened, "Open media");
@@ -248,9 +254,7 @@ private:
     std::int64_t inputAt_ = 0, target_ = 0, produced_ = 0;
     std::vector<float> scratch_;
     void open() {
-        input_ = std::make_unique<Input>(); input_->open(path_);
-        if (expected_ && input_->file->opened() != std::pair{expected_->identity, expected_->size})
-            throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString());
+        input_ = std::make_unique<Input>(); input_->open(path_, Input::Sharing::AllowReplace, expected_);
         stream_ = av_find_best_stream(input_->format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
         if (stream_ < 0) throw std::runtime_error("File contains no audio");
         input_->decoder(stream_);
