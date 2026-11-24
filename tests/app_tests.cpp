@@ -1820,7 +1820,8 @@ private slots:
         const auto before = descriptors();
         Transport transport; transport.configure(show);
         QVERIFY(!transport.audioReadFailed());
-        QVERIFY2(descriptors() - before <= 72, qPrintable(QString("%1 descriptors opened").arg(descriptors() - before)));
+        // Evicted decoders close on threads of their own, so the count settles shortly after.
+        QTRY_VERIFY2_WITH_TIMEOUT(descriptors() - before <= 72, qPrintable(QString("%1 descriptors opened").arg(descriptors() - before)), 5000);
         // Evicted decoders reopen on demand: a later cue still plays exactly.
         transport.command({Action::Seek, show->clips[150].start}); transport.command({Action::Play});
         std::vector<float> out(512 * 2); transport.render(out.data(), 512, 2); // The seek reads its new place cold.
