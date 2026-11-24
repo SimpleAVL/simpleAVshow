@@ -55,6 +55,18 @@ QString Controller::untitledAutosavePath() {
 }
 QString Controller::autosavePath() const { return path.isEmpty() ? untitledAutosavePath() : path + ".autosave"; }
 void Controller::discardAutosave() { QFile::remove(autosavePath()); }
+quint64 Controller::acquireBusy() {
+    if (busy) return 0;
+    busy = true;
+    busyLease_ = nextBusyLease_++;
+    return busyLease_;
+}
+void Controller::releaseBusy(quint64 lease) {
+    if (lease != 0 && lease == busyLease_) {
+        busyLease_ = 0;
+        busy = false;
+    }
+}
 bool Controller::canEdit(bool reportFailure) {
     const bool allowed = !showMode && !busy && transport.state() != State::Playing && transport.state() != State::Held &&
         transport.asyncVoices() == 0;
@@ -68,7 +80,7 @@ bool Controller::edit(const std::function<void(Project&)>& mutation) {
         const Frame time = std::min(position(), next.show.duration);
         // The previous state moves into history rather than being copied again.
         undo_.push_back(std::move(project)); if (undo_.size() > 32) undo_.pop_front(); redo_.clear();
-        project = std::move(next); dirty = true; arm(time); emit changed(); return true;
+        project = std::move(next); dirty = true; ++projectRevision_; arm(time); emit changed(); return true;
     } catch (const std::exception& e) { report(QString::fromUtf8(e.what())); return false; }
 }
 void Controller::replace(Project next, QString projectPath) {
@@ -76,17 +88,17 @@ void Controller::replace(Project next, QString projectPath) {
     // Readers hold extracted package files open; Windows cannot remove them while open.
     videos_.clear(); lastPicture_ = {};
     project = std::move(next); path = std::move(projectPath); dirty = false; playbackProblem.clear();
-    undo_.clear(); redo_.clear();
+    undo_.clear(); redo_.clear(); ++projectRevision_;
     arm(0); report("Project ready. Space plays or pauses; Stop All stops async audio and video."); emit changed();
 }
 void Controller::undo() {
     if (!canEdit() || undo_.empty()) return;
-    redo_.push_back(std::move(project)); project = std::move(undo_.back()); undo_.pop_back(); dirty = true;
+    redo_.push_back(std::move(project)); project = std::move(undo_.back()); undo_.pop_back(); dirty = true; ++projectRevision_;
     arm(std::min(position(), project.show.duration)); emit changed();
 }
 void Controller::redo() {
     if (!canEdit() || redo_.empty()) return;
-    undo_.push_back(std::move(project)); project = std::move(redo_.back()); redo_.pop_back(); dirty = true;
+    undo_.push_back(std::move(project)); project = std::move(redo_.back()); redo_.pop_back(); dirty = true; ++projectRevision_;
     arm(std::min(position(), project.show.duration)); emit changed();
 }
 void Controller::arm(Frame position) {
@@ -142,28 +154,30 @@ bool Controller::routesValid() const {
 bool Controller::play() {
     if (busy) return false;
     const State state = transport.state();
-    if (state == State::Playing) return true;
-    playbackProblem.clear();
-    // Re-arming retries sources that were briefly unavailable; changed sources still need reopening.
-    if (transport.audioReadFailed() && state != State::Held && !transport.asyncVoices()) arm(position());
-    if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and press Play to retry, or reopen the project to rebuild changed or damaged caches."); playbackProblem = status; return false; }
-    // Resuming a live show never blocks on picture or MIDI; it warns and continues.
-    const bool resuming = state == State::Held || transport.asyncVoices() || (state == State::Paused && device.running());
-    if (const auto missing = missingMedia(); !missing.isEmpty()) {
-        report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
-        playbackProblem = status;
-        if (!resuming) return false;
+    if (state != State::Playing) {
+        playbackProblem.clear();
+        // Re-arming retries sources that were briefly unavailable; changed sources still need reopening.
+        if (transport.audioReadFailed() && state != State::Held && !transport.asyncVoices()) arm(position());
+        if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and press Play to retry, or reopen the project to rebuild changed or damaged caches."); playbackProblem = status; return false; }
+        // Resuming a live show never blocks on picture or MIDI; it warns and continues.
+        const bool resuming = state == State::Held || transport.asyncVoices() || (state == State::Paused && device.running());
+        if (const auto missing = missingMedia(); !missing.isEmpty()) {
+            report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
+            playbackProblem = status;
+            if (!resuming) return false;
+        }
+        if (needsMidi() && !prepareMidi()) { playbackProblem = status; if (!resuming) return false; }
+        if (!prepareAudio()) { playbackProblem = status; return false; }
+        if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return false; }
     }
-    if (needsMidi() && !prepareMidi()) { playbackProblem = status; if (!resuming) return false; }
-    if (!prepareAudio()) { playbackProblem = status; return false; }
-    if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return false; }
+    // Always enqueue Action::Play so a Play queued immediately after a Pause is honored in arrival order.
     if (!transport.command({Action::Play})) { report("Transport command queue is full"); return false; }
     return true;
 }
 bool Controller::pause() {
     if (busy) return false;
-    if (transport.state() != State::Playing) return true;
-    // Always sends Pause (never Play), so a Playing → Held transition cannot accidentally resume a hold.
+    // Always enqueue Action::Pause (never Play) so a Pause queued behind Play runs in order and
+    // a Playing → Held transition can never accidentally resume a hold.
     if (!transport.command({Action::Pause})) { report("Transport command queue is full"); return false; }
     return true;
 }
@@ -186,6 +200,36 @@ bool Controller::stopAll() {
 bool Controller::configureAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer) {
     if (!canEdit()) return false;
     return openAudio(api, id, std::move(name), channels, buffer);
+}
+bool Controller::configureAudioByName(RtAudio::Api api, const QString& wantedName, unsigned channels, unsigned buffer) {
+    if (!canEdit()) return false;
+    const bool hadStream = configured_ && device.running();
+    const RtAudio::Api prevApi = api_;
+    const QString prevName = audioName;
+    const unsigned prevChannels = channels_, prevBuffer = buffer_;
+    QSettings settings;
+    QString resolvedName, error;
+    if (device.openByName(api, wantedName, settings.value("audio/device").toString(), channels, buffer, resolvedName, error)) {
+        api_ = api; channels_ = channels; buffer_ = buffer; audioName = resolvedName; configured_ = true;
+        stall_.restart(); playbackProblem.clear();
+        settings.setValue("audio/api", static_cast<int>(api)); settings.setValue("audio/device", resolvedName);
+        settings.setValue("audio/channels", channels); settings.setValue("audio/buffer", buffer);
+        report(QString("%1 · %2 channels · 48 kHz · %3 samples").arg(resolvedName).arg(channels).arg(device.bufferFrames()));
+        return true;
+    }
+    configured_ = false;
+    if (hadStream && !prevName.isEmpty()) {
+        QString restoredName, restoreErr;
+        if (device.openByName(prevApi, prevName, prevName, prevChannels, prevBuffer, restoredName, restoreErr)) {
+            configured_ = true; stall_.restart();
+            report("Audio output unavailable: " + error + " (kept previous connection: " + restoredName + ")");
+        } else {
+            report("Audio output unavailable: " + error + " (previous audio connection “" + prevName + "” was closed and could not be restored: " + restoreErr + ")");
+        }
+    } else {
+        report("Audio output unavailable: " + error);
+    }
+    return false;
 }
 bool Controller::openAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer) {
     api_ = api; deviceId_ = id; channels_ = channels; buffer_ = buffer; audioName = name;
@@ -487,7 +531,7 @@ bool Controller::commitSave(Project candidate, QString target) {
     try {
         const auto sourceDirectory = project.packageDirectory;
         const QString previous = path;
-        writeProject(candidate, target); project.assets = std::move(candidate.assets); bindAudio(project); project.packageDirectory.reset(); path = target; dirty = false;
+        writeProject(candidate, target); project.assets = std::move(candidate.assets); bindAudio(project); project.packageDirectory.reset(); path = target; dirty = false; ++projectRevision_;
         // Undo must not restore temporary package paths or unsaved generated media.
         for (auto* history : {&undo_, &redo_}) for (auto& snapshot : *history) {
             bool extracted = false;

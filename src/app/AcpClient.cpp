@@ -113,8 +113,14 @@ QStringList splitCommandLine(const QString& commandLine) {
             continue;
         }
         if (!quote.isNull()) {
-            if (c == quote) quote = QChar();
-            else current += c;
+            if (quote == '"' && c == '"' && i + 1 < commandLine.size() && commandLine[i + 1] == '"') {
+                current += '"';
+                ++i;
+            } else if (c == quote) {
+                quote = QChar();
+            } else {
+                current += c;
+            }
             continue;
         }
         if (c.isSpace()) {
@@ -132,10 +138,28 @@ QStringList splitCommandLine(const QString& commandLine) {
     return args;
 }
 
-AcpClient::AcpClient(QObject* parent) : QObject(parent) {}
+AcpClient::AcpClient(QObject* parent) : QObject(parent) {
+    deadlineTimer_.setSingleShot(true);
+    connect(&deadlineTimer_, &QTimer::timeout, this, [this] {
+        if (state_ == AcpState::Connecting || state_ == AcpState::Prompting) {
+            failConnection(deadlineReason_.isEmpty() ? QString("ACP agent timed out.") : deadlineReason_);
+        }
+    });
+}
 
 AcpClient::~AcpClient() {
     disconnectFromAgent();
+}
+
+void AcpClient::setTimeoutsForTesting(int startupMs, int handshakeMs, int cancelMs) {
+    startupTimeoutMs_ = std::max(10, startupMs);
+    handshakeTimeoutMs_ = std::max(10, handshakeMs);
+    cancelTimeoutMs_ = std::max(10, cancelMs);
+}
+
+void AcpClient::armDeadline(int ms, const QString& reason) {
+    deadlineReason_ = reason;
+    deadlineTimer_.start(ms);
 }
 
 void AcpClient::setState(AcpState next) {
@@ -172,6 +196,23 @@ void AcpClient::connectToAgent(const QString& program, const QStringList& args, 
     env.insert("PATH", pathParts.join(sep));
     process_->setProcessEnvironment(env);
 
+    connect(process_, &QProcess::started, this, [this] {
+        if (stopping_ || !process_ || state_ != AcpState::Connecting) return;
+        armDeadline(handshakeTimeoutMs_, "Timed out waiting for ACP agent handshake.");
+        QJsonObject clientCaps{
+            {"fs", QJsonObject{{"readTextFile", false}, {"writeTextFile", false}}},
+            {"terminal", false}
+        };
+        QJsonObject params{
+            {"protocolVersion", 1},
+            {"clientCapabilities", clientCaps},
+            {"clientInfo", QJsonObject{
+                {"name", "SimpleAVShow"},
+                {"version", QCoreApplication::applicationVersion().isEmpty() ? QString("0.6.0") : QCoreApplication::applicationVersion()}
+            }}
+        };
+        sendRequest("initialize", params, PendingKind::Initialize);
+    });
     connect(process_, &QProcess::readyReadStandardOutput, this, &AcpClient::handleStdout);
     connect(process_, &QProcess::readyReadStandardError, this, [this] {
         if (!process_) return;
@@ -186,6 +227,7 @@ void AcpClient::connectToAgent(const QString& program, const QStringList& args, 
     connect(process_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
         [this](int exitCode, QProcess::ExitStatus exitStatus) {
             if (stopping_) return;
+            deadlineTimer_.stop();
             const QString reason = exitStatus == QProcess::CrashExit
                 ? QString("ACP agent crashed (exit code %1).").arg(exitCode)
                 : QString("ACP agent exited (code %1).").arg(exitCode);
@@ -199,27 +241,10 @@ void AcpClient::connectToAgent(const QString& program, const QStringList& args, 
         });
 
     setState(AcpState::Connecting);
+    armDeadline(startupTimeoutMs_, "Timed out starting ACP agent process.");
+    // Do not call waitForStarted() or dereference process_ after start(): on Windows
+    // QProcess::start() can emit FailedToStart synchronously and clear process_.
     process_->start(executable, args);
-    if (!process_->waitForStarted(5000)) {
-        const QString err = process_ ? process_->errorString() : QString("Timed out starting process");
-        disconnectFromAgent();
-        failConnection("Could not start ACP agent: " + err);
-        return;
-    }
-
-    QJsonObject clientCaps{
-        {"fs", QJsonObject{{"readTextFile", false}, {"writeTextFile", false}}},
-        {"terminal", false}
-    };
-    QJsonObject params{
-        {"protocolVersion", 1},
-        {"clientCapabilities", clientCaps},
-        {"clientInfo", QJsonObject{
-            {"name", "SimpleAVShow"},
-            {"version", QCoreApplication::applicationVersion().isEmpty() ? QString("0.6.0") : QCoreApplication::applicationVersion()}
-        }}
-    };
-    sendRequest("initialize", params, PendingKind::Initialize);
 }
 
 void AcpClient::startNewSession(const QString& cwd, const AcpMcpConfig& mcp) {
@@ -231,6 +256,7 @@ void AcpClient::startNewSession(const QString& cwd, const AcpMcpConfig& mcp) {
     mcp_ = mcp;
     sessionId_.clear();
     setState(AcpState::Connecting);
+    armDeadline(handshakeTimeoutMs_, "Timed out waiting for ACP session creation.");
     QJsonObject params{
         {"cwd", cwd_},
         {"mcpServers", buildMcpServers()}
@@ -255,6 +281,7 @@ void AcpClient::cancelPrompt() {
     cancelAllPendingPermissions(sessionId_);
     if (state_ == AcpState::Prompting) {
         sendNotification("session/cancel", {{"sessionId", sessionId_}});
+        armDeadline(cancelTimeoutMs_, "Timed out waiting for ACP agent to cancel the active turn.");
     }
 }
 
@@ -269,6 +296,7 @@ void AcpClient::respondPermission(int requestKey, const QString& optionId) {
 
 void AcpClient::disconnectFromAgent() {
     stopping_ = true;
+    deadlineTimer_.stop();
     cancelling_ = false;
     cancelAllPendingPermissions();
     pending_.clear();
@@ -365,6 +393,7 @@ void AcpClient::handleResponse(int id, const QJsonObject& msg) {
         const int code = errObj["code"].toInt();
         const QString errMessage = errObj["message"].toString("ACP request failed");
         if (kind == PendingKind::Prompt) {
+            deadlineTimer_.stop();
             cancelling_ = false;
             cancelAllPendingPermissions(req.sessionId);
             setState(AcpState::Ready);
@@ -405,9 +434,11 @@ void AcpClient::handleResponse(int id, const QJsonObject& msg) {
             failConnection("ACP agent returned an empty sessionId.");
             return;
         }
+        deadlineTimer_.stop();
         setState(AcpState::Ready);
         emit connected(agentName_.isEmpty() ? QString("ACP agent") : agentName_, sessionId_);
     } else if (kind == PendingKind::Prompt) {
+        deadlineTimer_.stop();
         cancelling_ = false;
         cancelAllPendingPermissions(req.sessionId);
         setState(AcpState::Ready);
@@ -518,6 +549,7 @@ void AcpClient::cancelAllPendingPermissions(const QString& onlySessionId) {
 void AcpClient::failConnection(const QString& message) {
     // Tear down any running child process (e.g. after incompatible protocolVersion) while preserving Error state.
     stopping_ = true;
+    deadlineTimer_.stop();
     cancelling_ = false;
     pending_.clear();
     pendingPermissions_.clear();

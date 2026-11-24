@@ -1,4 +1,5 @@
 #include "app/Project.h"
+#include "media/AudioSources.h"
 #include "media/MidiOutput.h"
 #include <QDir>
 #include <QFile>
@@ -79,7 +80,13 @@ std::string splitLinked(Project& p, const std::string& id, Frame time, const std
     std::string second;
     std::vector<Clip> tails;
     for (auto& c : p.show.clips) {
-        if (std::find(ids.begin(), ids.end(), c.id) == ids.end() || time <= c.start || time >= c.end()) continue;
+        if (std::find(ids.begin(), ids.end(), c.id) == ids.end()) continue;
+        if (c.start >= time) {
+            // A linked partner wholly after the cut belongs to the tail half.
+            c.link = link;
+            continue;
+        }
+        if (c.end() <= time) continue; // Wholly before the cut: stays with the head half.
         const Frame cut = time - c.start;
         Clip tail = c;
         tail.id = (c.id == ids.front() && !tailId.empty()) ? tailId : newId().toStdString();
@@ -406,22 +413,69 @@ Project readProject(const QString& path) {
     Project p = parseProject(file.readAll(), QFileInfo(path).absolutePath());
     loadProjectMedia(p); return p;
 }
-void materializeProjectMedia(Project& p, const QString& directory) {
+namespace {
+void copyFileCancellable(const QString& source, const QString& target, const std::function<bool()>& isCancelled) {
+    QFile in(source);
+    if (!in.open(QIODevice::ReadOnly)) throw std::runtime_error("Cannot read packaged media: " + source.toStdString());
+    QSaveFile out(target);
+    if (!out.open(QIODevice::WriteOnly)) throw std::runtime_error("Cannot copy packaged media: " + target.toStdString());
+    QByteArray buffer(1024 * 1024, '\0');
+    while (!in.atEnd()) {
+        if (isCancelled && isCancelled()) throw std::runtime_error("Save cancelled");
+        const qint64 n = in.read(buffer.data(), buffer.size());
+        if (n < 0) throw std::runtime_error("Cannot read packaged media: " + source.toStdString());
+        if (n == 0) break;
+        if (out.write(buffer.constData(), n) != n) throw std::runtime_error("Cannot write packaged media: " + target.toStdString());
+    }
+    if (isCancelled && isCancelled()) throw std::runtime_error("Save cancelled");
+    if (!out.commit()) throw std::runtime_error("Cannot finalize packaged media: " + target.toStdString());
+}
+
+void writeGeneratedAsset(const MediaAsset& a, const QString& target, const std::function<bool()>& isCancelled) {
+    QSaveFile file(target);
+    if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error(file.errorString().toStdString());
+    if (a.image) {
+        if (isCancelled && isCancelled()) throw std::runtime_error("Save cancelled");
+        if (!a.still.save(&file, "PNG")) throw std::runtime_error("Cannot save generated image");
+    } else if (a.audio && !a.audio->storage) {
+        QDataStream out(&file); out.setByteOrder(QDataStream::LittleEndian);
+        const quint16 channels = a.audio->mono ? 1 : 2;
+        const auto size = static_cast<quint64>(a.audio->length()) * channels * 2;
+        if (size > std::numeric_limits<quint32>::max() - 36) throw std::runtime_error("Generated audio is too large for WAV export");
+        const auto bytes = static_cast<quint32>(size);
+        out.writeRawData("RIFF", 4); out << quint32(bytes + 36); out.writeRawData("WAVEfmt ", 8);
+        out << quint32(16) << quint16(1) << channels << quint32(sampleRate) << quint32(sampleRate * channels * 2) << quint16(channels * 2) << quint16(16);
+        out.writeRawData("data", 4); out << bytes;
+        const std::size_t step = a.audio->mono ? 2 : 1;
+        for (std::size_t i = 0; i < a.audio->samples.size(); i += step) {
+            if (((i / step) & 0xffff) == 0 && isCancelled && isCancelled()) throw std::runtime_error("Save cancelled");
+            out << static_cast<qint16>(std::clamp(a.audio->samples[i], -1.f, 1.f) * 32767);
+        }
+        if (out.status() != QDataStream::Ok) throw std::runtime_error("Cannot write generated audio");
+    } else {
+        throw std::runtime_error("Asset has no source file");
+    }
+    if (isCancelled && isCancelled()) throw std::runtime_error("Save cancelled");
+    if (!file.commit()) throw std::runtime_error(file.errorString().toStdString());
+}
+}
+
+void materializeProjectMedia(Project& p, const QString& directory, const std::function<bool()>& isCancelled) {
     QDir dir(directory);
     const bool existed = dir.exists();
     QMap<QString, QString> copied;
     QStringList created;
     try {
         for (auto& a : p.assets) {
+            if (isCancelled && isCancelled()) throw std::runtime_error("Save cancelled");
             const bool extracted = p.packageDirectory && !a.path.isEmpty() &&
                 QFileInfo(a.path).absoluteFilePath().startsWith(p.packageDirectory->path() + "/");
             if (!a.path.isEmpty() && !extracted) continue;
             if (!QDir().mkpath(dir.absolutePath())) throw std::runtime_error("Cannot create media directory");
             if (extracted) {
                 if (!copied.contains(a.path)) {
-                    // QFile::copy writes a temporary file and renames it, so a failed copy leaves nothing behind.
                     const QString target = dir.filePath(newId() + "." + QFileInfo(a.path).suffix());
-                    if (!QFile::copy(a.path, target)) throw std::runtime_error("Cannot copy packaged media: " + a.path.toStdString());
+                    copyFileCancellable(a.path, target, isCancelled);
                     created.append(target); copied.insert(a.path, target);
                 }
                 a.path = copied.value(a.path);
@@ -431,29 +485,82 @@ void materializeProjectMedia(Project& p, const QString& directory) {
                 continue;
             }
             const QString target = dir.filePath(newId() + (a.image ? ".png" : ".wav"));
-            QSaveFile file(target);
-            if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error(file.errorString().toStdString());
-            if (a.image) {
-                if (!a.still.save(&file, "PNG")) throw std::runtime_error("Cannot save generated image");
-            } else if (a.audio && !a.audio->storage) {
-                QDataStream out(&file); out.setByteOrder(QDataStream::LittleEndian);
-                const quint16 channels = a.audio->mono ? 1 : 2;
-                const auto size = static_cast<quint64>(a.audio->length()) * channels * 2;
-                if (size > std::numeric_limits<quint32>::max() - 36) throw std::runtime_error("Generated audio is too large for WAV export");
-                const auto bytes = static_cast<quint32>(size);
-                out.writeRawData("RIFF", 4); out << quint32(bytes + 36); out.writeRawData("WAVEfmt ", 8);
-                out << quint32(16) << quint16(1) << channels << quint32(sampleRate) << quint32(sampleRate * channels * 2) << quint16(channels * 2) << quint16(16);
-                out.writeRawData("data", 4); out << bytes;
-                for (std::size_t i = 0; i < a.audio->samples.size(); i += a.audio->mono ? 2 : 1)
-                    out << static_cast<qint16>(std::clamp(a.audio->samples[i], -1.f, 1.f) * 32767);
-                if (out.status() != QDataStream::Ok) throw std::runtime_error("Cannot write generated audio");
-            } else throw std::runtime_error("Asset has no source file");
-            if (!file.commit()) throw std::runtime_error(file.errorString().toStdString());
+            writeGeneratedAsset(a, target, isCancelled);
             created.append(target); a.path = target;
         }
     } catch (...) {
         for (const auto& file : created) QFile::remove(file);
         if (!existed) QDir().rmdir(dir.absolutePath());
+        throw;
+    }
+    p.packageDirectory.reset();
+    bindAudio(p);
+}
+
+StagedProjectMedia stageProjectMedia(const Project& p, const QString& stagingDirectory, const std::function<bool()>& isCancelled) {
+    QDir dir(stagingDirectory);
+    if (!QDir().mkpath(dir.absolutePath())) throw std::runtime_error("Cannot create media staging directory");
+    StagedProjectMedia staged;
+    QMap<QString, QString> copiedNames;
+    for (auto it = p.assets.cbegin(); it != p.assets.cend(); ++it) {
+        if (isCancelled && isCancelled()) throw std::runtime_error("Save cancelled");
+        const auto& a = it.value();
+        const bool extracted = p.packageDirectory && !a.path.isEmpty() &&
+            QFileInfo(a.path).absoluteFilePath().startsWith(p.packageDirectory->path() + "/");
+        if (!a.path.isEmpty() && !extracted) continue;
+        if (extracted) {
+            if (!copiedNames.contains(a.path)) {
+                const QString fileName = newId() + "." + QFileInfo(a.path).suffix();
+                copyFileCancellable(a.path, dir.filePath(fileName), isCancelled);
+                copiedNames.insert(a.path, fileName);
+            }
+            staged.assetFileNames.insert(it.key(), copiedNames.value(a.path));
+            staged.extractedAssets.insert(it.key(), true);
+        } else {
+            const QString fileName = newId() + (a.image ? ".png" : ".wav");
+            writeGeneratedAsset(a, dir.filePath(fileName), isCancelled);
+            staged.assetFileNames.insert(it.key(), fileName);
+            staged.extractedAssets.insert(it.key(), false);
+        }
+    }
+    return staged;
+}
+
+void publishStagedProjectMedia(Project& p, const QString& stagingDirectory, const QString& targetDirectory, const StagedProjectMedia& staged) {
+    if (staged.assetFileNames.isEmpty()) {
+        p.packageDirectory.reset();
+        bindAudio(p);
+        return;
+    }
+    QDir stageDir(stagingDirectory);
+    QDir targetDir(targetDirectory);
+    const bool existed = targetDir.exists();
+    QStringList movedTargets;
+    QMap<QString, QString> publishedNames;
+    try {
+        if (!QDir().mkpath(targetDir.absolutePath())) throw std::runtime_error("Cannot create media directory");
+        for (auto it = staged.assetFileNames.cbegin(); it != staged.assetFileNames.cend(); ++it) {
+            const QString& fileName = it.value();
+            if (!publishedNames.contains(fileName)) {
+                const QString src = stageDir.filePath(fileName);
+                const QString dst = targetDir.filePath(fileName);
+                if (!QFile::rename(src, dst)) throw std::runtime_error("Cannot publish staged media: " + dst.toStdString());
+                movedTargets.append(dst);
+                publishedNames.insert(fileName, dst);
+            }
+        }
+        for (auto it = staged.assetFileNames.cbegin(); it != staged.assetFileNames.cend(); ++it) {
+            auto assetIt = p.assets.find(it.key());
+            if (assetIt == p.assets.end()) continue;
+            assetIt->path = publishedNames.value(it.value());
+            // Direct PCM WAV files stream from disk; rebind WaveStorage to the published path (header parse only).
+            if (staged.extractedAssets.value(it.key()) && assetIt->audio) {
+                if (auto pcm = detail::loadPcmWave(assetIt->path)) assetIt->audio = std::move(pcm);
+            }
+        }
+    } catch (...) {
+        for (const auto& file : movedTargets) QFile::remove(file);
+        if (!existed) QDir().rmdir(targetDir.absolutePath());
         throw;
     }
     p.packageDirectory.reset();

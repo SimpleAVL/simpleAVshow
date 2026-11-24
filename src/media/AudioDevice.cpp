@@ -52,6 +52,42 @@ bool AudioDevice::open(RtAudio::Api api, unsigned device, unsigned channels, uns
         return true;
     } catch (const std::exception& e) { error = QString::fromUtf8(e.what()); close(); return false; }
 }
+bool AudioDevice::openByName(RtAudio::Api api, const QString& wantedName, const QString& fallbackRemembered,
+                             unsigned channels, unsigned buffer, QString& resolvedName, QString& error) {
+    close();
+    try {
+        failed_.store(false); { std::lock_guard lock(errorMutex_); error_.clear(); }
+        audio_ = std::make_unique<RtAudio>(api, [this](RtAudioErrorType type, const std::string& text) {
+            if (type == RTAUDIO_NO_ERROR || type == RTAUDIO_WARNING) return;
+            { std::lock_guard lock(errorMutex_); error_ = QString::fromStdString(text); }
+            failed_.store(true);
+        });
+        std::vector<DeviceDescription> list;
+        for (unsigned id : audio_->getDeviceIds()) {
+            const auto info = audio_->getDeviceInfo(id);
+            if (info.outputChannels) list.push_back({id, QString::fromStdString(info.name), info.outputChannels, info.isDefaultOutput});
+        }
+        std::optional<DeviceDescription> chosen;
+        if (wantedName.isEmpty()) {
+            chosen = playbackDevice(list, fallbackRemembered);
+        } else {
+            for (const auto& d : list) if (d.name == wantedName) { chosen = d; break; }
+            if (!chosen) for (const auto& d : list) if (d.name.compare(wantedName, Qt::CaseInsensitive) == 0) { chosen = d; break; }
+            if (!chosen) throw std::runtime_error(("Audio device not found: " + wantedName).toStdString());
+        }
+        if (!chosen) throw std::runtime_error("No available audio output device found");
+        if (channels < 1 || channels > chosen->channels)
+            throw std::runtime_error(QString("Requested %1 channels, but %2 provides %3 outputs").arg(channels).arg(chosen->name).arg(chosen->channels).toStdString());
+        RtAudio::StreamParameters output; output.deviceId = chosen->id; output.nChannels = channels; output.firstChannel = 0;
+        RtAudio::StreamOptions options; options.streamName = "SimpleAVShow"; options.flags = RTAUDIO_SCHEDULE_REALTIME;
+        channels_ = channels; buffer_ = buffer; underruns_.store(0);
+        if (audio_->openStream(&output, nullptr, RTAUDIO_FLOAT32, sampleRate, &buffer_, callback, this, &options) != RTAUDIO_NO_ERROR)
+            throw std::runtime_error(audio_->getErrorText());
+        if (audio_->startStream() != RTAUDIO_NO_ERROR) throw std::runtime_error(audio_->getErrorText());
+        resolvedName = chosen->name;
+        return true;
+    } catch (const std::exception& e) { error = QString::fromUtf8(e.what()); close(); return false; }
+}
 void AudioDevice::close() {
     if (audio_) {
         if (audio_->isStreamRunning()) audio_->stopStream();

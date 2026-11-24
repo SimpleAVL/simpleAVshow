@@ -147,7 +147,7 @@ Adds a 5-second fading title on track 1 and a hold cue at 12 seconds (`12 × 480
 | --- | --- |
 | **Server cannot start** | Port `48123` is occupied by another app or window. Disable the server, pick a free port, and re-enable it. |
 | **Unauthorized (401)** | Copy the current bearer token from the dialog—it rotates every time the server restarts. |
-| **Agent editing disabled** | Check **Allow the agent to edit this show and import media** in the collaboration dialog. |
+| **Agent editing disabled** | Check **Allow agent edits and controls (show, media, outputs, remote, files, rehearsal)** in the collaboration dialog. |
 | **Editing locked** | Leave **Show mode**, click **Stop All** (including async voices), or wait for a busy operation to finish. |
 | **Revision conflict** | Have the agent call `get_show` again and reapply its edits against the latest revision. |
 | **Media preparation failed** | Check the job's error message and verify the absolute local path; failed batches leave the library unchanged. |

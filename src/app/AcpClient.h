@@ -7,6 +7,7 @@
 #include <QProcess>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
 #include <vector>
 
 namespace sav {
@@ -85,6 +86,7 @@ public:
     void cancelPrompt();
     void respondPermission(int requestKey, const QString& optionId);
     void disconnectFromAgent();
+    void setTimeoutsForTesting(int startupMs, int handshakeMs, int cancelMs);
 
 signals:
     void stateChanged(sav::AcpState state);
@@ -123,8 +125,14 @@ private:
     int nextPermissionKey_ = 1;
     QMap<int, PendingRequest> pending_;
     QMap<int, PendingPermission> pendingPermissions_;
+    QTimer deadlineTimer_;
+    QString deadlineReason_;
+    int startupTimeoutMs_ = 5000;
+    int handshakeTimeoutMs_ = 15000;
+    int cancelTimeoutMs_ = 5000;
 
     void setState(AcpState next);
+    void armDeadline(int ms, const QString& reason);
     void sendJson(const QJsonObject& payload);
     int sendRequest(const QString& method, const QJsonObject& params, PendingKind kind, const QString& sessionId = {});
     void sendNotification(const QString& method, const QJsonObject& params);

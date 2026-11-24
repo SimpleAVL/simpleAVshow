@@ -30,6 +30,10 @@ public:
     // The operator's next cue: later than the playhead, or at it unless that hold is already holding.
     const Marker* nextCue() const;
     bool canEdit(bool report = true);
+    // Exclusive busy lease so operator dialogs and async MCP file jobs cannot step on each other.
+    quint64 acquireBusy();
+    void releaseBusy(quint64 lease);
+    quint64 projectRevision() const { return projectRevision_; }
     bool edit(const std::function<void(Project&)>& mutation);
     void undo();
     void redo();
@@ -42,6 +46,7 @@ public:
     bool seek(Frame position);
     bool stopAll();
     bool configureAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer);
+    bool configureAudioByName(RtAudio::Api api, const QString& wantedName, unsigned channels, unsigned buffer);
     bool configureMidi(int port);
     bool configureMidiByName(const QString& portName);
     bool testMidi(const std::vector<unsigned char>& message);
@@ -92,6 +97,7 @@ private:
     Frame lastComposed_ = -1;
     std::vector<Frame> lastClocks_;
     std::deque<Project> undo_, redo_;
+    quint64 busyLease_ = 0, nextBusyLease_ = 1, projectRevision_ = 0;
     void arm(Frame position);
     void startMidiThread();
     void watchMidi();

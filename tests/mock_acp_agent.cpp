@@ -25,6 +25,9 @@ int main(int argc, char** argv) {
     const bool missingProtocol = args.contains("--missing-protocol");
     const bool staleOnNewSession = args.contains("--stale-on-new-session");
     const bool longPermission = args.contains("--long-permission");
+    const bool silentHandshake = args.contains("--silent-handshake");
+    const bool ignoreCancel = args.contains("--ignore-cancel");
+    const bool exitCleanAfterPermission = args.contains("--exit-clean-after-permission");
 
     int sessionCounter = 0;
     QString sessionId = "mock-session-1";
@@ -105,6 +108,7 @@ int main(int argc, char** argv) {
 
         if (method == "initialize") {
             std::cerr << "mock-acp-agent initialized\n" << std::flush;
+            if (silentHandshake) continue;
             QJsonObject initResult{
                 {"agentInfo", QJsonObject{{"name", "MockACP"}, {"version", "1.0"}}},
                 {"agentCapabilities", QJsonObject{
@@ -156,13 +160,14 @@ int main(int argc, char** argv) {
                         QJsonObject{{"optionId", "reject-once"}, {"name", "Reject"}, {"kind", "reject_once"}}
                     }}
                 }}});
+                if (exitCleanAfterPermission) return 0;
             } else if (holdPrompt && (!staleOnNewSession || sessionCounter == 1)) {
                 waitingCancel = true;
             } else {
                 finishPrompt("ok");
             }
         } else if (method == "session/cancel") {
-            if (waitingCancel && !staleOnNewSession && !pendingPromptId.isUndefined() && !pendingPromptId.isNull()) {
+            if (waitingCancel && !ignoreCancel && !staleOnNewSession && !pendingPromptId.isUndefined() && !pendingPromptId.isNull()) {
                 waitingCancel = false;
                 send({{"jsonrpc", "2.0"}, {"id", pendingPromptId}, {"result", QJsonObject{{"stopReason", "cancelled"}}}});
                 pendingPromptId = QJsonValue();

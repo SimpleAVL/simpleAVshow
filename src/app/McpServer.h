@@ -47,7 +47,10 @@ private:
     bool editing_ = false;
     quint64 revision_ = 0;
     quint64 generation_ = 0;
+    quint64 editGeneration_ = 0;
+    std::shared_ptr<std::atomic<bool>> editSessionCancelled_ = std::make_shared<std::atomic<bool>>(false);
     int activeAsyncJobs_ = 0;
+    void invalidateEditSession();
     QString importId_, importState_, importError_;
     std::vector<MediaAsset> imported_;
     void acceptConnection();

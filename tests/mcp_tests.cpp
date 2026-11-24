@@ -455,6 +455,67 @@ private slots:
         QVERIFY(call(server, "configure_outputs", {{"display", QJsonObject{{"open", "yes"}}}})["isError"].toBool());
         QVERIFY(call(server, "configure_outputs", {{"display", QJsonObject{{"open", true}, {"screen", 0}}}})["isError"].toBool());
         QVERIFY(!call(server, "configure_outputs", {{"midi", QJsonObject{{"port", "none"}}}})["isError"].toBool());
+        // test_midi must be rejected when disconnecting MIDI or when no MIDI destination is connected.
+        QVERIFY(call(server, "configure_outputs", {
+            {"midi", QJsonObject{{"port", "none"}}},
+            {"test_midi", QJsonObject{{"message", QJsonArray{0x90, 60, 100}}}}
+        })["isError"].toBool());
+        QVERIFY(call(server, "configure_outputs", {
+            {"test_midi", QJsonObject{{"message", QJsonArray{0x90, 60, 100}}}}
+        })["isError"].toBool());
+
+        // 10. encode_midi must reject oversized integers that QJsonValue::toInt() would turn into 0.
+        QVERIFY(call(server, "encode_midi", {{"type", "note_on"}, {"channel", 1}, {"note", 2147483648.0}, {"velocity", 100}})["isError"].toBool());
+
+        // 11. split_clip must reassign linked partners wholly after the cut to the tail link.
+        {
+            auto& ctrl = window.controller();
+            Project p = newProject();
+            Clip vis; vis.id = "vis-link"; vis.track = 0; vis.text = "Hello"; vis.start = 0; vis.duration = frames(10); vis.link = "grp-1";
+            Clip tailPartner; tailPartner.id = "tail-partner"; tailPartner.track = 1; tailPartner.text = "Tail"; tailPartner.start = frames(6); tailPartner.duration = frames(4); tailPartner.link = "grp-1";
+            p.show.clips.push_back(vis);
+            p.show.clips.push_back(tailPartner);
+            ctrl.replace(std::move(p));
+            const int rev = call(server, "get_show")["structuredContent"].toObject()["revision"].toInt();
+            const auto splitRes = call(server, "apply_edits", {{"expected_revision", rev}, {"operations", QJsonArray{
+                QJsonObject{{"type", "split_clip"}, {"id", "vis-link"}, {"fields", QJsonObject{
+                    {"time", static_cast<double>(frames(5))}, {"new_id", "vis-tail"}
+                }}}
+            }}});
+            QVERIFY(!splitRes["isError"].toBool());
+            std::string headLink, tailLink, partnerLink;
+            for (const auto& c : ctrl.project.show.clips) {
+                if (c.id == "vis-link") headLink = c.link;
+                else if (c.id == "vis-tail") tailLink = c.link;
+                else if (c.id == "tail-partner") partnerLink = c.link;
+            }
+            QVERIFY(!headLink.empty() && !tailLink.empty() && headLink != tailLink);
+            QCOMPARE(partnerLink, tailLink);
+        }
+
+        // 12. Exclusive busy lease rejects concurrent acquisition and wrong-owner release.
+        {
+            auto& ctrl = window.controller();
+            const quint64 lease = ctrl.acquireBusy();
+            QVERIFY(lease != 0);
+            QVERIFY(ctrl.busy);
+            QCOMPARE(ctrl.acquireBusy(), quint64(0));
+            ctrl.releaseBusy(lease + 999);
+            QVERIFY(ctrl.busy);
+            ctrl.releaseBusy(lease);
+            QVERIFY(!ctrl.busy);
+        }
+
+        // 13. Queued Play + Controller::pause() drain in arrival order (Pause is never dropped when Play is queued).
+        {
+            Controller c;
+            c.replace(demoProject());
+            c.transport.command({Action::Play});
+            QVERIFY(c.pause());
+            std::vector<float> buf(512, 0.f);
+            c.transport.render(buf.data(), 256, 2);
+            QCOMPARE(c.transport.state(), State::Paused);
+        }
 
         window.controller().dirty = false;
         server.stop();

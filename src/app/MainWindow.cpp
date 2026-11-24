@@ -746,11 +746,13 @@ void MainWindow::importMedia() {
 }
 void MainWindow::importPaths(const QStringList& paths) {
     if (paths.isEmpty() || !c_.canEdit()) return;
-    c_.busy = true;
+    const quint64 lease = c_.acquireBusy();
+    if (!lease) { c_.report("Wait for the current file operation to finish"); return; }
     auto* progress = new QProgressDialog("Decoding and preparing media…", QString(), 0, 0, this); progress->setWindowModality(Qt::WindowModal); progress->setMinimumDuration(0); progress->show();
     auto* watcher = new QFutureWatcher<MediaResult>(this);
-    connect(watcher, &QFutureWatcher<MediaResult>::finished, this, [this, watcher, progress] {
-        const auto result = watcher->result(); c_.busy = false; progress->deleteLater(); watcher->deleteLater();
+    connect(watcher, &QFutureWatcher<MediaResult>::finished, this, [this, watcher, progress, lease] {
+        const auto result = watcher->result(); c_.releaseBusy(lease); progress->deleteLater(); watcher->deleteLater();
+        if (!c_.canEdit()) { c_.report("Media import discarded because editing was locked."); return; }
         c_.edit([&](Project& p) { for (const auto& a : result.assets) { p.assets.insert(a.id, a); } });
         if (!result.errors.isEmpty()) QMessageBox::warning(this, "Some media could not be imported", result.errors.join("\n\n"));
         else c_.report(QString("Imported %1 media files. Drag them onto the timeline.").arg(result.assets.size()));
@@ -817,15 +819,19 @@ void MainWindow::relinkMedia(bool afterOpening) {
         if (box.clickedButton() != locate) return;
     }
     const QString folder = QFileDialog::getExistingDirectory(this, "Folder containing the missing media");
-    if (folder.isEmpty()) return;
+    if (folder.isEmpty() || !c_.canEdit()) return;
     // Search by file name below the chosen folder, then load matches off the GUI thread.
     QMap<QString, QString> wanted; // Lower-case file name → asset id.
     for (const auto& a : c_.project.assets) if (a.offline) wanted.insert(QFileInfo(a.path).fileName().toLower(), a.id);
-    c_.busy = true;
+    if (wanted.isEmpty()) { c_.report("All media is online."); return; }
+    const quint64 lease = c_.acquireBusy();
+    if (!lease) { c_.report("Wait for the current file operation to finish"); return; }
+    const quint64 expectedRev = c_.projectRevision();
     auto* progress = new QProgressDialog("Searching for missing media…", QString(), 0, 0, this); progress->setWindowModality(Qt::WindowModal); progress->setMinimumDuration(0); progress->show();
     auto* watcher = new QFutureWatcher<MediaResult>(this);
-    connect(watcher, &QFutureWatcher<MediaResult>::finished, this, [this, watcher, progress] {
-        const auto result = watcher->result(); c_.busy = false; progress->deleteLater(); watcher->deleteLater();
+    connect(watcher, &QFutureWatcher<MediaResult>::finished, this, [this, watcher, progress, lease, expectedRev] {
+        const auto result = watcher->result(); c_.releaseBusy(lease); progress->deleteLater(); watcher->deleteLater();
+        if (!c_.canEdit() || c_.projectRevision() != expectedRev) { c_.report("Relink discarded because the show changed while searching."); return; }
         if (!result.assets.empty()) c_.edit([&](Project& p) { for (const auto& a : result.assets) p.assets.insert(a.id, a); });
         int remaining = 0; for (const auto& a : c_.project.assets) remaining += a.offline;
         const QString summary = QString("Relinked %1 media file%2.").arg(result.assets.size()).arg(result.assets.size() == 1 ? "" : "s") +
@@ -1110,12 +1116,16 @@ void MainWindow::openPath(const QString& path) {
         box.addButton("Open saved show", QMessageBox::RejectRole); box.setDefaultButton(recover); box.exec();
         if (box.clickedButton() == recover) { source = sidecar.filePath(); recovered = true; }
     }
-    c_.busy = true;
+    if (!c_.canEdit()) return;
+    const quint64 lease = c_.acquireBusy();
+    if (!lease) { c_.report("Wait for the current file operation to finish"); return; }
+    const quint64 expectedRev = c_.projectRevision();
     auto* progress = new QProgressDialog("Opening project and preparing media…", QString(), 0, 0, this); progress->setWindowModality(Qt::WindowModal); progress->setMinimumDuration(0); progress->show();
     auto* watcher = new QFutureWatcher<ProjectResult>(this);
-    connect(watcher, &QFutureWatcher<ProjectResult>::finished, this, [this, watcher, progress, path, target, recovered] {
-        const auto result = watcher->result(); c_.busy = false; progress->deleteLater(); watcher->deleteLater();
+    connect(watcher, &QFutureWatcher<ProjectResult>::finished, this, [this, watcher, progress, path, target, recovered, lease, expectedRev] {
+        const auto result = watcher->result(); c_.releaseBusy(lease); progress->deleteLater(); watcher->deleteLater();
         if (!result.error.isEmpty()) { QMessageBox::warning(this, "Could not open project", result.error); return; }
+        if (!c_.canEdit() || c_.projectRevision() != expectedRev) { c_.report("Open cancelled because the show changed while loading."); return; }
         timeline_->selectedClip.clear(); timeline_->selectedMarker.clear(); timeline_->selectedTrack = 0;
         c_.replace(result.project, target);
         QTimer::singleShot(0, this, [this] { if (std::any_of(c_.project.assets.cbegin(), c_.project.assets.cend(), [](const MediaAsset& a) { return a.offline; })) relinkMedia(true); });
@@ -1135,11 +1145,14 @@ void MainWindow::save(bool as) {
     if (!c_.canEdit()) return;
     QString target = c_.path;
     if (as || target.isEmpty()) target = QFileDialog::getSaveFileName(this, "Save show", target, "SimpleAVShow (*.savshow)");
-    if (target.isEmpty()) return;
+    if (target.isEmpty() || !c_.canEdit()) return;
     if (!target.endsWith(".savshow", Qt::CaseInsensitive)) target += ".savshow";
     if (!c_.savingCopiesMedia()) { c_.save(target); return; }
     // Copying package media can take minutes; keep the GUI responsive and the project locked meanwhile.
-    c_.busy = true; updatePlayback();
+    const quint64 lease = c_.acquireBusy();
+    if (!lease) { c_.report("Wait for the current file operation to finish"); return; }
+    const quint64 expectedRev = c_.projectRevision();
+    updatePlayback();
     QProgressDialog progress("Copying media next to the show…", QString(), 0, 0, this);
     progress.setWindowTitle("Saving show"); progress.setWindowModality(Qt::WindowModal); progress.setMinimumDuration(0);
     progress.setAutoClose(false); progress.setAutoReset(false);
@@ -1153,8 +1166,9 @@ void MainWindow::save(bool as) {
         return result;
     }));
     progress.exec();
-    auto result = watcher.result(); c_.busy = false;
+    auto result = watcher.result(); c_.releaseBusy(lease);
     if (!result.error.isEmpty()) { c_.report("Save failed: " + result.error); QMessageBox::warning(this, "Could not save", result.error); refresh(); return; }
+    if (!c_.canEdit() || c_.projectRevision() != expectedRev) { c_.report("Save cancelled because the show changed."); refresh(); return; }
     c_.commitSave(std::move(result.project), target);
 }
 void MainWindow::exportPackage() {
@@ -1172,7 +1186,9 @@ void MainWindow::exportPackage() {
 }
 void MainWindow::writePackage(const QString& path) {
     if (!c_.canEdit()) return;
-    c_.busy = true; updatePlayback();
+    const quint64 lease = c_.acquireBusy();
+    if (!lease) { c_.report("Wait for the current file operation to finish"); return; }
+    updatePlayback();
     PackageProgress progress("Collecting show and media into a package…", QString(), 0, 0, this);
     progress.setWindowTitle("Exporting show package");
     progress.setWindowModality(Qt::WindowModal); progress.setMinimumDuration(0);
@@ -1185,7 +1201,7 @@ void MainWindow::writePackage(const QString& path) {
         catch (const std::exception& e) { return QString::fromUtf8(e.what()); }
     }));
     progress.exec();
-    const auto error = watcher.result(); c_.busy = false;
+    const auto error = watcher.result(); c_.releaseBusy(lease);
     if (!error.isEmpty()) {
         c_.report("Package failed: " + error);
         QMessageBox::warning(this, "Could not write package", error);

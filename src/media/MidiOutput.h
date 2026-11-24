@@ -8,16 +8,23 @@
 namespace sav {
 class MidiOutput {
 public:
+    MidiOutput();
+    ~MidiOutput();
+    MidiOutput(const MidiOutput&) = delete;
+    MidiOutput& operator=(const MidiOutput&) = delete;
+
     QStringList ports();
     bool open(int port, QString& error);
-    // Resolves and opens a port by name on the same RtMidi instance to avoid hot-plug index races.
+    // Resolves and opens a port by name (binding directly to the endpoint identity on CoreMIDI).
     bool openByName(const QString& name, QString& error);
     bool send(const std::vector<unsigned char>& message, QString& error);
     void close();
     // A failed send marks the port lost; the controller reconnects it by name.
-    bool connected() const { return output_ && output_->isPortOpen() && !lost_.load(); }
+    bool connected() const;
     QString name() const { return name_; }
 private:
+    struct CoreMidiState;
+    std::unique_ptr<CoreMidiState> coreMidi_;
     std::unique_ptr<RtMidiOut> output_;
     QString name_;
     std::string error_; // Written by RtMidi on the thread using output_.

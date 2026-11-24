@@ -122,10 +122,10 @@ bool RemoteServer::command(const QString& action, const QString& from) {
     if (c_.busy) return false;
     if (action == "go" && state != State::Playing) {
         // Report first so a failed start's own explanation replaces it in the status bar.
-        c_.report(by + (state == State::Held ? ": Continue" : ": Play")); c_.play(); return true;
+        c_.report(by + (state == State::Held ? ": Continue" : ": Play")); return c_.play();
     }
-    if (action == "pause" && state == State::Playing) { c_.report(by + ": Pause"); c_.pause(); return true; }
-    if (action == "stop") { c_.report(by + ": Stop All"); c_.stopAll(); return true; }
+    if (action == "pause" && state == State::Playing) { c_.report(by + ": Pause"); return c_.pause(); }
+    if (action == "stop") { c_.report(by + ": Stop All"); return c_.stopAll(); }
     return false;
 }
 

@@ -67,15 +67,26 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
             reply->deleteLater();
             --inFlight;
 
+            const bool isRequest = !requestId.isUndefined();
             if (status == 202) {
+                if (isRequest) writeError(requestId, -32000, "MCP server returned HTTP 202 without a response for request");
                 maybeQuit();
                 return;
             }
-            if (!body.isEmpty()) {
+            if (netError == QNetworkReply::NoError && status >= 200 && status < 300 && !body.isEmpty()) {
                 QJsonParseError err;
                 const auto responseDoc = QJsonDocument::fromJson(body, &err);
-                if (err.error == QJsonParseError::NoError && !responseDoc.isNull()) {
-                    writeLine(responseDoc.toJson(QJsonDocument::Compact));
+                if (err.error == QJsonParseError::NoError && responseDoc.isObject()) {
+                    const auto obj = responseDoc.object();
+                    const bool validEnvelope = obj["jsonrpc"] == "2.0" &&
+                        (obj.contains("result") != obj.contains("error")) &&
+                        (!isRequest || obj["id"] == requestId);
+                    if (validEnvelope) {
+                        writeLine(responseDoc.toJson(QJsonDocument::Compact));
+                        maybeQuit();
+                        return;
+                    }
+                    writeError(requestId, -32000, "MCP server returned an invalid or mismatched JSON-RPC response");
                     maybeQuit();
                     return;
                 }

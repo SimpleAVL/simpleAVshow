@@ -14,17 +14,44 @@
 #include <QSettings>
 #include <QSysInfo>
 #include <QTcpSocket>
+#include <QTemporaryDir>
 #include <QUrl>
 #include <QtConcurrent>
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <set>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 namespace sav {
 namespace {
 constexpr qsizetype maxBody = 2 * 1024 * 1024;
 const QStringList versions{"2025-11-25", "2025-06-18", "2025-03-26"};
 [[noreturn]] void fail(const QString& message) { throw std::runtime_error(message.toStdString()); }
+
+bool atomicReplaceFile(const QString& source, const QString& target, QString& error) {
+#ifdef Q_OS_WIN
+    const std::wstring srcW = source.toStdWString();
+    const std::wstring dstW = target.toStdWString();
+    if (!MoveFileExW(srcW.c_str(), dstW.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        error = QString("Cannot publish file (Win32 error %1)").arg(GetLastError());
+        return false;
+    }
+    return true;
+#else
+    const QByteArray src = QFile::encodeName(source);
+    const QByteArray dst = QFile::encodeName(target);
+    if (::rename(src.constData(), dst.constData()) != 0) {
+        error = QString("Cannot publish file: %1").arg(QString::fromLocal8Bit(std::strerror(errno)));
+        return false;
+    }
+    return true;
+#endif
+}
 
 struct DocChapter {
     const char* topic;
@@ -324,18 +351,28 @@ void applyOperations(Project& p, const QJsonArray& operations) {
 }
 
 McpServer::McpServer(Controller& controller, QObject* parent) : QObject(parent), c_(controller) {
-    connect(&c_, &Controller::changed, this, [this] { ++revision_; });
+    connect(&c_, &Controller::changed, this, [this] {
+        ++revision_;
+        if (c_.showMode) invalidateEditSession();
+    });
     connect(&server_, &QTcpServer::newConnection, this, &McpServer::acceptConnection);
+}
+void McpServer::invalidateEditSession() {
+    ++editGeneration_;
+    if (editSessionCancelled_) editSessionCancelled_->store(true);
+    editSessionCancelled_ = std::make_shared<std::atomic<bool>>(false);
 }
 bool McpServer::start(quint16 port) {
     if (running()) return true;
     if (!server_.listen(QHostAddress::LocalHost, port)) return false;
     token_ = newId() + newId(); editing_ = false;
+    invalidateEditSession();
     c_.report("Agent collaboration enabled (read only). Open Project → Agent collaboration to allow edits.");
     emit stateChanged(); return true;
 }
 void McpServer::stop() {
     ++generation_;
+    invalidateEditSession();
     server_.close(); token_.clear(); editing_ = false;
     // Invalidate outstanding connections as well as the credential.
     for (auto* socket : findChildren<QTcpSocket*>()) socket->abort();
@@ -343,7 +380,12 @@ void McpServer::stop() {
     emit stateChanged();
 }
 void McpServer::setEditingEnabled(bool enabled) {
-    editing_ = enabled && running(); emit stateChanged();
+    const bool next = enabled && running();
+    if (next != editing_) {
+        editing_ = next;
+        invalidateEditSession();
+    }
+    emit stateChanged();
 }
 QString McpServer::endpoint() const { return running() ? QString("http://127.0.0.1:%1/mcp").arg(server_.serverPort()) : QString(); }
 QJsonObject McpServer::clientConfig() const {
@@ -715,9 +757,10 @@ QJsonObject McpServer::encodeMidiTool(const QJsonObject& a) const {
             return fallback;
         }
         const auto v = a[key];
-        if (!v.isDouble() || !std::isfinite(v.toDouble()) || std::floor(v.toDouble()) != v.toDouble() || v.toInt() < min || v.toInt() > max)
+        const double d = v.toDouble();
+        if (!v.isDouble() || !std::isfinite(d) || std::floor(d) != d || d < min || d > max)
             fail(QString("Invalid MIDI field %1 (expected %2..%3)").arg(key).arg(min).arg(max));
-        return v.toInt();
+        return static_cast<int>(d);
     };
     std::vector<unsigned char> bytes;
     const int channel = intArg("channel", 1, 16, 1) - 1;
@@ -847,23 +890,27 @@ void McpServer::relinkMediaAsync(const QJsonObject& a, std::shared_ptr<std::atom
     const QString rootPath = dirInfo.absoluteFilePath();
     const quint64 expectedRev = revision_;
     const quint64 jobGen = generation_;
-    c_.busy = true;
+    const quint64 jobEditGen = editGeneration_;
+    const auto editCancelled = editSessionCancelled_;
+    const quint64 lease = c_.acquireBusy();
+    if (!lease) fail("Wait for the current busy operation to finish");
     ++activeAsyncJobs_;
 
     struct RelinkResult {
         std::vector<MediaAsset> loaded;
         QJsonArray ambiguous;
+        QJsonArray partialCandidates;
         QJsonArray errors;
         bool truncated = false;
     };
     auto* watcher = new QFutureWatcher<RelinkResult>(this);
     connect(watcher, &QFutureWatcher<RelinkResult>::finished, this,
-        [this, watcher, expectedRev, jobGen, cancelled, finish = std::move(finish)]() mutable {
+        [this, watcher, expectedRev, jobGen, jobEditGen, lease, cancelled, finish = std::move(finish)]() mutable {
             const auto res = watcher->result(); watcher->deleteLater();
-            c_.busy = false;
+            c_.releaseBusy(lease);
             activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1);
             if (cancelled->load() || generation_ != jobGen) return;
-            if (!running() || !editing_ || c_.showMode || !c_.canEdit(false)) {
+            if (!running() || !editing_ || editGeneration_ != jobEditGen || c_.showMode || !c_.canEdit(false)) {
                 finish(toolResult({{"error", "Relink finished, but editing is no longer permitted or is locked"},
                     {"revision", static_cast<double>(revision_)}}, true));
                 return;
@@ -871,6 +918,17 @@ void McpServer::relinkMediaAsync(const QJsonObject& a, std::shared_ptr<std::atom
             if (revision_ != expectedRev) {
                 finish(toolResult({{"error", "Revision conflict during relink; read get_show and retry"},
                     {"revision", static_cast<double>(revision_)}}, true));
+                return;
+            }
+            if (res.truncated) {
+                int remaining = 0;
+                for (const auto& asset : c_.project.assets) if (asset.offline) ++remaining;
+                auto result = snapshot();
+                result.insert("relink", QJsonObject{{"relinked", 0}, {"remaining_offline", remaining},
+                    {"ambiguous", res.ambiguous}, {"partial_candidates", res.partialCandidates},
+                    {"errors", res.errors}, {"truncated", true},
+                    {"note", "Directory scan reached the safety limit before completing; no media was relinked. Narrow the directory and retry."}});
+                finish(toolResult(result));
                 return;
             }
             if (!res.loaded.empty()) {
@@ -888,11 +946,11 @@ void McpServer::relinkMediaAsync(const QJsonObject& a, std::shared_ptr<std::atom
             auto result = snapshot();
             result.insert("relink", QJsonObject{{"relinked", static_cast<int>(res.loaded.size())},
                 {"remaining_offline", remaining}, {"ambiguous", res.ambiguous},
-                {"errors", res.errors}, {"truncated", res.truncated}});
+                {"errors", res.errors}, {"truncated", false}});
             finish(toolResult(result));
         });
 
-    watcher->setFuture(QtConcurrent::run([rootPath, offlineItems = std::move(offlineItems), cancelled] {
+    watcher->setFuture(QtConcurrent::run([rootPath, offlineItems = std::move(offlineItems), cancelled, editCancelled] {
         auto normalizedParts = [](const QString& path) {
             QString clean = path;
             clean.replace('\\', '/');
@@ -913,7 +971,7 @@ void McpServer::relinkMediaAsync(const QJsonObject& a, std::shared_ptr<std::atom
         RelinkResult out;
         QDirIterator it(rootPath, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
         while (it.hasNext()) {
-            if (cancelled->load()) return out;
+            if (cancelled->load() || editCancelled->load()) return out;
             const QString entry = it.next();
             if (++scanned > maxScanned) { out.truncated = true; break; }
             const QFileInfo info(entry);
@@ -922,8 +980,21 @@ void McpServer::relinkMediaAsync(const QJsonObject& a, std::shared_ptr<std::atom
             if (wantedNames.contains(key)) candidatesByName[key].append(info.absoluteFilePath());
         }
 
+        if (out.truncated) {
+            // Do not load or commit partial matches when the scan was incomplete.
+            for (const auto& item : offlineItems) {
+                const QStringList candidates = candidatesByName.value(item.baseName);
+                if (candidates.isEmpty()) continue;
+                QJsonArray candArr;
+                for (const auto& cPath : candidates) candArr.append(cPath);
+                out.partialCandidates.append(QJsonObject{{"id", item.id}, {"name", item.name},
+                    {"original_path", item.originalPath}, {"candidates", candArr}});
+            }
+            return out;
+        }
+
         for (const auto& item : offlineItems) {
-            if (cancelled->load()) return out;
+            if (cancelled->load() || editCancelled->load()) return out;
             const QStringList candidates = candidatesByName.value(item.baseName);
             if (candidates.isEmpty()) continue;
             QString chosen;
@@ -1038,7 +1109,7 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
         fail("Provide at least one of audio, midi, display, or test_midi");
 
     // Phase 1: Validate every nested field and resolve targets before mutating any real outputs.
-    struct PlannedAudio { RtAudio::Api api; unsigned deviceId; QString name; unsigned channels; unsigned buffer; };
+    struct PlannedAudio { RtAudio::Api api; QString name; unsigned channels; unsigned buffer; };
     std::optional<PlannedAudio> plannedAudio;
     std::optional<QString> plannedMidiName;
     struct PlannedDisplay { bool open = false; int screen = 0; bool allowCover = false; };
@@ -1094,7 +1165,7 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
                 fail("audio.buffer must be an integer between 32 and 8192 samples");
             buffer = static_cast<unsigned>(v.toDouble());
         }
-        plannedAudio = PlannedAudio{api, chosen->id, chosen->name, channels, buffer};
+        plannedAudio = PlannedAudio{api, chosen->name, channels, buffer};
     }
 
     if (a.contains("midi")) {
@@ -1154,6 +1225,10 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
             bytes.push_back(static_cast<unsigned char>(v.toDouble()));
         }
         if (!validMidi(bytes)) fail("Complete the MIDI message before testing it");
+        if (plannedMidiName && plannedMidiName->isEmpty())
+            fail("Cannot send test_midi while disconnecting MIDI output");
+        if (!plannedMidiName && !c_.midi.connected())
+            fail("Cannot send test_midi without a connected MIDI output");
         plannedTestMidi = std::move(bytes);
     }
 
@@ -1164,7 +1239,7 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
         fail(reason + " (already applied: " + applied.join(", ") + ")");
     };
     if (plannedAudio) {
-        if (!c_.configureAudio(plannedAudio->api, plannedAudio->deviceId, plannedAudio->name, plannedAudio->channels, plannedAudio->buffer))
+        if (!c_.configureAudioByName(plannedAudio->api, plannedAudio->name, plannedAudio->channels, plannedAudio->buffer))
             failPartial(c_.status);
         applied << "audio";
     }
@@ -1223,6 +1298,9 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
     if (a.contains("discard_unsaved") && !a["discard_unsaved"].isBool()) fail("discard_unsaved must be a boolean");
     const bool discard = a["discard_unsaved"].toBool(false);
     const quint64 jobGen = generation_;
+    const quint64 jobEditGen = editGeneration_;
+    const auto editCancelled = editSessionCancelled_;
+    auto isCancelled = [cancelled, editCancelled]() { return cancelled->load() || editCancelled->load(); };
 
     if (action == "new_show" || action == "open_demo") {
         if (c_.dirty && !discard) fail("Current show has unsaved changes. Save first or pass discard_unsaved: true");
@@ -1244,24 +1322,42 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
         if (target.isEmpty()) fail("Provide an absolute path to save an untitled show");
         if (!QFileInfo(target).isAbsolute()) fail("Save path must be an absolute local file path");
         if (!target.endsWith(".savshow", Qt::CaseInsensitive)) target += ".savshow";
+        if (!c_.savingCopiesMedia()) {
+            if (!c_.save(target)) fail(c_.status);
+            auto result = snapshot(); result.insert("action", action); result.insert("target_path", target);
+            finish(toolResult(result));
+            return;
+        }
         const quint64 expectedRev = revision_;
-        c_.busy = true;
+        const quint64 lease = c_.acquireBusy();
+        if (!lease) fail("Wait for the current busy operation to finish");
+        auto stagingDir = std::make_shared<QTemporaryDir>(QFileInfo(target).absolutePath() + "/.simpleavshow-save-XXXXXX");
+        if (!stagingDir->isValid()) {
+            c_.releaseBusy(lease);
+            fail("Cannot create staging directory next to target file");
+        }
         ++activeAsyncJobs_;
-        struct SavePrep { Project candidate; QString error; };
+        struct SavePrep { Project candidate; StagedProjectMedia staged; QString error; };
         auto* watcher = new QFutureWatcher<SavePrep>(this);
         connect(watcher, &QFutureWatcher<SavePrep>::finished, this,
-            [this, watcher, action, target, expectedRev, jobGen, cancelled, finish = std::move(finish)]() mutable {
+            [this, watcher, action, target, expectedRev, jobGen, jobEditGen, lease, stagingDir, cancelled, finish = std::move(finish)]() mutable {
                 auto prep = watcher->result(); watcher->deleteLater();
-                c_.busy = false;
+                c_.releaseBusy(lease);
                 activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1);
                 if (cancelled->load() || generation_ != jobGen) return;
                 if (!prep.error.isEmpty()) {
                     finish(toolResult({{"error", prep.error}, {"revision", static_cast<double>(revision_)}}, true));
                     return;
                 }
-                if (!running() || !editing_ || c_.showMode || !c_.canEdit(false) || revision_ != expectedRev) {
+                if (!running() || !editing_ || editGeneration_ != jobEditGen || c_.showMode || !c_.canEdit(false) || revision_ != expectedRev) {
                     finish(toolResult({{"error", "Save could not complete because show state or permissions changed"},
                         {"revision", static_cast<double>(revision_)}}, true));
+                    return;
+                }
+                try {
+                    publishStagedProjectMedia(prep.candidate, stagingDir->path(), Controller::mediaDirectory(target), prep.staged);
+                } catch (const std::exception& e) {
+                    finish(toolResult({{"error", QString::fromUtf8(e.what())}, {"revision", static_cast<double>(revision_)}}, true));
                     return;
                 }
                 if (!c_.commitSave(std::move(prep.candidate), target)) {
@@ -1271,11 +1367,14 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
                 auto result = snapshot(); result.insert("action", action); result.insert("target_path", target);
                 finish(toolResult(result));
             });
-        const QString mediaDir = Controller::mediaDirectory(target);
-        watcher->setFuture(QtConcurrent::run([candidate = c_.project, mediaDir]() mutable {
+        watcher->setFuture(QtConcurrent::run([candidate = c_.project, stagePath = stagingDir->path(), isCancelled]() mutable {
             SavePrep out;
-            try { materializeProjectMedia(candidate, mediaDir); out.candidate = std::move(candidate); }
-            catch (const std::exception& e) { out.error = QString::fromUtf8(e.what()); }
+            try {
+                out.staged = stageProjectMedia(candidate, stagePath, isCancelled);
+                out.candidate = std::move(candidate);
+            } catch (const std::exception& e) {
+                out.error = QString::fromUtf8(e.what());
+            }
             return out;
         }));
         return;
@@ -1284,25 +1383,43 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
     if (action == "export_package") {
         if (path.isEmpty() || !QFileInfo(path).isAbsolute()) fail("Provide an absolute local path for .savpack export");
         if (!isProjectPackage(path)) path += ".savpack";
-        c_.busy = true;
+        const quint64 expectedRev = revision_;
+        const quint64 lease = c_.acquireBusy();
+        if (!lease) fail("Wait for the current busy operation to finish");
+        auto stagingDir = std::make_shared<QTemporaryDir>(QFileInfo(path).absolutePath() + "/.simpleavshow-export-XXXXXX");
+        if (!stagingDir->isValid()) {
+            c_.releaseBusy(lease);
+            fail("Cannot create staging directory next to target package");
+        }
+        const QString stagedPackage = stagingDir->filePath("staged.savpack");
         ++activeAsyncJobs_;
         auto* watcher = new QFutureWatcher<QString>(this);
         connect(watcher, &QFutureWatcher<QString>::finished, this,
-            [this, watcher, action, path, jobGen, cancelled, finish = std::move(finish)]() mutable {
+            [this, watcher, action, path, stagedPackage, expectedRev, jobGen, jobEditGen, lease, stagingDir, cancelled, finish = std::move(finish)]() mutable {
                 const QString err = watcher->result(); watcher->deleteLater();
-                c_.busy = false;
+                c_.releaseBusy(lease);
                 activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1);
                 if (cancelled->load() || generation_ != jobGen) return;
                 if (!err.isEmpty()) {
                     finish(toolResult({{"error", err}, {"revision", static_cast<double>(revision_)}}, true));
                     return;
                 }
+                if (!running() || !editing_ || editGeneration_ != jobEditGen || c_.showMode || !c_.canEdit(false) || revision_ != expectedRev) {
+                    finish(toolResult({{"error", "Export could not complete because show state or permissions changed"},
+                        {"revision", static_cast<double>(revision_)}}, true));
+                    return;
+                }
+                QString replaceErr;
+                if (!atomicReplaceFile(stagedPackage, path, replaceErr)) {
+                    finish(toolResult({{"error", replaceErr}, {"revision", static_cast<double>(revision_)}}, true));
+                    return;
+                }
                 c_.report("Agent exported " + QFileInfo(path).fileName());
                 auto result = snapshot(); result.insert("action", action); result.insert("target_path", path);
                 finish(toolResult(result));
             });
-        watcher->setFuture(QtConcurrent::run([projectSnapshot = c_.project, path] {
-            try { writeProjectPackage(projectSnapshot, path); return QString(); }
+        watcher->setFuture(QtConcurrent::run([projectSnapshot = c_.project, stagedPackage, path, isCancelled] {
+            try { writeProjectPackage(projectSnapshot, stagedPackage, isCancelled, path); return QString(); }
             catch (const std::exception& e) { return QString::fromUtf8(e.what()); }
         }));
         return;
@@ -1314,21 +1431,22 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
             fail("Provide an existing absolute .savshow or .savpack file path");
         const bool pkg = isProjectPackage(path);
         const quint64 expectedRev = revision_;
-        c_.busy = true;
+        const quint64 lease = c_.acquireBusy();
+        if (!lease) fail("Wait for the current busy operation to finish");
         ++activeAsyncJobs_;
         struct LoadResult { Project project; QString error; };
         auto* watcher = new QFutureWatcher<LoadResult>(this);
         connect(watcher, &QFutureWatcher<LoadResult>::finished, this,
-            [this, watcher, action, path, pkg, discard, expectedRev, jobGen, cancelled, finish = std::move(finish)]() mutable {
+            [this, watcher, action, path, pkg, discard, expectedRev, jobGen, jobEditGen, lease, cancelled, finish = std::move(finish)]() mutable {
                 auto loaded = watcher->result(); watcher->deleteLater();
-                c_.busy = false;
+                c_.releaseBusy(lease);
                 activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1);
                 if (cancelled->load() || generation_ != jobGen) return;
                 if (!loaded.error.isEmpty()) {
                     finish(toolResult({{"error", loaded.error}, {"revision", static_cast<double>(revision_)}}, true));
                     return;
                 }
-                if (!running() || !editing_ || c_.showMode || !c_.canEdit(false) || revision_ != expectedRev || (c_.dirty && !discard)) {
+                if (!running() || !editing_ || editGeneration_ != jobEditGen || c_.showMode || !c_.canEdit(false) || revision_ != expectedRev || (c_.dirty && !discard)) {
                     finish(toolResult({{"error", "Open could not complete because show state or permissions changed"},
                         {"revision", static_cast<double>(revision_)}}, true));
                     return;

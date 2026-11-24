@@ -320,6 +320,9 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
 
     // ACP client signals
     connect(&acp_, &AcpClient::stateChanged, this, [this](AcpState st) {
+        if (st == AcpState::Disconnected || st == AcpState::Error) {
+            clearPermissionCards();
+        }
         // If an unexpected exit or protocol error ends a chat-owned session, revoke its auto-started MCP server.
         if (!connecting_ && (st == AcpState::Disconnected || st == AcpState::Error) && autoStartedMcp_ && mcp_.running()) {
             autoStartedMcp_ = false;

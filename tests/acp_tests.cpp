@@ -54,8 +54,14 @@ private slots:
                  QStringList({"C:\\Shows\\", "--flag"}));
         QCOMPARE(splitCommandLine("agent --msg \"say \\\"hi\\\"\""),
                  QStringList({"agent", "--msg", "say \"hi\""}));
-        // Unclosed quotes are rejected.
+        // Microsoft C doubled-quote escaping inside double-quoted arguments.
+        QCOMPARE(splitCommandLine("agent --msg \"say \"\"hi\"\"\""),
+                 QStringList({"agent", "--msg", "say \"hi\""}));
+        QCOMPARE(splitCommandLine("agent \"\" arg"),
+                 QStringList({"agent", "", "arg"}));
+        // Unclosed quotes are rejected (including trailing doubled quote with no closing quote).
         QCOMPARE(splitCommandLine("\"C:\\Unclosed"), QStringList());
+        QCOMPARE(splitCommandLine("\"foo\"\""), QStringList());
         QCOMPARE(splitCommandLine("  "), QStringList());
     }
 
@@ -201,6 +207,47 @@ private slots:
         const auto errDoc = QJsonDocument::fromJson(errLine).object();
         QCOMPARE(errDoc["id"].toInt(), 7);
         QVERIFY(errDoc["error"].isObject());
+
+        // 4. Verify --mcp-proxy rejects HTTP 202 for requests, empty JSON objects, and mismatched IDs with ID-correlated errors.
+        int badSeq = 0;
+        QTcpServer badServer;
+        QVERIFY(badServer.listen(QHostAddress::LocalHost, 0));
+        connect(&badServer, &QTcpServer::newConnection, &badServer, [&badServer, &badSeq] {
+            auto* s = badServer.nextPendingConnection();
+            connect(s, &QTcpSocket::readyRead, s, [s, &badSeq] {
+                s->readAll();
+                const int step = badSeq++;
+                if (step == 0) {
+                    s->write("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                } else if (step == 1) {
+                    const QByteArray body = "{}";
+                    s->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                } else {
+                    const QByteArray body = "{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{}}";
+                    s->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                }
+                s->disconnectFromHost();
+            });
+        });
+        QProcess badProxy;
+        badProxy.start(SAV_APP_EXECUTABLE, {"--mcp-proxy", QString("http://127.0.0.1:%1/mcp").arg(badServer.serverPort())});
+        QVERIFY(badProxy.waitForStarted(5000));
+        badProxy.write("{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"ping\"}\n");
+        badProxy.write("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n");
+        badProxy.write("{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"ping\"}\n");
+        badProxy.closeWriteChannel();
+        QTRY_VERIFY_WITH_TIMEOUT(badProxy.state() == QProcess::NotRunning, 8000);
+        const auto badLines = badProxy.readAllStandardOutput().split('\n');
+        QMap<int, QJsonObject> badReplies;
+        for (const auto& l : badLines) {
+            if (l.trimmed().isEmpty()) continue;
+            const auto o = QJsonDocument::fromJson(l).object();
+            badReplies.insert(o["id"].toInt(), o);
+        }
+        for (int reqId : {8, 9, 10}) {
+            QVERIFY(badReplies.contains(reqId));
+            QVERIFY(badReplies[reqId]["error"].isObject());
+        }
     }
 
     void acpPermissionAndCancel() {
@@ -270,6 +317,27 @@ private slots:
         QTRY_COMPARE(finishedReason, QString("cancelled"));
         QCOMPARE(client.state(), AcpState::Ready);
         client.disconnectFromAgent();
+
+        // Silent handshake and ignored-cancel deadlines must fail cleanly instead of hanging forever.
+        {
+            AcpClient silent;
+            silent.setTimeoutsForTesting(1000, 150, 150);
+            silent.connectToAgent(SAV_MOCK_ACP_AGENT, {"--silent-handshake"}, QDir::tempPath(), {});
+            QTRY_COMPARE_WITH_TIMEOUT(silent.state(), AcpState::Error, 3000);
+            QVERIFY(silent.lastError().contains("Timed out"));
+            silent.disconnectFromAgent();
+
+            AcpClient stuckCancel;
+            stuckCancel.setTimeoutsForTesting(1000, 2000, 150);
+            stuckCancel.connectToAgent(SAV_MOCK_ACP_AGENT, {"--http-mcp", "--hold-prompt", "--ignore-cancel"}, QDir::tempPath(), {});
+            QTRY_COMPARE(stuckCancel.state(), AcpState::Ready);
+            stuckCancel.sendPrompt("Will ignore cancel");
+            QCOMPARE(stuckCancel.state(), AcpState::Prompting);
+            stuckCancel.cancelPrompt();
+            QTRY_COMPARE_WITH_TIMEOUT(stuckCancel.state(), AcpState::Error, 3000);
+            QVERIFY(stuckCancel.lastError().contains("cancel"));
+            stuckCancel.disconnectFromAgent();
+        }
     }
 
     void embeddedChatPanelAndShortcutSafety() {
@@ -357,9 +425,21 @@ private slots:
         QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
         QTRY_VERIFY(transcript->toPlainText().contains("perm=selected:allow-once"));
 
-        // Disconnect stops auto-started MCP server cleanly
-        connectButton->click();
+        // Permission cards must clear when MCP stops externally or the agent exits cleanly.
+        promptInput->setPlainText("Trigger permission then external MCP stop");
+        sendButton->click();
+        QTRY_VERIFY(permissionBox->isVisible());
+        window.mcpServer().stop();
         QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
+        QVERIFY(!permissionBox->isVisible());
+
+        customCommand->setText(QString("\"%1\" --http-mcp --require-permission --exit-clean-after-permission").arg(SAV_MOCK_ACP_AGENT));
+        connectButton->click();
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
+        promptInput->setPlainText("Trigger permission then clean exit");
+        sendButton->click();
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
+        QVERIFY(!permissionBox->isVisible());
         QVERIFY(!window.mcpServer().running());
 
         // Unexpected protocol error on a chat-owned connection must also stop the auto-started MCP server.

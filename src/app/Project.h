@@ -5,6 +5,7 @@
 #include <QJsonObject>
 #include <QString>
 #include <QTemporaryDir>
+#include <functional>
 #include <memory>
 
 namespace sav {
@@ -32,8 +33,21 @@ QJsonObject projectJson(const Project& project, const QString& directory = {});
 void writeProject(const Project& project, const QString& path);
 bool isProjectPackage(const QString& path);
 Project readProjectPackage(const QString& path);
-void writeProjectPackage(const Project& project, const QString& path);
-void materializeProjectMedia(Project& project, const QString& directory);
+void writeProjectPackage(const Project& project, const QString& path,
+                         const std::function<bool()>& isCancelled = {},
+                         const QString& finalTargetPath = {});
+void materializeProjectMedia(Project& project, const QString& directory,
+                             const std::function<bool()>& isCancelled = {});
+// Two-phase media materialization: stages copies/exports off the destination directory on a worker,
+// then moves them into targetDirectory only after GUI-thread authorization succeeds.
+struct StagedProjectMedia {
+    QMap<QString, QString> assetFileNames; // asset id -> file name inside stagingDirectory
+    QMap<QString, bool> extractedAssets;   // asset id -> came from packageDirectory
+};
+StagedProjectMedia stageProjectMedia(const Project& project, const QString& stagingDirectory,
+                                     const std::function<bool()>& isCancelled = {});
+void publishStagedProjectMedia(Project& project, const QString& stagingDirectory,
+                               const QString& targetDirectory, const StagedProjectMedia& staged);
 // Removes package extractions abandoned by crashed instances; call once at startup.
 void removeStalePackageDirectories();
 QString timecode(Frame position, double fps = 24);
