@@ -374,13 +374,17 @@ QJsonObject projectJson(const Project& p, const QString& directory) {
     return root;
 }
 void writeProject(const Project& p, const QString& path) {
+    constexpr qint64 maxProjectFileBytes = 32 * 1024 * 1024;
     validate(p);
     for (const auto& a : p.assets)
         if (a.path.isEmpty()) throw std::runtime_error("Use Export demo first to save generated media");
     const auto root = projectJson(p, QFileInfo(path).absolutePath());
+    QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    if (bytes.size() > maxProjectFileBytes) bytes = QJsonDocument(root).toJson(QJsonDocument::Compact);
+    if (bytes.size() > maxProjectFileBytes)
+        throw std::runtime_error("Show manifest exceeds the 32 MB save limit");
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error(file.errorString().toStdString());
-    const auto bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
     if (file.write(bytes) != bytes.size() || !file.commit()) throw std::runtime_error(file.errorString().toStdString());
 }
 Project parseProject(const QByteArray& json, const QString& directory) {

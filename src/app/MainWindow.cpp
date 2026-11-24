@@ -1132,12 +1132,16 @@ void MainWindow::screensChanged() {
 void MainWindow::requestShowMode(bool enabled) {
     const State state = c_.transport.state();
     if (enabled) {
-        const quint64 lease = c_.acquireBusy();
-        if (!lease) {
+        if (c_.busy) {
             showButton_->setChecked(false);
             c_.report("Wait for the current file operation to finish before entering Show mode.");
             return;
         }
+        // Pause agent writes during preflight confirmation without setting c_.busy,
+        // so phone remote Stop All remains available during playback.
+        struct PreflightGuard { Controller& c; ~PreflightGuard() { c.preflightLock = false; } };
+        c_.preflightLock = true;
+        PreflightGuard guard{c_};
         const quint64 initialRev = c_.projectRevision();
         const QString initialAudio = c_.audioName;
         const QString initialMidi = c_.midi.name();
@@ -1152,7 +1156,6 @@ void MainWindow::requestShowMode(bool enabled) {
             auto* start = box.addButton("Enter Show mode anyway", QMessageBox::AcceptRole); box.setDefaultButton(QMessageBox::Cancel); box.exec();
             confirmed = box.clickedButton() == start;
         }
-        c_.releaseBusy(lease);
         if (!confirmed) { showButton_->setChecked(false); return; }
         if (c_.projectRevision() != initialRev || c_.audioName != initialAudio || c_.midi.name() != initialMidi ||
             bool(outputWindow_ && outputWindow_->isVisible()) != initialOutputOpen) {

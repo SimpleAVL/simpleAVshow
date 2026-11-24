@@ -108,7 +108,8 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
             // requires dropping the stale session ID and starting a fresh initialize session.
             if (status == 404 && !sentSession.isEmpty() && msgObj["method"].toString() != "initialize") {
                 if (sessionId == sentSession) sessionId.clear();
-                if (!isRetry && !initPayload.isEmpty()) {
+                const bool mutating = isMutatingToolCall(msgObj);
+                if (!isRetry && !initPayload.isEmpty() && !(eof && mutating)) {
                     QNetworkRequest reinitReq(url);
                     reinitReq.setTransferTimeout(15000);
                     reinitReq.setRawHeader("Content-Type", "application/json");
@@ -117,11 +118,22 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
                     if (!token.isEmpty()) reinitReq.setRawHeader("Authorization", "Bearer " + token);
                     ++inFlight;
                     auto* reinitReply = network.post(reinitReq, initPayload);
-                    QObject::connect(reinitReply, &QNetworkReply::finished, &app, [&, reinitReply, trimmed, msgObj, requestId, idKey] {
+                    // Track the reinit reply under the original request's idKey so notifications/cancelled
+                    // and stdin EOF abort it and prevent replaying a cancelled write.
+                    if (!idKey.isEmpty()) inflightReplies.insert(idKey, {reinitReply, mutating});
+                    QObject::connect(reinitReply, &QNetworkReply::finished, &app, [&, reinitReply, trimmed, msgObj, requestId, idKey, mutating] {
+                        if (!idKey.isEmpty() && inflightReplies.value(idKey).reply == reinitReply) inflightReplies.remove(idKey);
                         const QByteArray newSid = reinitReply->rawHeader("Mcp-Session-Id").trimmed();
                         const int reinitStatus = reinitReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+                        const auto reinitErr = reinitReply->error();
                         reinitReply->deleteLater();
                         --inFlight;
+                        if ((!idKey.isEmpty() && locallyCancelled.remove(idKey)) ||
+                            reinitErr == QNetworkReply::OperationCanceledError ||
+                            (eof && mutating)) {
+                            maybeQuit();
+                            return;
+                        }
                         if (reinitStatus >= 200 && reinitStatus < 300 && !newSid.isEmpty()) {
                             sessionId = newSid;
                             sendRequest(trimmed, msgObj, requestId, idKey, true);

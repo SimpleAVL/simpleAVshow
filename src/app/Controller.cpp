@@ -183,16 +183,22 @@ void Controller::startMidiThread() {
                     QMetaObject::invokeMethod(this, [this, error] { report(error); }, Qt::QueuedConnection);
                 }
             }
-            std::vector<unsigned char> testMsg;
             for (;;) {
+                PendingTestMidi item;
                 {
                     std::lock_guard lock(testMidiMutex_);
                     if (testMidiQueue_.empty()) break;
-                    testMsg = std::move(testMidiQueue_.front());
+                    item = std::move(testMidiQueue_.front());
                     testMidiQueue_.pop_front();
                 }
+                // Drop stale test messages if Show mode, Stop All, Play, or bearer revocation intervened.
+                if (showModeAtomic_.load(std::memory_order_acquire) ||
+                    item.epoch != transport.epoch() ||
+                    item.gen != testMidiGen_.load(std::memory_order_acquire) ||
+                    transport.state() == State::Playing || transport.state() == State::Held)
+                    continue;
                 QString error;
-                if (!midi.send(testMsg, error)) {
+                if (!midi.send(item.bytes, error)) {
                     QMetaObject::invokeMethod(this, [this, error] { report(error); }, Qt::QueuedConnection);
                 }
             }
@@ -213,6 +219,7 @@ bool Controller::routesValid() const {
 }
 bool Controller::play() {
     if (busy) return false;
+    cancelPendingTestMidi();
     const State state = transport.state();
     if (state != State::Playing) {
         playbackProblem.clear();
@@ -253,6 +260,7 @@ bool Controller::seek(Frame time) {
     return true;
 }
 bool Controller::stopAll() {
+    cancelPendingTestMidi();
     if (!postTransportCommand({Action::StopAll})) {
         // Emergency Stop All must never be rejected by a full bounded command queue.
         transport.requestStopAll();
@@ -322,7 +330,7 @@ bool Controller::configureMidiByName(const QString& portName) {
     if (trimmed.isEmpty() || trimmed.compare("none", Qt::CaseInsensitive) == 0 || trimmed.compare("off", Qt::CaseInsensitive) == 0)
         return openMidi(-1);
     stopMidiThread();
-    { std::lock_guard lock(testMidiMutex_); testMidiQueue_.clear(); }
+    cancelPendingTestMidi();
     QString error;
     const bool ok = midi.openByName(trimmed, error);
     startMidiThread();
@@ -332,7 +340,7 @@ bool Controller::configureMidiByName(const QString& portName) {
 }
 bool Controller::openMidi(int port) {
     stopMidiThread();
-    { std::lock_guard lock(testMidiMutex_); testMidiQueue_.clear(); }
+    cancelPendingTestMidi();
     QString error; const bool ok = midi.open(port, error); startMidiThread();
     if (ok) { midiName_ = midi.name(); QSettings().setValue("midi/port", midiName_); playbackProblem.clear(); }
     report(ok ? (port < 0 ? "MIDI output disconnected" : "MIDI output: " + midi.name()) : error); return ok;
@@ -430,7 +438,16 @@ bool Controller::prepareAudio() {
         return openAudio(api, selected->id, selected->name, channels, buffer);
     } catch (const std::exception& error) { report("Cannot prepare audio. Open Outputs to choose a device. " + QString::fromUtf8(error.what())); return false; }
 }
-bool Controller::testMidi(const std::vector<unsigned char>& bytes) {
+void Controller::cancelPendingTestMidi(const QString& owner) {
+    std::lock_guard lock(testMidiMutex_);
+    if (owner.isEmpty()) {
+        testMidiGen_.fetch_add(1, std::memory_order_release);
+        testMidiQueue_.clear();
+    } else {
+        std::erase_if(testMidiQueue_, [&](const PendingTestMidi& item) { return item.owner == owner; });
+    }
+}
+bool Controller::testMidi(const std::vector<unsigned char>& bytes, const QString& owner) {
     if (!canEdit() || bytes.empty()) return false;
     if (!validMidi(bytes)) { report("Complete the MIDI message before testing it."); return false; }
     if (!prepareMidi()) return false;
@@ -441,7 +458,7 @@ bool Controller::testMidi(const std::vector<unsigned char>& bytes) {
             report("Too many MIDI test messages are already queued; wait for them to finish.");
             return false;
         }
-        testMidiQueue_.push_back(bytes);
+        testMidiQueue_.push_back({bytes, transport.epoch(), testMidiGen_.load(std::memory_order_acquire), owner});
     }
     report("Test message queued for " + midi.name() + ". External devices may keep playing until they receive a stop message.");
     return true;
@@ -452,7 +469,12 @@ const Marker* Controller::nextCue() const {
         if ((m.time > now || (m.time == now && !held)) && (!upcoming || m.time < upcoming->time)) upcoming = &m;
     return upcoming;
 }
-void Controller::setShowMode(bool enabled) { showMode = enabled; emit changed(); }
+void Controller::setShowMode(bool enabled) {
+    showMode = enabled;
+    showModeAtomic_.store(enabled, std::memory_order_release);
+    if (enabled) cancelPendingTestMidi();
+    emit changed();
+}
 QImage Controller::compose() {
     const Frame position = this->position();
     // Pre-roll the next clip on each layer. Keep readers only for active/upcoming clips.

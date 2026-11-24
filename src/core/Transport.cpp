@@ -194,9 +194,17 @@ void Transport::forceStopAll() noexcept {
 void Transport::render(float* output, unsigned count, unsigned channels) noexcept {
     if (output) std::fill(output, output + static_cast<std::size_t>(count) * channels, 0.f);
     if (!show_) return;
-    Command command;
-    while (commands_.pop(command)) apply(command);
-    if (urgentStop_.exchange(false, std::memory_order_acq_rel)) applyStopAll();
+    if (urgentStop_.load(std::memory_order_acquire)) {
+        // Emergency Stop All discards queued commands before applying them so a queued Play
+        // cannot fire a hold's resume MIDI cue before stopping.
+        Command discarded;
+        while (commands_.pop(discarded)) ++applied_;
+        applyStopAll();
+        urgentStop_.store(false, std::memory_order_release);
+    } else {
+        Command command;
+        while (commands_.pop(command)) apply(command);
+    }
     float peak = 0; bool waiting = false;
     for (unsigned f = 0; f < count; ++f) {
         if (waiting && releasing_.empty()) break; // Remaining device samples stay silent; retry at the same show/source time.

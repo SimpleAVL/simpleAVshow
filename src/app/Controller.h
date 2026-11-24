@@ -24,7 +24,7 @@ public:
     Transport transport;
     AudioDevice device;
     MidiOutput midi;
-    bool showMode = false, dirty = false, busy = false;
+    bool showMode = false, dirty = false, busy = false, preflightLock = false;
     QString path, status = "Press Play to use your speakers. Choose show equipment in Outputs.", audioName;
     QString playbackProblem;
     Frame position() const { return transport.position(); }
@@ -57,7 +57,8 @@ public:
     bool audioConfigured() const { return configured_; }
     bool configureMidi(int port);
     bool configureMidiByName(const QString& portName);
-    bool testMidi(const std::vector<unsigned char>& message);
+    bool testMidi(const std::vector<unsigned char>& message, const QString& owner = {});
+    void cancelPendingTestMidi(const QString& owner = {});
     bool needsMidi() const;
     // Offline sources and vanished videos used on the timeline.
     QStringList missingMedia(bool probeFilesystem = true) const;
@@ -97,9 +98,16 @@ private:
     std::map<std::string, std::unique_ptr<VideoReader>> videos_;
     std::shared_ptr<const Show> armed_;
     std::thread midiThread_;
-    std::atomic<bool> midiStop_{true};
+    std::atomic<bool> midiStop_{true}, showModeAtomic_{false};
+    std::atomic<std::uint64_t> testMidiGen_{1};
+    struct PendingTestMidi {
+        std::vector<unsigned char> bytes;
+        std::uint64_t epoch = 0;
+        std::uint64_t gen = 0;
+        QString owner;
+    };
     std::mutex testMidiMutex_;
-    std::deque<std::vector<unsigned char>> testMidiQueue_;
+    std::deque<PendingTestMidi> testMidiQueue_;
     QElapsedTimer midiWatch_, stall_;
     std::uint64_t heartbeat_ = 0;
     std::set<std::string> videoErrors_;

@@ -399,6 +399,7 @@ void McpServer::invalidateEditSession() {
     editSessionCancelled_ = std::make_shared<std::atomic<bool>>(false);
     if (importCancelled_) importCancelled_->store(true);
     importCancelled_ = std::make_shared<std::atomic<bool>>(false);
+    c_.cancelPendingTestMidi();
     releaseAllBusyLeases();
     if (importState_ == "preparing" || importState_ == "ready") {
         imported_.clear();
@@ -480,6 +481,7 @@ void McpServer::revokeChatToken(const QString& token) {
         importState_ = "cancelled";
         importError_ = "Import cancelled because the chat session disconnected";
     }
+    c_.cancelPendingTestMidi(token);
     for (auto* socket : findChildren<QTcpSocket*>()) {
         if (socket->property("savBearer").toString() == token) socket->abort();
     }
@@ -609,6 +611,7 @@ void McpServer::checkEnabledAndUnlocked(bool requireStopped) {
     if (!editing_) fail("Agent editing is disabled by the operator");
     emit aboutToEdit();
     if (c_.showMode) fail("Editing and control are locked in Show mode. The operator must leave Show mode first");
+    if (c_.preflightLock) fail("Editing and control are paused while the operator reviews Show-mode preflight");
     if (c_.busy) fail("Wait for the current busy operation to finish");
     if (requireStopped && !c_.canEdit(false))
         fail("Editing is locked while playback or async voices are active. Use transport_control stop_all (or ask the operator to Stop All) first");
@@ -693,8 +696,10 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::shared_ptr
     const quint64 rev = revision_;
     const quint64 jobGen = generation_;
 
-    struct VideoRequest { std::string clipId; QString path; double sourceTime; };
+    struct VideoRequest { std::string clipId; QString path; double sourceTime; QString cacheKey; };
     std::vector<VideoRequest> videoRequests;
+    QSet<QString> uniqueVideoKeys;
+    constexpr int maxPreviewVideoDecodes = 16;
     QJsonArray activeClips, activeMarkers;
     bool hasActiveText = false;
     for (std::size_t index = 0; index < projectSnapshot.show.clips.size(); ++index) {
@@ -722,7 +727,13 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::shared_ptr
                             else if (asyncSrc >= 0) t = seconds(asyncSrc);
                         }
                         t = std::min(t, std::max(0., asset->duration - 1. / std::max(1., asset->fps)));
-                        videoRequests.push_back({clip.id, asset->path, t});
+                        const QString cacheKey = QString("%1@%2").arg(asset->path).arg(std::llround(t * 1000.0));
+                        if (!uniqueVideoKeys.contains(cacheKey)) {
+                            if (uniqueVideoKeys.size() >= maxPreviewVideoDecodes)
+                                fail("Too many distinct active video layers at this time for a single preview frame (maximum 16)");
+                            uniqueVideoKeys.insert(cacheKey);
+                        }
+                        videoRequests.push_back({clip.id, asset->path, t, cacheKey});
                     }
                 }
             }
@@ -777,18 +788,26 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::shared_ptr
         watcher->setFuture(QtConcurrent::run([projectSnapshot, time, targetSize, videoRequests = std::move(videoRequests), previewAborted] {
             Encoded out;
             QMap<std::string, QImage> frames;
+            QMap<QString, QImage> decodedCache;
             for (const auto& req : videoRequests) {
                 if (previewAborted()) return out;
+                auto cached = decodedCache.constFind(req.cacheKey);
+                if (cached != decodedCache.cend()) {
+                    frames.insert(req.clipId, cached.value());
+                    continue;
+                }
                 QString err;
                 QImage frame = videoFrameAt(req.path, req.sourceTime, targetSize, &err, previewAborted);
                 if (frame.isNull()) {
                     out.error = err.isEmpty() ? QString("Failed to decode preview frame for %1").arg(QFileInfo(req.path).fileName()) : err;
                     return out;
                 }
+                decodedCache.insert(req.cacheKey, frame);
                 frames.insert(req.clipId, std::move(frame));
             }
             if (previewAborted()) return out;
             const QImage image = Controller::composeProjectAt(projectSnapshot, time, targetSize, &frames);
+            frames.clear(); decodedCache.clear();
             if (previewAborted()) return out;
             out.width = image.width(); out.height = image.height();
             QByteArray png;
@@ -859,14 +878,21 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::shared_ptr
         });
     watcher->setFuture(QtConcurrent::run([videoRequests = std::move(videoRequests), targetSize, previewAborted] {
         DecodedVideos result;
+        QMap<QString, QImage> decodedCache;
         for (const auto& req : videoRequests) {
             if (previewAborted()) return result;
+            auto cached = decodedCache.constFind(req.cacheKey);
+            if (cached != decodedCache.cend()) {
+                result.frames.insert(req.clipId, cached.value());
+                continue;
+            }
             QString err;
             QImage frame = videoFrameAt(req.path, req.sourceTime, targetSize, &err, previewAborted);
             if (frame.isNull()) {
                 result.error = err.isEmpty() ? QString("Failed to decode preview frame for %1").arg(QFileInfo(req.path).fileName()) : err;
                 return result;
             }
+            decodedCache.insert(req.cacheKey, frame);
             result.frames.insert(req.clipId, std::move(frame));
         }
         return result;
@@ -1284,12 +1310,13 @@ QJsonObject McpServer::seekAndSelectTool(const QJsonObject& a) {
     if (targetTime && !c_.seek(*targetTime)) fail(c_.status);
     if (host_.selectItem && (track >= 0 || !clipId.isEmpty() || !markerId.isEmpty()))
         host_.selectItem(track, clipId, markerId);
-    return toolResult({{"position", static_cast<double>(c_.position())}, {"seconds", seconds(c_.position())},
-        {"timecode", timecode(c_.position(), c_.project.fps)},
+    const Frame reportedPos = c_.effectivePosition();
+    return toolResult({{"position", static_cast<double>(reportedPos)}, {"seconds", seconds(reportedPos)},
+        {"timecode", timecode(reportedPos, c_.project.fps)},
         {"selection", host_.currentSelection ? host_.currentSelection() : QJsonObject{}}});
 }
 
-QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
+QJsonObject McpServer::configureOutputsTool(const QJsonObject& a, const QString& bearerToken) {
     checkEnabledAndUnlocked(true);
     if (!a.contains("audio") && !a.contains("midi") && !a.contains("display") && !a.contains("test_midi"))
         fail("Provide at least one of audio, midi, display, or test_midi");
@@ -1460,7 +1487,7 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
         applied << "display";
     }
     if (plannedTestMidi) {
-        if (!c_.testMidi(*plannedTestMidi)) failPartial(c_.status);
+        if (!c_.testMidi(*plannedTestMidi, bearerToken)) failPartial(c_.status);
     }
 
     return toolResult(environmentReport());
@@ -1730,9 +1757,10 @@ QJsonObject McpServer::transportControlTool(const QJsonObject& a) {
     } else {
         fail("Unknown transport action: " + action);
     }
-    return toolResult({{"action", action}, {"accepted", accepted}, {"transport", stateName(c_.transport.state())},
-        {"position", static_cast<double>(c_.position())}, {"seconds", seconds(c_.position())},
-        {"timecode", timecode(c_.position(), c_.project.fps)},
+    const Frame reportedPos = c_.effectivePosition();
+    return toolResult({{"action", action}, {"accepted", accepted}, {"transport", stateName(c_.effectiveState())},
+        {"position", static_cast<double>(reportedPos)}, {"seconds", seconds(reportedPos)},
+        {"timecode", timecode(reportedPos, c_.project.fps)},
         {"async_voices", static_cast<int>(c_.transport.asyncVoices())},
         {"warning", c_.playbackProblem},
         {"playback_problem", c_.playbackProblem}});
@@ -1761,7 +1789,7 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, const QStrin
         if (name == "relink_media") { relinkMediaAsync(a, std::move(cancelled), finish); return; }
         if (name == "history") { finish(historyTool(a)); return; }
         if (name == "seek_and_select") { finish(seekAndSelectTool(a)); return; }
-        if (name == "configure_outputs") { finish(configureOutputsTool(a)); return; }
+        if (name == "configure_outputs") { finish(configureOutputsTool(a, bearerToken)); return; }
         if (name == "configure_remote") { finish(configureRemoteTool(a)); return; }
         if (name == "project_action") { projectActionAsync(a, std::move(cancelled), finish); return; }
         if (name == "transport_control") { finish(transportControlTool(a)); return; }

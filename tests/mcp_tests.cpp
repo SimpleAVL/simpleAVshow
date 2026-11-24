@@ -680,19 +680,31 @@ private slots:
                      QString("ready"));
         }
 
-        // 21. Emergency Stop All succeeds even when the 128-slot transport command queue is full of Play commands.
+        // 21. Emergency Stop All succeeds even when the 128-slot transport command queue is full of Play commands,
+        //     and discards queued Play commands without firing a hold's resume MIDI cue.
         {
             Controller c;
-            c.replace(demoProject());
+            Project p = newProject();
+            Marker hold; hold.id = "hold-1"; hold.name = "Hold"; hold.time = 0; hold.hold = true;
+            hold.timing = MidiTiming::Resume; hold.message = {0x90, 60, 100};
+            p.show.markers.push_back(hold);
+            c.replace(std::move(p));
+            c.transport.command({Action::Play});
+            float buf[2]{};
+            c.transport.render(buf, 1, 2);
+            QCOMPARE(c.transport.state(), State::Held);
+            MidiEvent ev;
+            while (c.transport.takeMidi(ev)) {}
             for (int i = 0; i < 200; ++i) c.transport.command({Action::Play});
-            // Queue is full, yet emergency Stop All must succeed and leave state Stopped after render.
             c.transport.requestStopAll();
             QVERIFY(!c.transport.command({Action::Play}));
-            c.transport.render(nullptr, 0, 0);
+            c.transport.render(buf, 1, 2);
             QCOMPARE(c.transport.state(), State::Stopped);
+            QVERIFY(!c.transport.takeMidi(ev));
         }
 
-        // 22. open_project rejects non-project file extensions before reading the file.
+        // 22. open_project rejects non-project file extensions before reading the file,
+        //     and preflightLock blocks MCP edits without blocking phone remote Stop All.
         {
             QTemporaryDir dir;
             QVERIFY(dir.isValid());
@@ -706,6 +718,15 @@ private slots:
                 {"expected_revision", revision(server)}
             });
             QVERIFY(openBad["isError"].toBool());
+
+            window.controller().preflightLock = true;
+            const auto lockedEdit = call(server, "apply_edits", {
+                {"expected_revision", revision(server)},
+                {"operations", QJsonArray{QJsonObject{{"type", "project"}, {"fields", QJsonObject{{"title", "Blocked"}}}}}}
+            });
+            QVERIFY(lockedEdit["isError"].toBool());
+            QVERIFY(window.remoteServer().command("stop"));
+            window.controller().preflightLock = false;
         }
 
         window.controller().dirty = false;

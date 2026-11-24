@@ -153,6 +153,7 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
     header->addWidget(title);
     statusLabel_ = new QLabel("Disconnected");
     statusLabel_->setObjectName("agentStatusLabel");
+    statusLabel_->setTextFormat(Qt::PlainText);
     statusLabel_->setStyleSheet("color: #8499b5; font-size: 11px;");
     header->addWidget(statusLabel_, 1);
     auto* closeBtn = new QToolButton;
@@ -189,6 +190,7 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
     root->addWidget(customCommand_);
 
     presetHint_ = new QLabel;
+    presetHint_->setTextFormat(Qt::PlainText);
     presetHint_->setWordWrap(true);
     presetHint_->setStyleSheet("color: #8499b5; font-size: 11px;");
     root->addWidget(presetHint_);

@@ -98,7 +98,7 @@ private:
     QJsonObject encodeMidiTool(const QJsonObject& arguments) const;
     void listMediaFilesAsync(const QJsonObject& arguments, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish);
     void relinkMediaAsync(const QJsonObject& arguments, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish);
-    QJsonObject configureOutputsTool(const QJsonObject& arguments);
+    QJsonObject configureOutputsTool(const QJsonObject& arguments, const QString& bearerToken);
     QJsonObject configureRemoteTool(const QJsonObject& arguments);
     void projectActionAsync(const QJsonObject& arguments, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish);
     QJsonObject transportControlTool(const QJsonObject& arguments);
