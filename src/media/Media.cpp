@@ -53,7 +53,7 @@ class SourceFile {
 public:
     explicit SourceFile(const QString& path) {
 #ifdef Q_OS_WIN
-        handle_ = CreateFileW(reinterpret_cast<const wchar_t*>(path.utf16()), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        handle_ = CreateFileW(detail::windowsPath(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (handle_ == INVALID_HANDLE_VALUE) throw std::runtime_error("Open media: cannot open " + path.toStdString());
 #else
@@ -346,11 +346,13 @@ public:
         if (first < 0 || first > length_ || count > static_cast<std::size_t>(length_ - first)) throw std::runtime_error("Invalid audio source range");
         std::fill(stereo, stereo + count * 2, 0.f);
         if (!count) return;
-        if (!QFileInfo::exists(path_)) throw std::runtime_error("Audio source is unavailable: " + path_.toStdString());
+        const std::lock_guard lock(mutex_);
+        // A missing or changed source releases its open decoders first, so their handles do not keep a
+        // deleted file's name reserved (Windows) or pin an old copy while the operator restores it.
+        if (!QFileInfo::exists(path_)) { readers_.clear(); throw std::runtime_error("Audio source is unavailable: " + path_.toStdString()); }
         // File identity also catches a replacement saved with the same size and modification time;
         // an in-place rewrite that keeps both is not detected.
-        if (detail::fileVersion(path_) != version_) throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString());
-        const std::lock_guard lock(mutex_);
+        if (detail::fileVersion(path_) != version_) { readers_.clear(); throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString()); }
         Reader* reader = nullptr;
         try {
             pick(first, reader);

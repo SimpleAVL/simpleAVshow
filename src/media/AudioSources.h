@@ -4,6 +4,7 @@
 #include <QString>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -15,6 +16,11 @@ namespace sav::detail {
 QString audioCacheDirectory();
 // The file system's identity of the file at path (device and inode, or volume and file index), which
 // changes when a save replaces the file rather than rewriting it; zero if it cannot be read.
+#ifdef Q_OS_WIN
+// path for Win32 calls: native separators, with the \\?\ (or \\?\UNC\) prefix that lifts the
+// 260-character limit when the path needs it.
+std::wstring windowsPath(const QString& path);
+#endif
 using FileIdentity = std::pair<quint64, quint64>;
 FileIdentity fileIdentity(const QString& path);
 // Size, modification time and identity: a file that still has all three is the one that was read.

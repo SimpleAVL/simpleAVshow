@@ -772,11 +772,16 @@ void MainWindow::relinkMedia(bool afterOpening) {
     auto* watcher = new QFutureWatcher<MediaResult>(this);
     connect(watcher, &QFutureWatcher<MediaResult>::finished, this, [this, watcher, progress] {
         const auto result = watcher->result(); c_.busy = false; progress->deleteLater(); watcher->deleteLater();
-        if (!result.assets.empty()) c_.edit([&](Project& p) { for (const auto& a : result.assets) p.assets.insert(a.id, a); });
+        // A replacement the show cannot use (shorter than a clip needs) is rejected as a whole; say why.
+        auto errors = result.errors; std::size_t relinked = 0;
+        if (!result.assets.empty()) {
+            if (c_.edit([&](Project& p) { for (const auto& a : result.assets) p.assets.insert(a.id, a); })) relinked = result.assets.size();
+            else errors << "The found files do not fit the show: " + c_.status;
+        }
         int remaining = 0; for (const auto& a : c_.project.assets) remaining += Controller::needsRelink(a);
-        const QString summary = QString("Relinked %1 media file%2.").arg(result.assets.size()).arg(result.assets.size() == 1 ? "" : "s") +
+        const QString summary = QString("Relinked %1 media file%2.").arg(relinked).arg(relinked == 1 ? "" : "s") +
             (remaining ? QString(" %1 still missing.").arg(remaining) : "");
-        if (!result.errors.isEmpty()) QMessageBox::warning(this, "Some media could not be relinked", summary + "\n\n" + result.errors.join("\n\n"));
+        if (!errors.isEmpty()) QMessageBox::warning(this, "Some media could not be relinked", summary + "\n\n" + errors.join("\n\n"));
         c_.report(summary); if (!remaining) c_.playbackProblem.clear();
     });
     const auto offline = c_.project.assets;

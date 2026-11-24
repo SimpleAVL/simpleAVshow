@@ -1834,6 +1834,25 @@ private slots:
         c.undo(); QCOMPARE(c.project.show.clips.size(), std::size_t{1}); QCOMPARE(c.project.show.clips[0].audio, before);
         validate(c.project); QVERIFY(!before->storage->readsSource()); QVERIFY(!c.transport.audioReadFailed());
     }
+    void replacingAnArmedPackageRemovesItsExtraction() {
+        // The armed transport streams from the extraction; replacing the show must release those files
+        // before the extraction is removed (Windows cannot remove a folder whose files are open).
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; const auto source = dir.filePath("cue.wav"); writeBytes(source, waveBytes(16, 1, 2, 44100, false, 44100 + 59));
+        auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}};
+        auto asset = loadMedia(source); project.assets.insert(asset.id, asset);
+        Clip clip; clip.id = "a"; clip.assetId = asset.id.toStdString(); clip.audio = asset.audio; clip.duration = asset.audio->length(); project.show.clips.push_back(clip);
+        const auto package = dir.filePath("show.savpack"); writeProjectPackage(project, package);
+        QString extraction;
+        {
+            Controller c; setAudioPreparation(AudioPreparation::Stream); // The controller applied the saved preference.
+            c.replace(readProject(package));
+            QVERIFY(c.project.assets.first().audio->storage->decodes()); extraction = c.project.packageDirectory->path();
+            c.replace(newProject());
+            QVERIFY2(!QFileInfo::exists(extraction), qPrintable(extraction));
+        }
+    }
     void manifestsThatReferToOtherFilesAreRejected() {
         // Two identical manifests can name different files, so their bytes cannot identify the audio.
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");

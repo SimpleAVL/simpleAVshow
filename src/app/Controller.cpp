@@ -75,8 +75,11 @@ bool Controller::edit(const std::function<void(Project&)>& mutation) {
 }
 void Controller::replace(Project next, QString projectPath) {
     validate(next);
-    // Readers hold extracted package files open; Windows cannot remove them while open.
+    // Readers hold extracted package files open; Windows cannot remove them while open. The previous
+    // project and its history (which may own an extraction) outlive re-arming, which releases the
+    // transport's streamed decoders, and are destroyed at the end of this function.
     videos_.clear(); lastPicture_ = {};
+    auto retired = std::move(project); auto retiredUndo = std::move(undo_), retiredRedo = std::move(redo_);
     project = std::move(next); path = std::move(projectPath); dirty = false; playbackProblem.clear();
     undo_.clear(); redo_.clear();
     arm(0); report("Project ready. Space plays or pauses; Stop All stops async audio and video."); emit changed();

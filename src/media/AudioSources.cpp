@@ -30,9 +30,17 @@ extern "C" {
 }
 
 namespace sav::detail {
+#ifdef Q_OS_WIN
+std::wstring windowsPath(const QString& path) {
+    auto native = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath());
+    if (native.size() >= MAX_PATH && !native.startsWith(QStringLiteral("\\\\?\\")))
+        native = native.startsWith(QStringLiteral("\\\\")) ? QStringLiteral("\\\\?\\UNC\\") + native.mid(2) : QStringLiteral("\\\\?\\") + native;
+    return native.toStdWString();
+}
+#endif
 FileIdentity fileIdentity(const QString& path) {
 #ifdef Q_OS_WIN
-    const HANDLE file = CreateFileW(reinterpret_cast<const wchar_t*>(path.utf16()), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    const HANDLE file = CreateFileW(windowsPath(path).c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
     if (file == INVALID_HANDLE_VALUE) return {};
     BY_HANDLE_FILE_INFORMATION info{};

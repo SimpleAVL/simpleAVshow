@@ -12,10 +12,12 @@ struct Project {
     QString title = "Untitled show";
     int width = 1920, height = 1080;
     double fps = 24;
+    // Shared by undo snapshots so extracted sources remain available until their last user closes.
+    // Declared before the media, so it is destroyed after them: open files are released before the
+    // extraction is removed (Windows cannot remove a folder whose files are still open).
+    std::shared_ptr<QTemporaryDir> packageDirectory;
     Show show;
     QMap<QString, MediaAsset> assets;
-    // Shared by undo snapshots so extracted sources remain available until their last user closes.
-    std::shared_ptr<QTemporaryDir> packageDirectory;
 };
 QString newId();
 Project newProject();
