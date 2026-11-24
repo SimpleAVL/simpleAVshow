@@ -184,6 +184,7 @@ void Controller::startMidiThread() {
                 }
             }
             for (;;) {
+                if (midiStop_.load()) break;
                 PendingTestMidi item;
                 {
                     std::lock_guard lock(testMidiMutex_);
@@ -191,8 +192,10 @@ void Controller::startMidiThread() {
                     item = std::move(testMidiQueue_.front());
                     testMidiQueue_.pop_front();
                 }
-                // Drop stale test messages if Show mode, Stop All, Play, or bearer revocation intervened.
-                if (showModeAtomic_.load(std::memory_order_acquire) ||
+                // Drop stale test messages if Show mode, Stop All, Play, shutdown, or bearer revocation intervened.
+                if (midiStop_.load() ||
+                    showModeAtomic_.load(std::memory_order_acquire) ||
+                    (item.ownerCancelled && item.ownerCancelled->load(std::memory_order_acquire)) ||
                     item.epoch != transport.epoch() ||
                     item.gen != testMidiGen_.load(std::memory_order_acquire) ||
                     transport.state() == State::Playing || transport.state() == State::Held)
@@ -217,7 +220,7 @@ bool Controller::routesValid() const {
     }
     return true;
 }
-bool Controller::play() {
+bool Controller::play(bool fromAgent) {
     if (busy) return false;
     cancelPendingTestMidi();
     const State state = transport.state();
@@ -238,13 +241,13 @@ bool Controller::play() {
         if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return false; }
     }
     // Always enqueue Action::Play so a Play queued immediately after a Pause is honored in arrival order.
-    return postTransportCommand({Action::Play});
+    return postTransportCommand({Action::Play, 0, fromAgent ? transport.agentEpoch() : 0});
 }
-bool Controller::pause() {
+bool Controller::pause(bool fromAgent) {
     if (busy) return false;
     // Always enqueue Action::Pause (never Play) so a Pause queued behind Play runs in order and
     // a Playing → Held transition can never accidentally resume a hold.
-    if (!postTransportCommand({Action::Pause})) return false;
+    if (!postTransportCommand({Action::Pause, 0, fromAgent ? transport.agentEpoch() : 0})) return false;
     if (!device.streamActive()) transport.render(nullptr, 0, 0);
     return true;
 }
@@ -252,17 +255,19 @@ bool Controller::toggle() {
     if (busy) return false;
     return effectiveState() == State::Playing ? pause() : play();
 }
-bool Controller::seek(Frame time) {
+bool Controller::seek(Frame time, bool fromAgent) {
     if (busy || showMode) { report(showMode ? "Leave show mode to jump on the timeline" : "Media is loading"); return false; }
-    if (!postTransportCommand({Action::Seek, time})) return false;
+    if (!postTransportCommand({Action::Seek, time, fromAgent ? transport.agentEpoch() : 0})) return false;
     if (!device.streamActive()) transport.render(nullptr, 0, 0);
     lastComposed_ = -1;
     return true;
 }
-bool Controller::stopAll() {
+bool Controller::stopAll(bool fromAgent) {
     cancelPendingTestMidi();
-    if (!postTransportCommand({Action::StopAll})) {
-        // Emergency Stop All must never be rejected by a full bounded command queue.
+    const Command cmd{Action::StopAll, 0, fromAgent ? transport.agentEpoch() : 0};
+    if (!postTransportCommand(cmd)) {
+        if (fromAgent) return false;
+        // Emergency operator Stop All must never be rejected by a full bounded command queue.
         transport.requestStopAll();
         predictedState_ = State::Stopped;
         lastPlaySeq_ = 0;
@@ -447,18 +452,19 @@ void Controller::cancelPendingTestMidi(const QString& owner) {
         std::erase_if(testMidiQueue_, [&](const PendingTestMidi& item) { return item.owner == owner; });
     }
 }
-bool Controller::testMidi(const std::vector<unsigned char>& bytes, const QString& owner) {
+bool Controller::testMidi(const std::vector<unsigned char>& bytes, const QString& owner,
+                          std::shared_ptr<std::atomic<bool>> ownerCancelled) {
     if (!canEdit() || bytes.empty()) return false;
     if (!validMidi(bytes)) { report("Complete the MIDI message before testing it."); return false; }
     if (!prepareMidi()) return false;
     // Dispatch off the GUI thread so Windows WinMM SysEx completion waits never freeze operator controls.
     {
         std::lock_guard lock(testMidiMutex_);
-        if (testMidiQueue_.size() >= 16) {
+        if (testMidiQueue_.size() >= 4) {
             report("Too many MIDI test messages are already queued; wait for them to finish.");
             return false;
         }
-        testMidiQueue_.push_back({bytes, transport.epoch(), testMidiGen_.load(std::memory_order_acquire), owner});
+        testMidiQueue_.push_back({bytes, transport.epoch(), testMidiGen_.load(std::memory_order_acquire), owner, std::move(ownerCancelled)});
     }
     report("Test message queued for " + midi.name() + ". External devices may keep playing until they receive a stop message.");
     return true;
@@ -472,7 +478,10 @@ const Marker* Controller::nextCue() const {
 void Controller::setShowMode(bool enabled) {
     showMode = enabled;
     showModeAtomic_.store(enabled, std::memory_order_release);
-    if (enabled) cancelPendingTestMidi();
+    if (enabled) {
+        transport.invalidateAgentCommands();
+        cancelPendingTestMidi();
+    }
     emit changed();
 }
 QImage Controller::compose() {

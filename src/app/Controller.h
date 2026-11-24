@@ -43,10 +43,10 @@ public:
     std::size_t redoCount() const { return redo_.size(); }
     void replace(Project next, QString projectPath = {}, bool markDirty = false);
     bool toggle();
-    bool play();
-    bool pause();
-    bool seek(Frame position);
-    bool stopAll();
+    bool play(bool fromAgent = false);
+    bool pause(bool fromAgent = false);
+    bool seek(Frame position, bool fromAgent = false);
+    bool stopAll(bool fromAgent = false);
     // Reflects queued transport commands immediately before the next audio callback publishes them.
     State effectiveState() const;
     Frame effectivePosition() const;
@@ -57,7 +57,8 @@ public:
     bool audioConfigured() const { return configured_; }
     bool configureMidi(int port);
     bool configureMidiByName(const QString& portName);
-    bool testMidi(const std::vector<unsigned char>& message, const QString& owner = {});
+    bool testMidi(const std::vector<unsigned char>& message, const QString& owner = {},
+                  std::shared_ptr<std::atomic<bool>> ownerCancelled = {});
     void cancelPendingTestMidi(const QString& owner = {});
     bool needsMidi() const;
     // Offline sources and vanished videos used on the timeline.
@@ -105,6 +106,7 @@ private:
         std::uint64_t epoch = 0;
         std::uint64_t gen = 0;
         QString owner;
+        std::shared_ptr<std::atomic<bool>> ownerCancelled;
     };
     std::mutex testMidiMutex_;
     std::deque<PendingTestMidi> testMidiQueue_;

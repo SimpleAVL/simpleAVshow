@@ -680,8 +680,8 @@ private slots:
                      QString("ready"));
         }
 
-        // 21. Emergency Stop All succeeds even when the 128-slot transport command queue is full of Play commands,
-        //     and discards queued Play commands without firing a hold's resume MIDI cue.
+        // 21. Queued Continue + Stop All (both normal and full-queue) discards Continue without firing resume MIDI,
+        //     and invalidated agent transport commands are skipped before execution.
         {
             Controller c;
             Project p = newProject();
@@ -695,6 +695,24 @@ private slots:
             QCOMPARE(c.transport.state(), State::Held);
             MidiEvent ev;
             while (c.transport.takeMidi(ev)) {}
+            // Ordinary queued Continue followed by StopAll must not publish resume MIDI.
+            QVERIFY(c.transport.command({Action::Play}));
+            QVERIFY(c.transport.command({Action::StopAll}));
+            c.transport.render(buf, 1, 2);
+            QCOMPARE(c.transport.state(), State::Stopped);
+            QVERIFY(!c.transport.takeMidi(ev));
+            // Re-enter Held and verify agent-originated Continue is skipped after invalidation (e.g., Show mode/Disconnect).
+            c.transport.command({Action::Seek, 0});
+            c.transport.command({Action::Play});
+            c.transport.render(buf, 1, 2);
+            QCOMPARE(c.transport.state(), State::Held);
+            while (c.transport.takeMidi(ev)) {}
+            QVERIFY(c.transport.command({Action::Play, 0, c.transport.agentEpoch()}));
+            c.transport.invalidateAgentCommands();
+            c.transport.render(buf, 1, 2);
+            QCOMPARE(c.transport.state(), State::Held);
+            QVERIFY(!c.transport.takeMidi(ev));
+            // Full-queue emergency Stop All also discards queued Play without firing resume MIDI.
             for (int i = 0; i < 200; ++i) c.transport.command({Action::Play});
             c.transport.requestStopAll();
             QVERIFY(!c.transport.command({Action::Play}));

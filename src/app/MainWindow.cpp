@@ -1357,6 +1357,9 @@ bool MainWindow::eventFilter(QObject* object, QEvent* event) {
     auto* plainEdit = qobject_cast<QPlainTextEdit*>(widget);
     const bool editing = (lineEdit && !lineEdit->isReadOnly()) || (textEdit && !textEdit->isReadOnly()) ||
         (plainEdit && !plainEdit->isReadOnly()) || qobject_cast<QAbstractSpinBox*>(widget) || qobject_cast<QComboBox*>(widget);
+    // Let keyboard-focused buttons/checkboxes in the Agent Chat drawer handle Space/Backspace
+    // normally so pressing Space on Disconnect or a permission card never triggers playback.
+    const bool chatControl = agentChat_ && agentChat_->isAncestorOf(widget) && qobject_cast<QAbstractButton*>(widget);
     // Outside Show mode Escape is Stop All unless it cancels a field edit. In Show mode a stray press
     // must not end the performance: two presses within 600 ms stop everything (the button still takes one click).
     if (key->key() == Qt::Key_Escape && !key->isAutoRepeat() && (c_.showMode || !editing)) {
@@ -1365,8 +1368,8 @@ bool MainWindow::eventFilter(QObject* object, QEvent* event) {
         else { escape_.start(); c_.report("Press Escape again to Stop All."); }
         return true;
     }
-    if (key->key() == Qt::Key_Space && !editing && key->modifiers() == Qt::NoModifier) { if (!key->isAutoRepeat()) c_.toggle(); return true; }
-    if ((key->key() == Qt::Key_Delete || key->key() == Qt::Key_Backspace) && !editing && !qobject_cast<QTableWidget*>(widget)) { if (!key->isAutoRepeat()) deleteSelection(); return true; }
+    if (key->key() == Qt::Key_Space && !editing && !chatControl && key->modifiers() == Qt::NoModifier) { if (!key->isAutoRepeat()) c_.toggle(); return true; }
+    if ((key->key() == Qt::Key_Delete || key->key() == Qt::Key_Backspace) && !editing && !chatControl && !qobject_cast<QTableWidget*>(widget)) { if (!key->isAutoRepeat()) deleteSelection(); return true; }
     return QMainWindow::eventFilter(object, event);
 }
 

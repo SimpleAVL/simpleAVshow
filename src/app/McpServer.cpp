@@ -399,6 +399,7 @@ void McpServer::invalidateEditSession() {
     editSessionCancelled_ = std::make_shared<std::atomic<bool>>(false);
     if (importCancelled_) importCancelled_->store(true);
     importCancelled_ = std::make_shared<std::atomic<bool>>(false);
+    c_.transport.invalidateAgentCommands();
     c_.cancelPendingTestMidi();
     releaseAllBusyLeases();
     if (importState_ == "preparing" || importState_ == "ready") {
@@ -416,6 +417,7 @@ bool McpServer::start(quint16 port) {
     if (!server_.listen(QHostAddress::LocalHost, port)) return false;
     token_ = newId() + newId(); editing_ = false; externallyShared_ = false;
     chatTokens_.clear();
+    chatTokenCancelled_.clear();
     issuedSessions_.clear();
     bearerSessions_.clear();
     sessionOrder_.clear();
@@ -427,6 +429,10 @@ bool McpServer::start(quint16 port) {
 }
 void McpServer::stop() {
     ++generation_;
+    for (auto it = chatTokenCancelled_.cbegin(); it != chatTokenCancelled_.cend(); ++it) {
+        if (it.value()) it.value()->store(true, std::memory_order_release);
+    }
+    chatTokenCancelled_.clear();
     invalidateEditSession();
     invalidatePreviews();
     const auto inflight = inflightRequests_;
@@ -447,11 +453,14 @@ QString McpServer::issueChatToken() {
     if (!running()) return {};
     const QString tok = newId() + newId();
     chatTokens_.insert(tok);
+    chatTokenCancelled_.insert(tok, std::make_shared<std::atomic<bool>>(false));
     return tok;
 }
 void McpServer::revokeChatToken(const QString& token) {
     if (token.isEmpty()) return;
     chatTokens_.remove(token);
+    if (auto cancelFlag = chatTokenCancelled_.take(token)) cancelFlag->store(true, std::memory_order_release);
+    c_.transport.invalidateAgentCommands();
     const auto removedSessions = bearerSessions_.take(token);
     for (const auto& sid : removedSessions) {
         issuedSessions_.remove(sid);
@@ -1307,7 +1316,7 @@ QJsonObject McpServer::seekAndSelectTool(const QJsonObject& a) {
                 [&](const Marker& m) { return m.id == markerId.toStdString(); }))
             fail("Unknown marker ID");
     }
-    if (targetTime && !c_.seek(*targetTime)) fail(c_.status);
+    if (targetTime && !c_.seek(*targetTime, true)) fail(c_.status);
     if (host_.selectItem && (track >= 0 || !clipId.isEmpty() || !markerId.isEmpty()))
         host_.selectItem(track, clipId, markerId);
     const Frame reportedPos = c_.effectivePosition();
@@ -1407,11 +1416,16 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a, const QString&
             plannedMidiName = QString();
         } else {
             const auto ports = c_.midi.ports();
-            QString resolved;
-            for (const auto& p : ports) if (p == portName) { resolved = p; break; }
-            if (resolved.isEmpty()) for (const auto& p : ports) if (p.compare(portName, Qt::CaseInsensitive) == 0) { resolved = p; break; }
-            if (resolved.isEmpty()) fail("MIDI port not found: " + portName);
-            plannedMidiName = resolved;
+            QStringList exactMatches, ciMatches;
+            for (const auto& p : ports) {
+                if (p == portName) exactMatches << p;
+                else if (p.compare(portName, Qt::CaseInsensitive) == 0) ciMatches << p;
+            }
+            const QStringList& matches = !exactMatches.isEmpty() ? exactMatches : ciMatches;
+            if (matches.isEmpty()) fail("MIDI port not found: " + portName);
+            if (matches.size() > 1 && !(c_.midi.connected() && matches.contains(c_.midi.name())))
+                fail(QString("Multiple MIDI ports match “%1”; choose the destination manually in Outputs").arg(portName));
+            plannedMidiName = portName;
         }
     }
 
@@ -1453,6 +1467,8 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a, const QString&
                 fail("Invalid MIDI byte");
             bytes.push_back(static_cast<unsigned char>(v.toDouble()));
         }
+        if (cfg["message"].toArray().size() > 64)
+            fail("test_midi.message cannot exceed 64 bytes");
         if (!validMidi(bytes)) fail("Complete the MIDI message before testing it");
         if (plannedMidiName && plannedMidiName->isEmpty())
             fail("Cannot send test_midi while disconnecting MIDI output");
@@ -1487,7 +1503,7 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a, const QString&
         applied << "display";
     }
     if (plannedTestMidi) {
-        if (!c_.testMidi(*plannedTestMidi, bearerToken)) failPartial(c_.status);
+        if (!c_.testMidi(*plannedTestMidi, bearerToken, chatTokenCancelled_.value(bearerToken))) failPartial(c_.status);
     }
 
     return toolResult(environmentReport());
@@ -1539,6 +1555,7 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
 
     if (action == "new_show" || action == "open_demo") {
         if (c_.dirty && !discard) fail("Current show has unsaved changes. Save first or pass discard_unsaved: true");
+        if (c_.dirty && discard) c_.discardAutosave();
         if (action == "new_show") {
             c_.replace(newProject());
             emit showModified("Agent created a new show.");
@@ -1713,6 +1730,13 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
                         {"revision", static_cast<double>(revision_)}}, true));
                     return;
                 }
+                if (c_.dirty && discard) {
+                    const QString currentAuto = c_.autosavePath();
+                    const QString openedCanon = QFileInfo(path).canonicalFilePath();
+                    const QString autoCanon = QFileInfo(currentAuto).canonicalFilePath();
+                    if (path != currentAuto && (openedCanon.isEmpty() || openedCanon != autoCanon))
+                        c_.discardAutosave();
+                }
                 c_.replace(std::move(loaded.project), targetPath, pkg || autosave);
                 emit showModified("Agent opened " + QFileInfo(path).fileName() + ".");
                 auto result = snapshot(); result.insert("action", action); result.insert("target_path", targetPath);
@@ -1737,14 +1761,14 @@ QJsonObject McpServer::transportControlTool(const QJsonObject& a) {
     bool accepted = true;
     if (action == "play" || action == "continue") {
         // Explicit play/continue never toggles a Playing show into Pause.
-        accepted = c_.play();
+        accepted = c_.play(true);
         if (!accepted) fail(c_.playbackProblem.isEmpty() ? c_.status : c_.playbackProblem);
     } else if (action == "pause") {
         // Explicit pause never queues Play, even if the audio callback just entered Held.
-        accepted = c_.pause();
+        accepted = c_.pause(true);
         if (!accepted) fail(c_.status);
     } else if (action == "stop_all") {
-        accepted = c_.stopAll();
+        accepted = c_.stopAll(true);
         if (!accepted) fail(c_.status);
     } else if (action == "seek") {
         const auto v = a["time"];
@@ -1752,7 +1776,7 @@ QJsonObject McpServer::transportControlTool(const QJsonObject& a) {
             fail("Provide a valid integer frame time for seek");
         const Frame target = static_cast<Frame>(v.toDouble());
         if (target > c_.project.show.duration) fail("Seek time exceeds project duration");
-        accepted = c_.seek(target);
+        accepted = c_.seek(target, true);
         if (!accepted) fail(c_.status);
     } else {
         fail("Unknown transport action: " + action);

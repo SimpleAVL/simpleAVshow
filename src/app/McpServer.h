@@ -50,6 +50,7 @@ private:
     QTcpServer server_;
     QString token_;
     QSet<QString> chatTokens_;
+    QMap<QString, std::shared_ptr<std::atomic<bool>>> chatTokenCancelled_;
     QMap<QString, QString> issuedSessions_; // Mcp-Session-Id -> issuing bearer token
     QMap<QString, QStringList> bearerSessions_; // bearer token -> FIFO session IDs
     QStringList sessionOrder_; // global FIFO session IDs

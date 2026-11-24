@@ -141,6 +141,10 @@ void Transport::dispatch(int marker) noexcept {
     if (!show_->markers[marker].message.empty() && !midi_.push({marker, position_, epoch_.load()})) overflow_.store(true);
 }
 void Transport::apply(Command command) noexcept {
+    if (command.agentEpoch != 0 && command.agentEpoch != agentEpoch_.load(std::memory_order_acquire)) {
+        ++applied_;
+        return;
+    }
     switch (command.action) {
     case Action::Play:
         if (state_ == State::Playing || (position_ >= show_->duration && state_ != State::Held)) break;
@@ -202,8 +206,24 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
         applyStopAll();
         urgentStop_.store(false, std::memory_order_release);
     } else {
-        Command command;
-        while (commands_.pop(command)) apply(command);
+        // Coalesce up to the last valid StopAll in the pending batch so a queued Continue/Play
+        // preceding StopAll cannot publish a resume MIDI cue before StopAll advances the epoch.
+        Command batch[128];
+        std::size_t countQueued = 0;
+        const std::uint64_t validAgent = agentEpoch_.load(std::memory_order_acquire);
+        int lastStop = -1;
+        while (countQueued < 128 && commands_.pop(batch[countQueued])) {
+            const auto& c = batch[countQueued];
+            if (c.action == Action::StopAll && (c.agentEpoch == 0 || c.agentEpoch == validAgent))
+                lastStop = static_cast<int>(countQueued);
+            ++countQueued;
+        }
+        std::size_t startIndex = 0;
+        if (lastStop >= 0) {
+            applied_ += static_cast<std::uint64_t>(lastStop);
+            startIndex = static_cast<std::size_t>(lastStop);
+        }
+        for (std::size_t i = startIndex; i < countQueued; ++i) apply(batch[i]);
     }
     float peak = 0; bool waiting = false;
     for (unsigned f = 0; f < count; ++f) {

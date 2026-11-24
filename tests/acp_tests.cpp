@@ -257,7 +257,7 @@ private slots:
             QVERIFY(badReplies[reqId]["error"].isObject());
         }
 
-        // 5. Verify --mcp-proxy automatically reinitializes and retries when an expired Mcp-Session-Id gets HTTP 404.
+        // 5. Verify --mcp-proxy automatically reinitializes (including notifications/initialized) and retries on HTTP 404.
         int reinitStep = 0;
         QTcpServer sessionServer;
         QVERIFY(sessionServer.listen(QHostAddress::LocalHost, 0));
@@ -275,7 +275,9 @@ private slots:
                 } else if (step == 2) {
                     const QByteArray body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"t\",\"version\":\"1\"}}}";
                     s->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: sid-2\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
-                } else if (raw.contains("sid-2")) {
+                } else if (step == 3 && raw.contains("sid-2") && raw.contains("notifications/initialized")) {
+                    s->write("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                } else if (step == 4 && raw.contains("sid-2")) {
                     const QByteArray body = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}";
                     s->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
                 } else {
@@ -297,7 +299,7 @@ private slots:
         const auto pingOut = QJsonDocument::fromJson(reinitProxy.readAllStandardOutput().trimmed()).object();
         QCOMPARE(pingOut["id"].toInt(), 2);
         QVERIFY(pingOut["result"].isObject());
-        QCOMPARE(reinitStep, 4);
+        QCOMPARE(reinitStep, 5);
 
         // 6. Verify --mcp-proxy does NOT replay a mutating write after stdin EOF during 404 session recovery.
         int eofStep = 0;
@@ -586,6 +588,16 @@ private slots:
         QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
         QVERIFY(window.mcpServer().running());
         window.mcpServer().stop();
+
+        // Space on a focused chat control button must activate the button, NOT trigger playback.
+        connectButton->setFocus();
+        QTest::keyClick(connectButton, Qt::Key_Space);
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
+        QCOMPARE(window.controller().transport.state(), State::Stopped);
+        connectButton->setFocus();
+        QTest::keyClick(connectButton, Qt::Key_Space);
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
+        QCOMPARE(window.controller().transport.state(), State::Stopped);
 
         // Read-only chat transcript must NOT intercept Space (Space should reach Controller::toggle).
         transcript->setFocus();
