@@ -26,7 +26,8 @@ public:
     bool showMode = false, dirty = false, busy = false;
     QString path, status = "Press Play to use your speakers. Choose show equipment in Outputs.", audioName;
     QString playbackProblem;
-    Frame position() const { return transport.position(); }
+    // While disarmed after a failed arm, the position Play will arm at (seeks move it).
+    Frame position() const { return armFailed_ ? pendingPosition_ : transport.position(); }
     // The operator's next cue: later than the playhead, or at it unless that hold is already holding.
     const Marker* nextCue() const;
     bool canEdit(bool report = true);
@@ -86,6 +87,9 @@ private:
     bool configured_ = false;
     QString midiName_;
     QString midiProblem_; // The playback problem MIDI last reported; a reconnect clears only that.
+    // The last arm failed: nothing is armed, and Play arms at pendingPosition_ (updated by seeks).
+    bool armFailed_ = false;
+    Frame pendingPosition_ = 0;
     std::map<std::string, std::unique_ptr<VideoReader>> videos_;
     std::shared_ptr<const Show> armed_;
     std::thread midiThread_;
@@ -97,7 +101,8 @@ private:
     Frame lastComposed_ = -1;
     std::vector<Frame> lastClocks_;
     std::deque<Project> undo_, redo_;
-    void arm(Frame position);
+    bool arm(Frame position); // False when preparing playback failed; see armFailed_.
+    void armOrThrow(Frame position);
     void startMidiThread();
     void watchMidi();
     void stopMidiThread();

@@ -91,7 +91,7 @@ void Transport::disarm() noexcept {
     show_.reset(); buffers_.clear(); voices_.clear(); releases_.clear(); releasing_.clear();
     starts_.clear(); markers_.clear(); active_.clear(); pictures_.clear();
     publishedSourceCount_ = 0; publishedSources_.reset(); state_ = State::Stopped; heldMarker_ = -1;
-    publishedState_.store(State::Stopped); publishedVoices_.store(0);
+    publishedState_.store(State::Stopped); publishedVoices_.store(0); armed_.store(false);
 }
 void Transport::load(std::shared_ptr<const Show> show, Frame position) {
     stopAudioWorker();

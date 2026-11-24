@@ -82,7 +82,8 @@ void Controller::replace(Project next, QString projectPath) {
     auto retired = std::move(project); auto retiredUndo = std::move(undo_), retiredRedo = std::move(redo_);
     project = std::move(next); path = std::move(projectPath); dirty = false; playbackProblem.clear();
     undo_.clear(); redo_.clear();
-    arm(0); report("Project ready. Space plays or pauses; Stop All stops async audio and video."); emit changed();
+    if (arm(0)) report("Project ready. Space plays or pauses; Stop All stops async audio and video.");
+    emit changed();
 }
 void Controller::undo() {
     if (!canEdit() || undo_.empty()) return;
@@ -94,7 +95,19 @@ void Controller::redo() {
     undo_.push_back(std::move(project)); project = std::move(redo_.back()); redo_.pop_back(); dirty = true;
     arm(std::min(position(), project.show.duration)); emit changed();
 }
-void Controller::arm(Frame position) {
+bool Controller::arm(Frame position) {
+    // Callers have already committed their change; a failure (out of memory, no worker thread) must not
+    // escape into Qt or leave the previous snapshot playing. The stream closes (so the device watchdog
+    // keeps quiet), the transport disarms, and Play or the next edit arms again at the kept position.
+    try { armOrThrow(position); armFailed_ = false; return true; }
+    catch (const std::exception& e) {
+        device.close(); configured_ = false; transport.disarm();
+        armFailed_ = true; pendingPosition_ = std::clamp(position, Frame{0}, project.show.duration);
+        report("Playback could not be prepared: " + QString::fromUtf8(e.what()) + ". Press Play to try again.");
+        playbackProblem = status; return false;
+    }
+}
+void Controller::armOrThrow(Frame position) {
     stopMidiThread();
     // The callback must be stopped before configure; a healthy stream only pauses.
     const bool keep = configured_ && device.running();
@@ -150,14 +163,11 @@ void Controller::toggle() {
     const bool recovering = !playing && !playbackProblem.isEmpty();
     QString warning; // A problem this resume continues past; reconnecting a device must not clear it.
     if (!playing) {
-        // A configure that failed partway left nothing armed; preparing again comes first.
-        if (!transport.armed()) {
-            try { arm(position()); }
-            catch (const std::exception& e) { report("Playback could not be prepared: " + QString::fromUtf8(e.what())); playbackProblem = status; return; }
-        }
+        // A failed arm left nothing armed; preparing again (at any position sought since) comes first.
+        if ((armFailed_ || !transport.armed()) && !arm(armFailed_ ? pendingPosition_ : position())) return;
         playbackProblem.clear();
         // Re-arming retries sources that were briefly unavailable; changed sources still need reopening.
-        if (transport.audioReadFailed() && state != State::Held && !transport.asyncVoices()) arm(position());
+        if (transport.audioReadFailed() && state != State::Held && !transport.asyncVoices() && !arm(position())) return;
         if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and press Play to retry, or reopen the project to rebuild changed or damaged caches."); playbackProblem = status; return; }
         // Resuming a live show never blocks on picture or MIDI; it warns and continues.
         const bool resuming = state == State::Held || transport.asyncVoices() || (state == State::Paused && device.running());
@@ -176,6 +186,8 @@ void Controller::toggle() {
 }
 void Controller::seek(Frame time) {
     if (busy || showMode) { report(showMode ? "Leave show mode to jump on the timeline" : "Media is loading"); return; }
+    // Disarmed after a failed arm: the transport cannot take the seek, so it is where Play arms again.
+    if (armFailed_) { pendingPosition_ = std::clamp(time, Frame{0}, project.show.duration); lastComposed_ = -1; return; }
     if (!transport.command({Action::Seek, time})) report("Transport command queue is full");
     if (!device.running()) transport.render(nullptr, 0, 0);
     lastComposed_ = -1;
@@ -255,9 +267,8 @@ Controller::AudioSwap Controller::replaceAudio(const QMap<QString, std::shared_p
         try { swap(candidate); validate(candidate); p = std::move(candidate); } catch (const std::exception&) {}
     }
     // Committed: a failure to re-arm leaves the transport disarmed (Play retries) and the new audio in place.
-    project = std::move(next); auto outcome = AudioSwap::Applied;
-    try { arm(std::min(position(), project.show.duration)); }
-    catch (const std::exception& e) { report("Audio was reloaded, but playback could not be prepared: " + QString::fromUtf8(e.what())); playbackProblem = status; outcome = AudioSwap::ArmFailed; }
+    project = std::move(next);
+    const auto outcome = arm(std::min(position(), project.show.duration)) ? AudioSwap::Applied : AudioSwap::ArmFailed;
     emit changed(); return outcome;
 }
 QStringList Controller::preflight() {

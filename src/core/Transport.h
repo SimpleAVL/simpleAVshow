@@ -55,6 +55,8 @@ public:
     std::uint64_t epoch() const noexcept { return epoch_.load(std::memory_order_acquire); }
     // False after a configure that failed partway: nothing plays until a configure succeeds.
     bool armed() const noexcept { return armed_.load(); }
+    // Drops the show (the device MUST be stopped): silence until the next configure.
+    void disarm() noexcept;
 private:
     enum class VoiceState { Dormant, Running, Finished };
     // source is the async cursor; at is this sample's resolved frame and next follows the last mixed one.
@@ -96,7 +98,6 @@ private:
     void publish(float peak) noexcept;
     void stopAudioWorker();
     void load(std::shared_ptr<const Show> show, Frame position);
-    void disarm() noexcept;
     void locate(Frame position) noexcept;
     Frame entry(std::size_t clip, Frame position) const noexcept;
     void prime() noexcept;
