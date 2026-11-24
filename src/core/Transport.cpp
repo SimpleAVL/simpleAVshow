@@ -147,17 +147,23 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
         ++applied_;
         return;
     }
+    auto higherPrivilege = [](CommandSource a, CommandSource b) noexcept {
+        return (a == CommandSource::Operator && b != CommandSource::Operator) ||
+               (a == CommandSource::ExternalAgent && b == CommandSource::ChatAgent);
+    };
     switch (command.action) {
     case Action::Play: {
         if (state_ == State::Playing) {
             // If an operator (or higher-privilege domain) also pressed Play in the same batch after
-            // an agent started playback, promote the pending start so late agent revocation
-            // cannot roll back the operator's Play.
-            if (pendingStart.active &&
-                ((command.source == CommandSource::Operator && pendingStart.source != CommandSource::Operator) ||
-                 (command.source == CommandSource::ExternalAgent && pendingStart.source == CommandSource::ChatAgent))) {
+            // an agent started playback, promote the pending start and hold-resume authorization so
+            // late agent revocation cannot roll back the higher-privilege Play.
+            if (pendingStart.active && higherPrivilege(command.source, pendingStart.source)) {
                 pendingStart.source = command.source;
                 pendingStart.sourceEpoch = command.sourceEpoch;
+            }
+            if (pendingStart.wasHeld && higherPrivilege(command.source, pendingStart.resumeSource)) {
+                pendingStart.resumeSource = command.source;
+                pendingStart.resumeEpoch = command.sourceEpoch;
             }
             break;
         }
@@ -174,18 +180,46 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
             epoch_.fetch_add(1);
             break;
         }
-        std::size_t begin = nextMarker_;
+        pendingStart.active = true;
+        pendingStart.source = command.source;
+        pendingStart.sourceEpoch = command.sourceEpoch;
+        pendingStart.prevState = prevState;
+        pendingStart.prevHeldMarker = prevHeldMarker;
         if (wasHeld) {
+            std::size_t begin = nextMarker_;
             while (begin > 0 && show_->markers[markers_[begin - 1]].time == position_) --begin;
+            pendingStart.wasHeld = true;
+            pendingStart.begin = begin;
+            pendingStart.end = nextMarker_;
+            pendingStart.resumeSource = command.source;
+            pendingStart.resumeEpoch = command.sourceEpoch;
+            pendingStart.resumePrevState = prevState;
+            pendingStart.resumePrevHeldMarker = prevHeldMarker;
+        } else if (pendingStart.wasHeld && higherPrivilege(command.source, pendingStart.resumeSource)) {
+            pendingStart.resumeSource = command.source;
+            pendingStart.resumeEpoch = command.sourceEpoch;
         }
-        pendingStart = {true, wasHeld, begin, nextMarker_, command.source, command.sourceEpoch, prevState, prevHeldMarker};
         break;
     }
     case Action::Pause:
         if (state_ == State::Playing) state_ = State::Paused;
         break;
     case Action::Seek: {
-        pendingStart.active = false;
+        // Seeking cancels any pending hold-resume MIDI, but MUST preserve pendingStart.active
+        // and its initiating source/epoch when Play preceded Seek in the same batch so a queued
+        // Seek cannot bypass the first-sample Play authorization check.
+        pendingStart.wasHeld = false;
+        if (pendingStart.active) {
+            pendingStart.prevState = State::Paused;
+            pendingStart.prevHeldMarker = -1;
+        }
+        if (command.source != CommandSource::Operator) {
+            pendingStart.seekCueActive = true;
+            pendingStart.seekCueSource = command.source;
+            pendingStart.seekCueEpoch = command.sourceEpoch;
+        } else {
+            pendingStart.seekCueActive = false;
+        }
         const Frame next = std::clamp(command.position, Frame{0}, show_->duration);
         for (std::size_t i = 0; i < show_->clips.size(); ++i) {
             if (!show_->clips[i].contains(next)) { cut(i); voices_[i] = {}; }
@@ -197,7 +231,7 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
         break;
     }
     case Action::StopAll:
-        pendingStart.active = false;
+        pendingStart = {};
         applyStopAll();
         break;
     }
@@ -303,7 +337,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
         };
         for (std::size_t i = startIndex; i < countQueued; ++i) {
             if (urgentStop_.load(std::memory_order_acquire)) {
-                pendingStart.active = false;
+                pendingStart = {};
                 applyUrgentStop(i);
                 break;
             }
@@ -329,33 +363,46 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             apply(c, pendingStart);
         }
     }
-    // Verify the initiating Play source right at the first-sample rendering boundary (and on
+    // Verify the initiating Play/resume source right at the first-sample rendering boundary (and on
     // zero-frame renders) so callback preemption before sample 0 cannot start audio or fire
     // arrival/resume cues after Disconnect, New, or Show-mode entry.
-    if (pendingStart.active) {
+    if (pendingStart.active || pendingStart.wasHeld) {
         if (urgentStop_.load(std::memory_order_acquire)) {
             applyUrgentStop(countQueued);
-            pendingStart.active = false;
-        } else if (pendingStart.source != CommandSource::Operator &&
-                   !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
-            state_ = pendingStart.prevState;
-            heldMarker_ = pendingStart.prevHeldMarker;
-            epoch_.fetch_add(1);
-            pendingStart.active = false;
-        } else if (pendingStart.wasHeld && (state_ == State::Playing || state_ == State::Paused)) {
-            // Only the consumed group at this hold can send resume messages, and only after
-            // confirming no StopAll or Seek later in the same batch superseded the resume.
-            for (auto m = pendingStart.begin; m < pendingStart.end; ++m) {
-                const auto i = markers_[m]; const auto& marker = show_->markers[i];
-                if (marker.hold && marker.timing == MidiTiming::Resume)
-                    dispatch(static_cast<int>(i), pendingStart.source, pendingStart.sourceEpoch);
-            }
-            if (pendingStart.source != CommandSource::Operator &&
+            pendingStart = {};
+        } else {
+            if (pendingStart.active && pendingStart.source != CommandSource::Operator &&
                 !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
                 state_ = pendingStart.prevState;
                 heldMarker_ = pendingStart.prevHeldMarker;
                 epoch_.fetch_add(1);
                 pendingStart.active = false;
+            }
+            if (pendingStart.wasHeld && (state_ == State::Playing || state_ == State::Paused)) {
+                if (pendingStart.resumeSource != CommandSource::Operator &&
+                    !isSourceValid(pendingStart.resumeSource, pendingStart.resumeEpoch)) {
+                    state_ = pendingStart.resumePrevState;
+                    heldMarker_ = pendingStart.resumePrevHeldMarker;
+                    epoch_.fetch_add(1);
+                    pendingStart.wasHeld = false;
+                    pendingStart.active = false;
+                } else {
+                    // Only the consumed group at this hold can send resume messages, and only after
+                    // confirming no StopAll or Seek later in the same batch superseded the resume.
+                    for (auto m = pendingStart.begin; m < pendingStart.end; ++m) {
+                        const auto i = markers_[m]; const auto& marker = show_->markers[i];
+                        if (marker.hold && marker.timing == MidiTiming::Resume)
+                            dispatch(static_cast<int>(i), pendingStart.resumeSource, pendingStart.resumeEpoch);
+                    }
+                    if (pendingStart.resumeSource != CommandSource::Operator &&
+                        !isSourceValid(pendingStart.resumeSource, pendingStart.resumeEpoch)) {
+                        state_ = pendingStart.resumePrevState;
+                        heldMarker_ = pendingStart.resumePrevHeldMarker;
+                        epoch_.fetch_add(1);
+                        pendingStart.wasHeld = false;
+                        pendingStart.active = false;
+                    }
+                }
             }
         }
     }
@@ -372,22 +419,36 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 epoch_.fetch_add(1);
                 pendingStart.active = false;
             }
-            const bool advancingAtBoundary = state_ == State::Playing;
+            bool advancingAtBoundary = state_ == State::Playing;
             if (state_ == State::Playing) {
                 const std::size_t savedNextStart = nextStart_;
                 const std::size_t savedNextMarker = nextMarker_;
                 const std::size_t savedActiveSize = active_.size();
-                const CommandSource cueSource = (f == 0 && pendingStart.active) ? pendingStart.source : CommandSource::Operator;
-                const std::uint64_t cueEpoch = (f == 0 && pendingStart.active) ? pendingStart.sourceEpoch : 0;
+                CommandSource cueSource = CommandSource::Operator;
+                std::uint64_t cueEpoch = 0;
+                bool suppressSeekCue = false;
+                if (f == 0) {
+                    if (pendingStart.active && pendingStart.source != CommandSource::Operator) {
+                        cueSource = pendingStart.source;
+                        cueEpoch = pendingStart.sourceEpoch;
+                    } else if (pendingStart.seekCueActive) {
+                        cueSource = pendingStart.seekCueSource;
+                        cueEpoch = pendingStart.seekCueEpoch;
+                    }
+                    if (pendingStart.seekCueActive &&
+                        !isSourceValid(pendingStart.seekCueSource, pendingStart.seekCueEpoch)) {
+                        suppressSeekCue = true;
+                    }
+                }
                 while (nextStart_ < starts_.size() && show_->clips[starts_[nextStart_]].start <= position_) {
                     const auto i = starts_[nextStart_++];
                     if (show_->clips[i].contains(position_)) active_.push_back(i);
                 }
                 while (nextMarker_ < markers_.size() && show_->markers[markers_[nextMarker_]].time == position_) {
                     const auto i = markers_[nextMarker_++]; const auto& marker = show_->markers[i];
-                    if (marker.timing == MidiTiming::Arrival) dispatch(static_cast<int>(i), cueSource, cueEpoch);
+                    if (marker.timing == MidiTiming::Arrival && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch);
                     if (marker.hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); }
-                    else if (marker.timing == MidiTiming::Resume) dispatch(static_cast<int>(i), cueSource, cueEpoch);
+                    else if (marker.timing == MidiTiming::Resume && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch);
                 }
                 if (f == 0 && pendingStart.active && pendingStart.source != CommandSource::Operator &&
                     !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
@@ -398,6 +459,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                     heldMarker_ = pendingStart.prevHeldMarker;
                     epoch_.fetch_add(1);
                     pendingStart.active = false;
+                    advancingAtBoundary = false;
                 }
                 if (state_ == State::Playing && position_ >= show_->duration) {
                     state_ = State::Ended; for (std::size_t i = 0; i < voices_.size(); ++i) cut(i);

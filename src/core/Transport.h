@@ -115,12 +115,19 @@ private:
     }
     struct PendingPlayStart {
         bool active = false;
-        bool wasHeld = false;
-        std::size_t begin = 0, end = 0;
         CommandSource source = CommandSource::Operator;
         std::uint64_t sourceEpoch = 0;
         State prevState = State::Stopped;
         int prevHeldMarker = -1;
+        bool wasHeld = false;
+        std::size_t begin = 0, end = 0;
+        CommandSource resumeSource = CommandSource::Operator;
+        std::uint64_t resumeEpoch = 0;
+        State resumePrevState = State::Stopped;
+        int resumePrevHeldMarker = -1;
+        bool seekCueActive = false;
+        CommandSource seekCueSource = CommandSource::Operator;
+        std::uint64_t seekCueEpoch = 0;
     };
     void apply(Command command, PendingPlayStart& pendingStart) noexcept;
     void applyStopAll() noexcept;

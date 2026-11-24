@@ -450,6 +450,16 @@ int main() {
             t.command({Action::Play, 0, CommandSource::ChatAgent, freshEp});
             checkedRender(t, out.data(), 64, 2);
             expect(t.state() == State::Stopped, "same-batch agent play cannot defeat operator stop");
+            // Same-batch Play followed by Seek still tags the landing arrival MIDI with the Play initiator's epoch.
+            p->markers.push_back({"mid", "Mid", 300, false, MidiTiming::Arrival, {0x90, 67, 100}});
+            t.configure(p);
+            const auto seekEp = t.chatAgentEpoch();
+            t.command({Action::Play, 0, CommandSource::ChatAgent, seekEp});
+            t.command({Action::Seek, 300, CommandSource::Operator, 0});
+            checkedRender(t, out.data(), 64, 2);
+            expect(t.state() == State::Playing, "play followed by seek starts playing at target");
+            expect(t.takeMidi(ev) && ev.source == CommandSource::ChatAgent && ev.sourceEpoch == seekEp,
+                "same-batch seek after agent play preserves initiating agent epoch on arrival MIDI");
         }}
     };
     for (const auto& [name, test] : tests) {
