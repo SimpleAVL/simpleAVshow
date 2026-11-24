@@ -1565,6 +1565,22 @@ private slots:
         setModified(path, time); QCOMPARE(QFileInfo(path).lastModified(), time);
         QVERIFY_THROWS_EXCEPTION(std::runtime_error, summary.save(detail::AudioSummary{44100, false, {}, {}}));
     }
+    void reusedSummaryRechecksRecentSources() {
+        // The same rewrite after hashing must not be accepted with the old summary when one exists already.
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; const auto path = dir.filePath("recent-reuse.wav");
+        auto bytes = waveBytes(16, 1, 2, 44100, false, 44100); bytes.replace(bytes.size() - 4, 4, QUuid::createUuid().toRfc4122().first(4));
+        writeBytes(path, bytes); const auto time = QFileInfo(path).lastModified();
+        QVERIFY(loadMedia(path).audio); // Saves the summary.
+        const detail::StreamSummary summary(path, "wav");
+        QVERIFY(summary.reuse(false));
+        {
+            QFile file(path); QVERIFY(file.open(QIODevice::ReadWrite)); QVERIFY(file.seek(bytes.size() - 4000));
+            QCOMPARE(file.write(QByteArray(4000, '\x40')), 4000);
+        }
+        setModified(path, time); QCOMPARE(QFileInfo(path).lastModified(), time);
+        QVERIFY_THROWS_EXCEPTION(std::runtime_error, summary.verify());
+    }
     void streamedAudioCallbackHeadroom() {
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
         QTemporaryDir dir; QVERIFY(dir.isValid()); setAudioPreparation(AudioPreparation::Stream);

@@ -4,15 +4,16 @@
 #include <QUuid>
 #include <QImageReader>
 #include <QTemporaryFile>
-#include <QThreadPool>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #ifdef Q_OS_WIN
 #include <windows.h>
 #else
@@ -383,7 +384,7 @@ public:
     // version: the file as the import hashed it, before decoding; anything else at the path is a change.
     StreamStorage(QString path, Frame length, AudioDecoder::SeekPoints points, detail::FileVersion version)
         : path_(std::move(path)), length_(length), points_(std::move(points)), version_(version) {
-        const std::lock_guard lock(registry().mutex); registry().storages.push_back(this);
+        const std::lock_guard lock(registry().mutex); registry().storages.push_back(this); id_ = ++registry().clock;
     }
     ~StreamStorage() override { const std::lock_guard lock(registry().mutex); std::erase(registry().storages, this); }
     Frame length() const noexcept override { return length_; }
@@ -396,16 +397,15 @@ public:
         const std::lock_guard lock(mutex_); ++reads_;
         // A missing or changed source releases its open decoders first, so their handles do not keep a
         // deleted file's name reserved (Windows) or pin an old copy while the operator restores it.
-        // A file whose identity cannot be read (gone since the check, or deleted while open on Windows,
-        // where the name stays until handles close) is unavailable too: retried, not reported as changed.
-        const bool exists = QFileInfo::exists(path_);
-        const auto current = exists ? detail::fileVersion(path_) : detail::FileVersion{};
-        if (!exists || (current.identity == detail::FileIdentity{} && version_.identity != detail::FileIdentity{})) {
+        // A file deleted while open on Windows keeps its name until handles close; it is not present, so
+        // unavailable too: retried, not reported as changed. An identity the file system does not report
+        // right now is not a change (sameAs).
+        if (!QFileInfo::exists(path_) || !detail::present(path_)) {
             readers_.clear(); throw std::runtime_error("Audio source is unavailable: " + path_.toStdString());
         }
         // File identity also catches a replacement saved with the same size and modification time;
         // an in-place rewrite that keeps both is not detected.
-        if (!current.sameAs(version_)) { readers_.clear(); throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString()); }
+        if (!detail::fileVersion(path_).sameAs(version_)) { readers_.clear(); throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString()); }
         Reader* reader = nullptr;
         try {
             pick(first, reader);
@@ -442,46 +442,52 @@ private:
         std::atomic<std::size_t> open{0};
         std::atomic<std::uint64_t> clock{0};
     };
-    static Registry& registry() { static Registry instance; return instance; }
+    // Never destroyed: a background sweep may still hold it while the process exits.
+    static Registry& registry() { static auto* instance = new Registry; return *instance; }
 public:
     // Sources reading right now are skipped (their locks are only tried), and so is any decoder read
     // within idleAfter: a playing clip reads every block, so only idle decoders close.
-    // wait: check presence before returning (tests); otherwise that runs on a worker, one sweep at a time.
+    // wait: finish before returning (tests); otherwise presence checks and closing run on a worker.
     static void closeIdle(bool wait) {
         constexpr auto idleAfter = std::chrono::seconds(3);
         const auto now = std::chrono::steady_clock::now();
-        struct Open { const StreamStorage* storage; QString path; std::uint64_t reads; };
+        struct Open { const StreamStorage* storage; std::uint64_t id, reads; QString path; };
         std::vector<Open> open;
+        std::vector<std::unique_ptr<Reader>> retired; // Closed without locks held: closing can stall on a share.
         {
             auto& r = registry(); const std::lock_guard lock(r.mutex);
             for (const auto* storage : r.storages) {
                 const std::unique_lock other(storage->mutex_, std::try_to_lock); if (!other) continue;
-                std::erase_if(storage->readers_, [&](const auto& reader) { return now - reader->usedAt >= idleAfter; });
-                if (!storage->readers_.empty()) open.push_back({storage, storage->path_, storage->reads_});
+                auto& readers = storage->readers_;
+                const auto idle = std::stable_partition(readers.begin(), readers.end(), [&](const auto& reader) { return now - reader->usedAt < idleAfter; });
+                std::move(idle, readers.end(), std::back_inserter(retired)); readers.erase(idle, readers.end());
+                if (!readers.empty()) open.push_back({storage, storage->id_, storage->reads_, storage->path_});
             }
         }
-        if (open.empty()) return;
         // A source deleted while open (FAT/exFAT on Windows) keeps its name until its handles close:
-        // release them so the file can be restored or replaced under that name. Checking a file can
-        // stall (network shares), so it runs off the UI thread and without locks that reads need.
+        // release them so the file can be restored or replaced under that name. Checks and closes can
+        // stall (network shares), so they run on a detached thread, one sweep at a time, without locks
+        // that reads need; the app can quit without waiting for one.
         static std::atomic<bool> sweeping{false};
-        if (sweeping.exchange(true)) return;
-        auto sweep = [open = std::move(open)]() mutable {
+        if (open.empty() && retired.empty()) return;
+        if (sweeping.exchange(true)) { if (wait) retired.clear(); return; }
+        auto sweep = [open = std::move(open), retired = std::move(retired)]() mutable {
+            retired.clear();
             std::erase_if(open, [](const Open& entry) { return detail::present(entry.path); });
-            if (!open.empty()) {
-                auto& r = registry(); const std::lock_guard lock(r.mutex);
-                for (const auto& entry : open) {
-                    // Skip a storage that has gone (or one now at its address reading another file), and
-                    // one read since: the file came back.
+            for (const auto& entry : open) {
+                std::vector<std::unique_ptr<Reader>> gone;
+                {
+                    auto& r = registry(); const std::lock_guard lock(r.mutex);
+                    // Only the same registration, not read since: otherwise the file came back.
                     const auto* storage = entry.storage;
-                    if (std::find(r.storages.begin(), r.storages.end(), storage) == r.storages.end() || storage->path_ != entry.path) continue;
+                    if (std::find(r.storages.begin(), r.storages.end(), storage) == r.storages.end() || storage->id_ != entry.id) continue;
                     const std::unique_lock other(storage->mutex_, std::try_to_lock);
-                    if (other && storage->reads_ == entry.reads) storage->readers_.clear();
+                    if (other && storage->reads_ == entry.reads) gone = std::move(storage->readers_);
                 }
             }
             sweeping = false;
         };
-        if (wait) sweep(); else QThreadPool::globalInstance()->start(std::move(sweep));
+        if (wait) sweep(); else std::thread(std::move(sweep)).detach();
     }
 private:
     // Reading forward this far decodes through instead of seeking.
@@ -504,6 +510,7 @@ private:
     mutable std::mutex mutex_;
     mutable std::vector<std::unique_ptr<Reader>> readers_;
     mutable std::uint64_t reads_ = 0; // Under mutex_: lets the sweep tell whether a read happened since it looked.
+    std::uint64_t id_ = 0; // Unique per registration, unlike the address.
     // Sets reader before seeking it, so a failed seek discards that decoder.
     void pick(Frame frame, Reader*& reader) const {
         for (const auto& r : readers_) {

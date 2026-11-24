@@ -79,6 +79,7 @@ private:
     QString source_, path_;
     QByteArray stamp_, sourceHash_;
     bool indexed_ = false, recent_ = false;
+    void contentUnchanged() const;
     FileVersion version_;
 };
 

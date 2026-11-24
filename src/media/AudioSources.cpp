@@ -5,6 +5,7 @@
 #include <QDataStream>
 #include <QDateTime>
 #include <QDir>
+#include <cerrno>
 #include <QFile>
 #include <QFileInfo>
 #include <QLockFile>
@@ -63,7 +64,10 @@ bool present(const QString& path) {
     return error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND && error != ERROR_ACCESS_DENIED &&
         error != ERROR_DELETE_PENDING && error != ERROR_INVALID_NAME;
 #else
-    return QFileInfo(path).isFile();
+    // Only definite absence counts; other failures (a mount briefly unreachable) are retried by reads.
+    struct stat info{};
+    if (::stat(QFile::encodeName(path).constData(), &info)) return errno != ENOENT && errno != ENOTDIR;
+    return S_ISREG(info.st_mode);
 #endif
 }
 FileVersion fileVersion(const QString& path) {
@@ -422,16 +426,21 @@ std::optional<AudioSummary> StreamSummary::reuse(bool mono) const {
     touch(path_); // Least-recently-used trimming.
     return summary;
 }
-void StreamSummary::verify() const { unchangedSince(source_, stamp_); }
+void StreamSummary::verify() const {
+    unchangedSince(source_, stamp_);
+    // A recently modified file can be rewritten within its timestamp step after it was hashed.
+    if (recent_) contentUnchanged();
+}
+void StreamSummary::contentUnchanged() const {
+    if (fileHash(source_) == sourceHash_) return;
+    updateIndex(stamp(source_), {});
+    fail("Audio source changed during preparation; import it again");
+}
 void StreamSummary::save(const AudioSummary& summary) const {
     verify();
-    // An indexed hash can predate a rewrite that kept size, time and identity, and a recently modified
-    // file can be rewritten within its timestamp step; the summary is filed under content that other
-    // copies share, so then it is checked against the file. Otherwise the stamp check above covers it.
-    if ((indexed_ || recent_) && fileHash(source_) != sourceHash_) {
-        updateIndex(stamp(source_), {});
-        fail("Audio source changed during preparation; import it again");
-    }
+    // An indexed hash can predate a rewrite that kept size, time and identity; the summary is filed under
+    // content that other copies share, so it is checked against the file (verify did for recent files).
+    if (indexed_ && !recent_) contentUnchanged();
     if (!QDir().mkpath(audioCacheDirectory())) return;
     QByteArray bytes(streamMagic, 8); bytes += revisionId();
     char number[8]; qToLittleEndian<qint64>(summary.length, number); bytes.append(number, 8); bytes.append(char(summary.mono));
