@@ -1715,6 +1715,7 @@ private slots:
         const auto shorter = loadMedia([&] { const auto f = dir.filePath("short.wav"); writeBytes(f, waveBytes(16, 1, 2, 44100, false, 44100)); return f; }()).audio;
         QVERIFY(c.replaceAudio({{streamed.path, shorter}}));
         QCOMPARE(c.project.assets[streamed.id].duration, seconds(shorter->length())); // New clips use the reloaded length.
+        c.save(dir.filePath("show.savshow")); QVERIFY2(!c.dirty, qPrintable(c.status)); // Saving must not rebind history to the new audio.
         c.undo(); QCOMPARE(c.project.show.clips[0].offset, frames(1.5)); QCOMPARE(c.project.show.clips[0].audio, prepared);
     }
     void manyStreamedSourcesShareABoundedDecoderBudget() {
@@ -1742,6 +1743,16 @@ private slots:
         for (int i = 0; i < 200 && transport.position() == show->clips[150].start; ++i) { QTest::qWait(2); transport.render(out.data(), 512, 2); }
         QVERIFY(!transport.audioReadFailed()); QVERIFY(transport.position() > show->clips[150].start);
 #endif
+    }
+    void manifestsThatReferToOtherFilesAreRejected() {
+        // Two identical manifests can name different files, so their bytes cannot identify the audio.
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
+        QTemporaryDir dir; QProcess process;
+        process.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=1", dir.filePath("cue.flac")});
+        QVERIFY(process.waitForFinished(30000)); QCOMPARE(process.exitCode(), 0);
+        const auto manifest = dir.filePath("show.ffconcat"); writeBytes(manifest, "ffconcat version 1.0\nfile cue.flac\n");
+        for (const auto preparation : {AudioPreparation::Prepared, AudioPreparation::Stream})
+            QVERIFY_THROWS_EXCEPTION(std::runtime_error, loadMedia(manifest, preparation));
     }
     void explicitPreparationOverridesThePreference() {
         // A batch prepares as it was asked to, even if the operator changes the preference meanwhile.

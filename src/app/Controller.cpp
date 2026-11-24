@@ -162,7 +162,7 @@ void Controller::toggle() {
         if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return; }
     }
     if (!transport.command({playing ? Action::Pause : Action::Play})) report("Transport command queue is full");
-    else if (recovering) report("Playback resumed."); // Replaces the resolved problem in the status bar.
+    else if (recovering && playbackProblem.isEmpty()) report("Playback resumed."); // Replaces the resolved problem in the status bar.
 }
 void Controller::seek(Frame time) {
     if (busy || showMode) { report(showMode ? "Leave show mode to jump on the timeline" : "Media is loading"); return; }
@@ -459,7 +459,9 @@ void Controller::commitSave(Project candidate, QString target) {
         for (auto* history : {&undo_, &redo_}) for (auto& snapshot : *history) {
             bool extracted = false;
             for (auto it = snapshot.assets.begin(); it != snapshot.assets.end(); ++it) {
-                if (const auto saved = project.assets.constFind(it.key()); saved != project.assets.cend()) { it->path = saved->path; it->audio = saved->audio; }
+                // Only media Save moved (extracted package files, generated audio) follows the saved copy; other
+                // snapshots keep their own audio, which a preparation reload may have left valid for them alone.
+                if (const auto saved = project.assets.constFind(it.key()); saved != project.assets.cend() && saved->path != it->path) { it->path = saved->path; it->audio = saved->audio; }
                 else extracted |= sourceDirectory && it->path.startsWith(sourceDirectory->path() + "/");
             }
             if (!extracted) snapshot.packageDirectory.reset();
