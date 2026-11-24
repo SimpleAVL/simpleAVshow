@@ -200,7 +200,8 @@ bool Controller::configureMidi(int port) {
 bool Controller::openMidi(int port) {
     stopMidiThread();
     QString error; const bool ok = midi.open(port, error); startMidiThread();
-    if (ok) { midiName_ = midi.name(); QSettings().setValue("midi/port", midiName_); playbackProblem.clear(); }
+    // A reconnect resolves MIDI problems only; a missing-media warning outlives it.
+    if (ok) { midiName_ = midi.name(); QSettings().setValue("midi/port", midiName_); if (playbackProblem.contains("MIDI")) playbackProblem.clear(); }
     report(ok ? (port < 0 ? "MIDI output disconnected" : "MIDI output: " + midi.name()) : error); return ok;
 }
 void Controller::setLateAudio(LateAudio policy) {
@@ -471,7 +472,8 @@ void Controller::commitSave(Project candidate, QString target) {
                 if (const auto from = moved.constFind(it.key()); from != moved.cend() && *from == it->path) {
                     const auto& saved = project.assets[it.key()]; it->path = saved.path; it->audio = saved.audio;
                 }
-                else extracted |= sourceDirectory && it->path.startsWith(sourceDirectory->path() + "/");
+                // Each snapshot keeps its own extraction alive while any of its media still lives there.
+                else extracted |= snapshot.packageDirectory && it->path.startsWith(snapshot.packageDirectory->path() + "/");
             }
             if (!extracted) snapshot.packageDirectory.reset();
             bindAudio(snapshot);

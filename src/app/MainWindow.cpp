@@ -807,8 +807,7 @@ void MainWindow::reloadAudio() {
         const auto [audio, errors] = watcher->result(); c_.busy = false; progress->deleteLater(); watcher->deleteLater();
         if (!audio.isEmpty() && !c_.replaceAudio(audio)) return;
         if (!errors.isEmpty()) QMessageBox::warning(this, "Some audio kept its previous preparation", errors.join("\n\n"));
-        else c_.report(preparing ? QString("Prepared %1 audio sources. Playback reads cached samples.").arg(audio.size())
-                                 : QString("%1 audio sources now stream from their media files.").arg(audio.size()));
+        else c_.report(QString("Audio sources set to %1; reloaded %2 audio sources.").arg(preparing ? "Prepared cache" : "Stream").arg(audio.size()));
     });
     watcher->setFuture(QtConcurrent::run([paths, preparation = audioPreparation()]() {
         Reloaded result;

@@ -1758,6 +1758,26 @@ private slots:
         c.save(dir.filePath("show.savshow")); QVERIFY2(!c.dirty, qPrintable(c.status));
         c.undo(); QCOMPARE(c.project.assets[original.id].path, original.path); QCOMPARE(c.project.assets[original.id].audio, original.audio);
     }
+    void undoKeepsPackageMediaAliveAcrossSaves() {
+        // Opened package, relink the extracted file to an outside copy, Save twice, Undo: the
+        // extracted original the undo step still uses must outlive both saves.
+        QTemporaryDir dir; const auto source = dir.filePath("cue.wav"); writeBytes(source, waveBytes(16, 1, 2, sampleRate, false, 48000 + 31));
+        auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}};
+        auto asset = loadMedia(source); project.assets.insert(asset.id, asset);
+        Clip clip; clip.id = "a"; clip.assetId = asset.id.toStdString(); clip.audio = asset.audio; clip.duration = asset.audio->length(); project.show.clips.push_back(clip);
+        const auto package = dir.filePath("show.savpack"); writeProjectPackage(project, package);
+        Controller c; c.replace(readProject(package)); const auto extracted = c.project.assets[asset.id].path;
+        QVERIFY(c.project.packageDirectory); QVERIFY(extracted.startsWith(c.project.packageDirectory->path()));
+        const auto outside = dir.filePath("outside.wav"); QVERIFY(QFile::copy(source, outside));
+        auto relinked = loadMedia(outside); relinked.id = asset.id; relinked.name = asset.name;
+        QVERIFY(c.edit([&](Project& p) { p.assets.insert(relinked.id, relinked); }));
+        c.save(dir.filePath("one.savshow")); QVERIFY2(!c.dirty, qPrintable(c.status));
+        QVERIFY(c.edit([](Project& p) { p.title = "Second save"; }));
+        c.save(dir.filePath("two.savshow")); QVERIFY2(!c.dirty, qPrintable(c.status));
+        c.undo(); c.undo();
+        QCOMPARE(c.project.assets[asset.id].path, extracted); QVERIFY(QFileInfo::exists(extracted));
+    }
     void manifestsThatReferToOtherFilesAreRejected() {
         // Two identical manifests can name different files, so their bytes cannot identify the audio.
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
@@ -1767,6 +1787,11 @@ private slots:
         const auto manifest = dir.filePath("show.ffconcat"); writeBytes(manifest, "ffconcat version 1.0\nfile cue.flac\n");
         for (const auto preparation : {AudioPreparation::Prepared, AudioPreparation::Stream})
             QVERIFY_THROWS_EXCEPTION(std::runtime_error, loadMedia(manifest, preparation));
+        // Refused from its bytes, before FFmpeg would open the playlist and fetch its (missing) segment.
+        const auto playlist = dir.filePath("show.m3u8");
+        writeBytes(playlist, "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nmissing-segment.ts\n#EXT-X-ENDLIST\n");
+        try { loadMedia(playlist); QFAIL("playlist imported"); }
+        catch (const std::runtime_error& e) { QVERIFY2(QString::fromUtf8(e.what()).startsWith("Playlists"), e.what()); }
     }
     void explicitPreparationOverridesThePreference() {
         // A batch prepares as it was asked to, even if the operator changes the preference meanwhile.
