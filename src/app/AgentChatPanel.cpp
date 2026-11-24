@@ -810,7 +810,12 @@ void AgentChatPanel::renderTranscript() {
     }
     renderPending_ = false;
     auto* bar = transcript_->verticalScrollBar();
-    const bool stickToBottom = !bar || bar->value() >= bar->maximum() - 24;
+    const int prevScroll = bar ? bar->value() : 0;
+    const bool stickToBottom = !bar || prevScroll >= bar->maximum() - 24;
+    const QTextCursor prevCursor = transcript_->textCursor();
+    const bool hadSelection = prevCursor.hasSelection();
+    const int prevAnchor = prevCursor.anchor();
+    const int prevPos = prevCursor.position();
 
     QString html = "<html><body style='margin:0;padding:2px;color:#dee7f3;font-family:\"Segoe UI\",\"Helvetica Neue\",Arial;font-size:12px;'>";
     if (entries_.empty()) {
@@ -868,7 +873,14 @@ void AgentChatPanel::renderTranscript() {
     }
     html += "</body></html>";
     transcript_->setHtml(html);
-    if (stickToBottom && bar) bar->setValue(bar->maximum());
+    if (hadSelection) {
+        const int maxPos = std::max(0, transcript_->document()->characterCount() - 1);
+        QTextCursor restored = transcript_->textCursor();
+        restored.setPosition(std::clamp(prevAnchor, 0, maxPos));
+        restored.setPosition(std::clamp(prevPos, 0, maxPos), QTextCursor::KeepAnchor);
+        transcript_->setTextCursor(restored);
+    }
+    if (bar) bar->setValue(stickToBottom ? bar->maximum() : std::min(prevScroll, bar->maximum()));
 }
 
 void AgentChatPanel::addPermissionCard(const AcpPermissionRequest& request) {

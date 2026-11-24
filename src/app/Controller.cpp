@@ -458,7 +458,14 @@ QStringList Controller::preflight(bool probeHardware) {
             if (!playbackDevice(device.devices(api), remembered))
                 problems << (remembered.isEmpty() ? "No audio output is available." : "Audio output “" + remembered + "” is missing.");
         } catch (const std::exception& e) { problems << "Cannot check audio outputs: " + QString::fromUtf8(e.what()); }
-    } else if (device.running() && !routesValid()) problems << "A track is routed to more outputs than the audio interface provides.";
+    } else if (!device.running()) {
+        const QString remembered = QSettings().value("audio/device").toString();
+        problems << (remembered.isEmpty()
+            ? QString("Audio output is not connected.")
+            : QString("Audio output “%1” is not connected.").arg(remembered));
+    } else if (!routesValid()) {
+        problems << "A track is routed to more outputs than the audio interface provides.";
+    }
     return problems;
 }
 QStringList Controller::missingMedia(bool probeFilesystem) const {

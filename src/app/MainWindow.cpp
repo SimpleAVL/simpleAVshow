@@ -1236,8 +1236,9 @@ void MainWindow::requestShowMode(bool enabled) {
     }
     c_.setShowMode(enabled);
 }
-void MainWindow::openPath(const QString& path, bool discardPreviousAutosave) {
+void MainWindow::openPath(const QString& rawPath, bool discardPreviousAutosave) {
     if (!c_.canEdit()) return;
+    const QString path = QFileInfo(rawPath).absoluteFilePath();
     const quint64 initialRev = c_.projectRevision();
     const QString previousAutosave = discardPreviousAutosave ? c_.autosavePath() : QString();
     // A sidecar opens as unsaved edits to its show, so Save replaces the show rather than writing "x.savshow.autosave.savshow".
@@ -1251,14 +1252,25 @@ void MainWindow::openPath(const QString& path, bool discardPreviousAutosave) {
         }
     }
     if (recovered) target = path == Controller::untitledAutosavePath() ? QString() : target.chopped(QString(".autosave").size());
-    else if (const QFileInfo sidecar(target + ".autosave"); !target.isEmpty() && sidecar.exists() && sidecar.lastModified() > QFileInfo(target).lastModified()) {
-        QMessageBox box(QMessageBox::Question, "Recover unsaved changes?",
-            "An autosave of “" + QFileInfo(path).fileName() + "” from " + QLocale().toString(sidecar.lastModified(), QLocale::ShortFormat) + " is newer than the saved show.",
-            QMessageBox::NoButton, this);
-        box.setInformativeText("Recovering opens the autosave as unsaved changes. Opening the saved show keeps the autosave until the next autosave or save replaces it.");
-        auto* recover = box.addButton("Recover autosave", QMessageBox::AcceptRole);
-        box.addButton("Open saved show", QMessageBox::RejectRole); box.setDefaultButton(recover); box.exec();
-        if (box.clickedButton() == recover) { source = sidecar.filePath(); recovered = true; }
+    else if (!target.isEmpty()) {
+        // Check both the canonical show's sidecar and (for legacy symlink opens) the symlink's own sidecar.
+        const QDateTime savedMtime = QFileInfo(target).lastModified();
+        QFileInfo newestSidecar;
+        for (const QString& candidatePath : {target + ".autosave", path + ".autosave"}) {
+            const QFileInfo candidate(candidatePath);
+            if (!candidate.exists() || candidate.lastModified() <= savedMtime) continue;
+            if (!newestSidecar.exists() || candidate.lastModified() > newestSidecar.lastModified())
+                newestSidecar = candidate;
+        }
+        if (newestSidecar.exists()) {
+            QMessageBox box(QMessageBox::Question, "Recover unsaved changes?",
+                "An autosave of “" + QFileInfo(target).fileName() + "” from " + QLocale().toString(newestSidecar.lastModified(), QLocale::ShortFormat) + " is newer than the saved show.",
+                QMessageBox::NoButton, this);
+            box.setInformativeText("Recovering opens the autosave as unsaved changes. Opening the saved show keeps the autosave until the next autosave or save replaces it.");
+            auto* recover = box.addButton("Recover autosave", QMessageBox::AcceptRole);
+            box.addButton("Open saved show", QMessageBox::RejectRole); box.setDefaultButton(recover); box.exec();
+            if (box.clickedButton() == recover) { source = newestSidecar.filePath(); recovered = true; }
+        }
     }
     if (!c_.canEdit() || c_.projectRevision() != initialRev) { c_.report("Open cancelled because the show changed."); return; }
     const quint64 lease = c_.acquireBusy();

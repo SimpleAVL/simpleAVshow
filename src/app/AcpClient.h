@@ -151,6 +151,7 @@ private:
     QMap<int, PendingPermission> pendingPermissions_;
     QHash<QString, KnownToolCall> knownToolCalls_;
     QStringList knownToolCallOrder_;
+    qsizetype knownToolCallsBytes_ = 0;
     std::vector<RetiringProcess> retiringProcesses_;
     std::vector<std::shared_ptr<ProcessTreeHandle>> retiringTrees_;
     QTimer deadlineTimer_;

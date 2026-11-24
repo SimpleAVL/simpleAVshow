@@ -89,7 +89,7 @@ The top-bar button always tells you what the agent can do right now: **Agent · 
 | `seek_and_select` | Jumps the playhead and/or selects a track, clip, or marker in the timeline and inspector (never sends MIDI). |
 | `list_media_files` | Lists supported audio, video, and image files in a local folder before importing. |
 | `import_media` | Starts background preparation for up to 64 absolute local file paths; returns a `job_id`. |
-| `get_import` | Polls an import job until `ready` or `failed`, returning prepared asset IDs and metadata. |
+| `get_import` | Polls an import job until `ready`, `failed`, or `cancelled`, returning prepared asset IDs and metadata. |
 | `commit_import` | Adds the staged assets to the Media library as one undo step using a fresh show `revision`. |
 | `relink_media` | Searches a local folder recursively by file name to relink offline assets in one undo step. |
 | `configure_outputs` | Configures audio driver/device/channels/buffer, MIDI output port, audience display, or sends a single test MIDI message (stopped, outside Show mode). |

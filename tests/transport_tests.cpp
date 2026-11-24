@@ -503,6 +503,43 @@ int main() {
             }
             expect(dt.state() != State::Playing && dt.position() == farPos,
                 "revoked chat play stays stopped even after stalled disk read completes");
+            // An applied chat seek while stopped, followed by Disconnect and Operator Play, must NOT suppress the operator's cue.
+            t.configure(p);
+            const auto stoppedSeekEp = t.chatAgentEpoch();
+            t.command({Action::Seek, 300, CommandSource::ChatAgent, stoppedSeekEp});
+            checkedRender(t, out.data(), 16, 2);
+            t.invalidateChatAgentCommands();
+            t.command({Action::Play, 0, CommandSource::Operator, 0});
+            checkedRender(t, out.data(), 16, 2);
+            expect(t.takeMidi(ev) && ev.source == CommandSource::Operator,
+                "applied chat seek while stopped does not suppress later operator arrival MIDI after disconnect");
+            // Hold resume MIDI must not fire twice when chat disconnects during a disk cache miss on resume.
+            auto holdStorage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto hp = show(false); hp->duration = holdStorage->length(); hp->clips[0].duration = hp->duration; hp->clips[0].audio = diskAudio(holdStorage);
+            const Frame holdPos = frames(20 * 3600);
+            hp->markers.push_back({"h", "Hold", holdPos, true, MidiTiming::Resume, {0x90, 72, 100}});
+            Transport ht; ht.configure(hp);
+            ht.command({Action::Seek, holdPos, CommandSource::Operator, 0});
+            ht.command({Action::Play, 0, CommandSource::Operator, 0});
+            checkedRender(ht, dout.data(), 64, 2); // Hits hold at holdPos.
+            expect(ht.state() == State::Held && ht.position() == holdPos, "reaches hold marker on disk clip");
+            holdStorage->fail.store(true);
+            const auto holdChatEp = ht.chatAgentEpoch();
+            ht.command({Action::Play, 0, CommandSource::ChatAgent, holdChatEp});
+            checkedRender(ht, dout.data(), 64, 2); // Stalls on disk miss before mixing sample 0.
+            MidiEvent holdEv;
+            expect(!ht.takeMidi(holdEv), "hold resume MIDI waits for disk readiness");
+            ht.invalidateChatAgentCommands();
+            holdStorage->fail.store(false);
+            for (int i = 0; i < 100; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                checkedRender(ht, dout.data(), 8, 2);
+            }
+            expect(ht.state() == State::Held && !ht.takeMidi(holdEv), "disconnect during disk wait rolls back to Held without emitting resume MIDI");
+            ht.command({Action::Play, 0, CommandSource::Operator, 0});
+            checkedRender(ht, dout.data(), 64, 2);
+            expect(ht.state() == State::Playing && ht.takeMidi(holdEv) && !ht.takeMidi(holdEv),
+                "operator continue after rolled-back disk stall emits resume MIDI exactly once");
         }}
     };
     for (const auto& [name, test] : tests) {

@@ -514,7 +514,7 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
     agentName_.clear(); agentVersion_.clear(); sessionId_.clear(); lastError_.clear();
     agentSupportsHttpMcp_ = false; agentSupportsSessionClose_ = false; usedHttpMcp_ = false;
     stdoutBuffer_.clear(); pending_.clear(); pendingPermissions_.clear();
-    knownToolCalls_.clear(); knownToolCallOrder_.clear();
+    knownToolCalls_.clear(); knownToolCallOrder_.clear(); knownToolCallsBytes_ = 0;
     nextId_ = 1;
 
     process_ = new QProcess(this);
@@ -623,6 +623,7 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
             pendingPermissions_.clear();
             knownToolCalls_.clear();
             knownToolCallOrder_.clear();
+            knownToolCallsBytes_ = 0;
             stdoutBuffer_.clear();
             sessionId_.clear();
             if (auto tree = std::move(processTree_)) {
@@ -669,6 +670,7 @@ void AcpClient::startNewSession(const QString& cwd, const AcpMcpConfig& mcp) {
     cancelling_ = false;
     knownToolCalls_.clear();
     knownToolCallOrder_.clear();
+    knownToolCallsBytes_ = 0;
     sessionId_.clear();
     setState(AcpState::Connecting);
     armDeadline(handshakeTimeoutMs_, "Timed out waiting for ACP session creation.");
@@ -723,6 +725,7 @@ void AcpClient::disconnectFromAgent() {
     pendingPermissions_.clear();
     knownToolCalls_.clear();
     knownToolCallOrder_.clear();
+    knownToolCallsBytes_ = 0;
     stdoutBuffer_.clear();
     sessionId_.clear();
     teardownProcess(false);
@@ -921,6 +924,7 @@ void AcpClient::handleResponse(int id, const QJsonObject& msg) {
     } else if (kind == PendingKind::SessionNew) {
         knownToolCalls_.clear();
         knownToolCallOrder_.clear();
+        knownToolCallsBytes_ = 0;
         sessionId_ = result["sessionId"].toString();
         if (sessionId_.isEmpty()) {
             failConnection("ACP agent returned an empty sessionId.");
@@ -952,26 +956,30 @@ void AcpClient::handleNotification(const QString& method, const QJsonObject& par
         if (!text.isEmpty()) emit thoughtChunk(text);
     } else if (kind == "tool_call" || kind == "tool_call_update") {
         constexpr qsizetype maxPermissionDetailChars = 128 * 1024;
+        constexpr qsizetype maxTrackedTotalChars = 2 * 1024 * 1024; // ~4 MiB UTF-16 budget across all cached tool calls
         constexpr int maxTrackedToolCalls = 256;
+        auto clampStr = [](const QString& s, qsizetype limit) {
+            return s.size() > limit ? (s.left(limit) + "…") : s;
+        };
+        auto entrySize = [](const QString& idKey, const KnownToolCall& tc) {
+            return idKey.size() + tc.title.size() + tc.kind.size() + tc.rawInput.size() + tc.content.size();
+        };
         AcpToolCallUpdate call;
-        call.toolCallId = update["toolCallId"].toString();
-        call.title = update["title"].toString();
-        call.kind = update["kind"].toString();
-        call.status = update["status"].toString();
+        call.toolCallId = clampStr(update["toolCallId"].toString(), 256);
+        call.title = clampStr(update["title"].toString(), 256);
+        call.kind = clampStr(update["kind"].toString(), 64);
+        call.status = clampStr(update["status"].toString(), 64);
         const QString contentDetail = extractContentText(update["content"]);
         const QString rawInputDetail = update.contains("rawInput") ? summarizeJson(update["rawInput"]) : QString();
-        call.detail = contentDetail;
-        if (call.detail.isEmpty() && update.contains("rawOutput")) call.detail = summarizeJson(update["rawOutput"]);
-        if (call.detail.isEmpty() && !rawInputDetail.isEmpty()) call.detail = rawInputDetail;
-        if (!call.toolCallId.isEmpty()) {
-            const bool isNew = !knownToolCalls_.contains(call.toolCallId);
-            auto& tracked = knownToolCalls_[call.toolCallId];
-            if (isNew) {
-                knownToolCallOrder_.append(call.toolCallId);
-                while (knownToolCallOrder_.size() > maxTrackedToolCalls) {
-                    knownToolCalls_.remove(knownToolCallOrder_.takeFirst());
-                }
-            }
+        call.detail = clampStr(contentDetail, 4096);
+        if (call.detail.isEmpty() && update.contains("rawOutput")) call.detail = clampStr(summarizeJson(update["rawOutput"]), 4096);
+        if (call.detail.isEmpty() && !rawInputDetail.isEmpty()) call.detail = clampStr(rawInputDetail, 4096);
+        const QString rawToolCallId = update["toolCallId"].toString();
+        if (!rawToolCallId.isEmpty() && rawToolCallId.size() <= 512) {
+            const bool isNew = !knownToolCalls_.contains(rawToolCallId);
+            auto& tracked = knownToolCalls_[rawToolCallId];
+            if (!isNew) knownToolCallsBytes_ = std::max<qsizetype>(0, knownToolCallsBytes_ - entrySize(rawToolCallId, tracked));
+            if (isNew) knownToolCallOrder_.append(rawToolCallId);
             if (!call.title.isEmpty()) tracked.title = call.title;
             if (!call.kind.isEmpty()) tracked.kind = call.kind;
             if (!rawInputDetail.isEmpty()) {
@@ -990,6 +998,15 @@ void AcpClient::handleNotification(const QString& method, const QJsonObject& par
                 } else {
                     tracked.contentTooLarge = false;
                     tracked.content = contentDetail;
+                }
+            }
+            knownToolCallsBytes_ += entrySize(rawToolCallId, tracked);
+            while (knownToolCallOrder_.size() > maxTrackedToolCalls ||
+                   (knownToolCallsBytes_ > maxTrackedTotalChars && knownToolCallOrder_.size() > 1)) {
+                const QString evictId = knownToolCallOrder_.takeFirst();
+                if (auto it = knownToolCalls_.find(evictId); it != knownToolCalls_.end()) {
+                    knownToolCallsBytes_ = std::max<qsizetype>(0, knownToolCallsBytes_ - entrySize(evictId, it.value()));
+                    knownToolCalls_.erase(it);
                 }
             }
         }
@@ -1129,6 +1146,7 @@ void AcpClient::failConnection(const QString& message) {
     pendingPermissions_.clear();
     knownToolCalls_.clear();
     knownToolCallOrder_.clear();
+    knownToolCallsBytes_ = 0;
     stdoutBuffer_.clear();
     sessionId_.clear();
     teardownProcess(false);

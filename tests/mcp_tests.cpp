@@ -581,11 +581,12 @@ private slots:
             QVERIFY(window.windowTitle().contains("*"));
         }
 
-        // 15. get_preflight skips synchronous hardware probing during Show mode.
+        // 15. get_preflight skips synchronous hardware probing during Show mode and reports disconnected audio.
         {
             window.controller().setShowMode(true);
             const auto pfShow = call(server, "get_preflight")["structuredContent"].toObject();
             QCOMPARE(pfShow["hardware_probed"].toBool(), false);
+            QCOMPARE(pfShow["ready"].toBool(), false);
             window.controller().setShowMode(false);
         }
 

@@ -214,7 +214,9 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
             pendingStart.prevState = State::Paused;
             pendingStart.prevHeldMarker = -1;
         }
-        if (command.source != CommandSource::Operator) {
+        // Only tag seekCue when seeking while already Playing: a Seek while Stopped/Paused never
+        // fires MIDI on its own, and any subsequent Play establishes its own authorization epoch.
+        if (state_ == State::Playing && command.source != CommandSource::Operator) {
             pendingStart.seekCueActive = true;
             pendingStart.seekCueSource = command.source;
             pendingStart.seekCueEpoch = command.sourceEpoch;
@@ -391,9 +393,10 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                     heldMarker_ = pendingStart.resumePrevHeldMarker;
                     pendingStart.wasHeld = false;
                     pendingStart.active = false;
-                } else {
-                    // Only the consumed group at this hold can send resume messages, and only after
-                    // confirming no StopAll or Seek later in the same batch superseded the resume.
+                } else if (count == 0 || state_ == State::Paused) {
+                    // When no audio frame will be rendered (zero-frame render or same-batch Play+Pause),
+                    // dispatch hold-resume MIDI here. Otherwise defer until sample 0 passes disk readiness
+                    // so a disconnect during a disk stall cannot emit resume MIDI twice.
                     for (auto m = pendingStart.begin; m < pendingStart.end; ++m) {
                         const auto i = markers_[m]; const auto& marker = show_->markers[i];
                         if (marker.hold && marker.timing == MidiTiming::Resume)
@@ -405,26 +408,39 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                         heldMarker_ = pendingStart.resumePrevHeldMarker;
                         pendingStart.active = false;
                     }
+                    pendingStart.wasHeld = false;
                 }
+            } else if (pendingStart.wasHeld) {
                 pendingStart.wasHeld = false;
             }
-            if (state_ != State::Playing) {
-                pendingStart.active = false;
-                pendingStart.seekCueActive = false;
-            }
         }
+    }
+    if (state_ != State::Playing) {
+        pendingStart.active = false;
+        pendingStart.wasHeld = false;
+        pendingStart.seekCueActive = false;
     }
     float peak = 0; bool waiting = false;
     for (unsigned f = 0; f < count; ++f) {
         if (waiting && releasing_.empty()) break; // Remaining device samples stay silent; retry at the same show/source time.
         float* const frame = output ? output + static_cast<std::size_t>(f) * channels : nullptr;
         if (!waiting) {
-            if (f == 0 && pendingStart.active && state_ == State::Playing &&
-                pendingStart.source != CommandSource::Operator &&
-                !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
-                state_ = pendingStart.prevState;
-                heldMarker_ = pendingStart.prevHeldMarker;
-                pendingStart.active = false;
+            if (f == 0 && state_ == State::Playing) {
+                if (pendingStart.active && pendingStart.source != CommandSource::Operator &&
+                    !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
+                    state_ = pendingStart.prevState;
+                    heldMarker_ = pendingStart.prevHeldMarker;
+                    pendingStart.active = false;
+                    pendingStart.wasHeld = false;
+                    pendingStart.seekCueActive = false;
+                } else if (pendingStart.wasHeld && pendingStart.resumeSource != CommandSource::Operator &&
+                           !isSourceValid(pendingStart.resumeSource, pendingStart.resumeEpoch)) {
+                    state_ = pendingStart.resumePrevState;
+                    heldMarker_ = pendingStart.resumePrevHeldMarker;
+                    pendingStart.active = false;
+                    pendingStart.wasHeld = false;
+                    pendingStart.seekCueActive = false;
+                }
             }
             bool advancingAtBoundary = state_ == State::Playing;
             if (state_ == State::Playing) {
@@ -517,9 +533,37 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 voice.at = source; voice.ready = true;
             }
             if (!ready) { bufferWaits_.fetch_add(1, std::memory_order_relaxed); waiting = true; }
+            bool rolledBackOnReady = false;
+            if (!waiting && f == 0 && (pendingStart.active || pendingStart.wasHeld)) {
+                if (pendingStart.active && pendingStart.source != CommandSource::Operator &&
+                    !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
+                    state_ = pendingStart.prevState;
+                    heldMarker_ = pendingStart.prevHeldMarker;
+                    pendingStart.active = false;
+                    pendingStart.wasHeld = false;
+                    pendingStart.seekCueActive = false;
+                    rolledBackOnReady = true;
+                } else if (pendingStart.wasHeld && pendingStart.resumeSource != CommandSource::Operator &&
+                           !isSourceValid(pendingStart.resumeSource, pendingStart.resumeEpoch)) {
+                    state_ = pendingStart.resumePrevState;
+                    heldMarker_ = pendingStart.resumePrevHeldMarker;
+                    pendingStart.active = false;
+                    pendingStart.wasHeld = false;
+                    pendingStart.seekCueActive = false;
+                    rolledBackOnReady = true;
+                } else if (pendingStart.wasHeld) {
+                    // Disk is ready and the initiating resume is still valid: emit hold-resume MIDI once.
+                    for (auto m = pendingStart.begin; m < pendingStart.end; ++m) {
+                        const auto i = markers_[m]; const auto& marker = show_->markers[i];
+                        if (marker.hold && marker.timing == MidiTiming::Resume)
+                            dispatch(static_cast<int>(i), pendingStart.resumeSource, pendingStart.resumeEpoch);
+                    }
+                    pendingStart.wasHeld = false;
+                }
+            }
             // Voices that stop sounding fade out. A miss fades every voice; normal voices fade back in once ready.
-            for (const auto i : active_) if (waiting || !voices_[i].ready) cut(i);
-            if (!waiting) for (const auto i : active_) {
+            for (const auto i : active_) if (waiting || rolledBackOnReady || !voices_[i].ready) cut(i);
+            if (!waiting && !rolledBackOnReady) for (const auto i : active_) {
                 const auto& clip = show_->clips[i]; const auto& track = show_->tracks[clip.track]; auto& voice = voices_[i];
                 if (track.async && voice.state == VoiceState::Running) ++voice.source;
                 if (!voice.ready) continue;
@@ -562,8 +606,9 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             sample = std::clamp(sample, -1.f, 1.f);
         }
         if (!waiting) {
-            if (f == 0 && pendingStart.active) {
+            if (f == 0) {
                 pendingStart.active = false;
+                pendingStart.wasHeld = false;
                 pendingStart.seekCueActive = false;
             }
             if (state_ == State::Playing) ++position_;
