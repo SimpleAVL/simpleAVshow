@@ -70,16 +70,17 @@ public:
     SourceFile(const SourceFile&) = delete;
     SourceFile& operator=(const SourceFile&) = delete;
     AVIOContext* io() const noexcept { return io_; }
-    // Identity and size of the file actually open, whatever is at its path by now.
+    // Identity and size of the file actually open, whatever is at its path by now. Throws (retryably)
+    // when the open handle cannot be queried: that says nothing about whether the file changed.
     std::pair<detail::FileIdentity, qint64> opened() const {
 #ifdef Q_OS_WIN
         BY_HANDLE_FILE_INFORMATION info{};
-        if (!GetFileInformationByHandle(handle_, &info)) return {};
+        if (!GetFileInformationByHandle(handle_, &info)) throw std::runtime_error("Cannot query open media file");
         return {{info.dwVolumeSerialNumber, (quint64{info.nFileIndexHigh} << 32) | info.nFileIndexLow},
             static_cast<qint64>((quint64{info.nFileSizeHigh} << 32) | info.nFileSizeLow)};
 #else
         struct stat info{};
-        if (::fstat(fd_, &info)) return {};
+        if (::fstat(fd_, &info)) throw std::runtime_error("Cannot query open media file: " + std::string(std::strerror(errno)));
         return {{static_cast<quint64>(info.st_dev), static_cast<quint64>(info.st_ino)}, static_cast<qint64>(info.st_size)};
 #endif
     }
@@ -193,6 +194,7 @@ public:
     explicit AudioDecoder(QString path, SeekPoints points = {}, std::optional<detail::FileVersion> expected = {})
         : path_(std::move(path)), points_(std::move(points)), expected_(std::move(expected)) { open(); }
     bool mono() const noexcept { return mono_; }
+    QByteArray format() const { return input_->format->iformat->name; }
     // Record seek points during the coming linear decode (the import pass).
     void record() { recording_ = true; }
     std::vector<detail::SeekPoint> recorded() && { return ordered_ ? std::move(recorded_) : std::vector<detail::SeekPoint>{}; }
@@ -384,10 +386,16 @@ public:
         const std::lock_guard lock(mutex_);
         // A missing or changed source releases its open decoders first, so their handles do not keep a
         // deleted file's name reserved (Windows) or pin an old copy while the operator restores it.
-        if (!QFileInfo::exists(path_)) { readers_.clear(); throw std::runtime_error("Audio source is unavailable: " + path_.toStdString()); }
+        // A file whose identity cannot be read (gone since the check, or deleted while open on Windows,
+        // where the name stays until handles close) is unavailable too: retried, not reported as changed.
+        const bool exists = QFileInfo::exists(path_);
+        const auto current = exists ? detail::fileVersion(path_) : detail::FileVersion{};
+        if (!exists || (current.identity == detail::FileIdentity{} && version_.identity != detail::FileIdentity{})) {
+            readers_.clear(); throw std::runtime_error("Audio source is unavailable: " + path_.toStdString());
+        }
         // File identity also catches a replacement saved with the same size and modification time;
         // an in-place rewrite that keeps both is not detected.
-        if (detail::fileVersion(path_) != version_) { readers_.clear(); throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString()); }
+        if (current != version_) { readers_.clear(); throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString()); }
         Reader* reader = nullptr;
         try {
             pick(first, reader);
@@ -514,7 +522,9 @@ std::shared_ptr<const AudioData> loadAudio(const QString& path, AudioPreparation
     const QByteArray format = identify(path)->name;
     std::optional<detail::StreamSummary> summary; std::optional<detail::AudioCache> prepared;
     if (streaming) summary.emplace(path, format); else prepared.emplace(path, format);
-    AudioDecoder decoder(path);
+    // The decoder opens the file as hashed (or fails as changed) and must pick the demuxer the key names.
+    AudioDecoder decoder(path, {}, streaming ? summary->version() : prepared->version());
+    if (decoder.format() != format) throw std::runtime_error("Audio source changed during preparation; import it again");
     auto data = std::make_shared<AudioData>(); data->mono = decoder.mono();
     Frame first = 0; std::vector<float> samples;
     if (streaming) {

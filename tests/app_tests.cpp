@@ -1530,6 +1530,24 @@ private slots:
         try { asset.audio->storage->read(10, sample, 1); QFAIL("missing source read"); }
         catch (const AudioSourceChanged&) { QFAIL("a missing source can come back"); } catch (const std::runtime_error&) {}
     }
+    void streamSummaryRejectsStaleIndexedHash() {
+        // An in-place rewrite that keeps size, time and identity reuses the indexed hash of the old
+        // content; the summary would then be filed under content other copies share.
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; const auto path = dir.filePath("rewritten.wav");
+        auto bytes = waveBytes(16, 1, 2, 44100, false, 44100); bytes.replace(bytes.size() - 4, 4, QUuid::createUuid().toRfc4122().first(4));
+        writeBytes(path, bytes); const auto time = QDateTime::currentDateTime().addSecs(-3600); setModified(path, time);
+        QVERIFY(loadMedia(path).audio);
+        detail::trimAudioCache(0); // The summary goes; the source index stays.
+        {
+            QFile file(path); QVERIFY(file.open(QIODevice::ReadWrite)); QVERIFY(file.seek(bytes.size() - 4000));
+            QCOMPARE(file.write(QByteArray(4000, '\x40')), 4000); QVERIFY(file.flush()); QVERIFY(file.setFileTime(time, QFileDevice::FileModificationTime));
+        }
+        QCOMPARE(QFileInfo(path).size(), bytes.size()); QCOMPARE(QFileInfo(path).lastModified(), time);
+        QVERIFY_THROWS_EXCEPTION(std::runtime_error, loadMedia(path));
+        QVERIFY(QDir(detail::audioCacheDirectory()).entryList({"*.stream"}, QDir::Files).isEmpty());
+        QVERIFY(loadMedia(path).audio); // The stale index entry is gone, so the next import hashes again.
+    }
     void streamedAudioCallbackHeadroom() {
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
         QTemporaryDir dir; QVERIFY(dir.isValid()); setAudioPreparation(AudioPreparation::Stream);

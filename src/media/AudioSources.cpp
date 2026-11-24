@@ -32,7 +32,8 @@ extern "C" {
 namespace sav::detail {
 #ifdef Q_OS_WIN
 std::wstring windowsPath(const QString& path) {
-    auto native = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath());
+    // \\?\ paths skip Win32 normalization, so "..", "." and doubled separators must be gone first.
+    auto native = QDir::toNativeSeparators(QDir::cleanPath(QFileInfo(path).absoluteFilePath()));
     if (native.size() >= MAX_PATH && !native.startsWith(QStringLiteral("\\\\?\\")))
         native = native.startsWith(QStringLiteral("\\\\")) ? QStringLiteral("\\\\?\\UNC\\") + native.mid(2) : QStringLiteral("\\\\?\\") + native;
     return native.toStdWString();
@@ -367,8 +368,8 @@ QString audioCacheDirectory() {
 
 StreamSummary::StreamSummary(const QString& source, const QByteArray& format) : source_(source) {
     const auto before = stamp(source);
-    stamp_ = before.key(); version_ = {before.size, before.modified, before.identity};
-    const auto key = QString::fromLatin1(QCryptographicHash::hash(decoderRevision() + format + '\0' + sourceHash(source), QCryptographicHash::Sha256).toHex());
+    stamp_ = before.key(); version_ = {before.size, before.modified, before.identity}; sourceHash_ = sourceHash(source);
+    const auto key = QString::fromLatin1(QCryptographicHash::hash(decoderRevision() + format + '\0' + sourceHash_, QCryptographicHash::Sha256).toHex());
     path_ = audioCacheDirectory() + '/' + key + ".stream";
 }
 std::optional<AudioSummary> StreamSummary::reuse(bool mono) const {
@@ -407,6 +408,12 @@ std::optional<AudioSummary> StreamSummary::reuse(bool mono) const {
 void StreamSummary::verify() const { unchangedSince(source_, stamp_); }
 void StreamSummary::save(const AudioSummary& summary) const {
     verify();
+    // As for the PCM cache: an indexed hash can predate a rewrite that kept size, time and identity,
+    // and the summary is filed under content that other copies share.
+    if (fileHash(source_) != sourceHash_) {
+        updateIndex(stamp(source_), {});
+        fail("Audio source changed during preparation; import it again");
+    }
     if (!QDir().mkpath(audioCacheDirectory())) return;
     QByteArray bytes(streamMagic, 8); bytes += revisionId();
     char number[8]; qToLittleEndian<qint64>(summary.length, number); bytes.append(number, 8); bytes.append(char(summary.mono));
@@ -423,7 +430,9 @@ void StreamSummary::save(const AudioSummary& summary) const {
     trimAudioCache();
 }
 
-AudioCache::AudioCache(const QString& source, const QByteArray& format) : source_(source), stamp_(stamp(source).key()), sourceHash_(sourceHash(source)) {
+AudioCache::AudioCache(const QString& source, const QByteArray& format) : source_(source) {
+    const auto before = stamp(source);
+    stamp_ = before.key(); version_ = {before.size, before.modified, before.identity}; sourceHash_ = sourceHash(source);
     // Content identity also survives moved media and fresh package extraction paths.
     const auto key = QString::fromLatin1(QCryptographicHash::hash(decoderRevision() + format + '\0' + sourceHash_, QCryptographicHash::Sha256).toHex());
     const QDir directory(audioCacheDirectory());

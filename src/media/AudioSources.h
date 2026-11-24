@@ -66,7 +66,7 @@ public:
     void save(const AudioSummary& summary) const;
 private:
     QString source_, path_;
-    QByteArray stamp_;
+    QByteArray stamp_, sourceHash_;
     FileVersion version_;
 };
 
@@ -79,10 +79,12 @@ public:
     // Throws if the source changed since construction; check before accepting a reused cache.
     void verify() const;
     QString temporaryTemplate() const;
+    const FileVersion& version() const noexcept { return version_; } // As StreamSummary::version.
     std::shared_ptr<const AudioStorage> publish(QTemporaryFile& file, const AudioData& data, Frame length) const;
 private:
     QString source_, pcm_, metadata_;
     QByteArray stamp_, sourceHash_; // The stamp is taken before hashing.
+    FileVersion version_;
     std::unique_ptr<QLockFile> lock_;
 };
 }
