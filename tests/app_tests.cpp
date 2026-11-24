@@ -1556,7 +1556,8 @@ private slots:
         // FAT) at the same size; its summary must not be filed under the content hashed at the start.
         QTemporaryDir dir; const auto path = dir.filePath("recent.wav");
         auto bytes = waveBytes(16, 1, 2, 44100, false, 44100); bytes.replace(bytes.size() - 4, 4, QUuid::createUuid().toRfc4122().first(4));
-        writeBytes(path, bytes); const auto time = QFileInfo(path).lastModified();
+        // Ahead of the clock, so the source stays "recent" however long the test takes (FAT: 2 s steps).
+        writeBytes(path, bytes); setModified(path, QDateTime::currentDateTime().addSecs(60)); const auto time = QFileInfo(path).lastModified();
         const detail::StreamSummary summary(path, "wav");
         {
             QFile file(path); QVERIFY(file.open(QIODevice::ReadWrite)); QVERIFY(file.seek(bytes.size() - 4000));
@@ -1570,7 +1571,7 @@ private slots:
         setAudioPreparation(AudioPreparation::Stream);
         QTemporaryDir dir; const auto path = dir.filePath("recent-reuse.wav");
         auto bytes = waveBytes(16, 1, 2, 44100, false, 44100); bytes.replace(bytes.size() - 4, 4, QUuid::createUuid().toRfc4122().first(4));
-        writeBytes(path, bytes); const auto time = QFileInfo(path).lastModified();
+        writeBytes(path, bytes); setModified(path, QDateTime::currentDateTime().addSecs(60)); const auto time = QFileInfo(path).lastModified();
         QVERIFY(loadMedia(path).audio); // Saves the summary.
         const detail::StreamSummary summary(path, "wav");
         QVERIFY(summary.reuse(false));

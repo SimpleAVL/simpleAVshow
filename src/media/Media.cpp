@@ -452,49 +452,60 @@ public:
     // Sources reading right now are skipped (their locks are only tried), and so is any decoder read
     // within idleAfter: a playing clip reads every block, so only idle decoders close.
     // wait: finish before returning (tests); otherwise presence checks and closing run on a worker.
-    static void closeIdle(bool wait) {
-        constexpr auto idleAfter = std::chrono::seconds(3);
-        const auto now = std::chrono::steady_clock::now();
+    // Never throws: it runs from a timer, and closing files is only housekeeping.
+    static void closeIdle(bool wait) noexcept {
         // One sweep at a time, and the slot comes first: readers are only taken by the sweep that will close
         // them off this thread. A busy sweep (a stalled share) skips this tick; tests wait for it.
         static std::atomic<bool> sweeping{false};
         while (sweeping.exchange(true)) { if (!wait) return; std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
-        struct Open { const StreamStorage* storage; std::uint64_t id, reads; QString path; };
-        std::vector<Open> open;
-        std::vector<std::unique_ptr<Reader>> retired; // Closed without locks held: closing can stall on a share.
-        {
+        // The slot is released when the last owner of the sweep is done, however it ends.
+        struct Sweep {
+            struct Open { const StreamStorage* storage; std::uint64_t id, reads; QString path; };
+            std::vector<Open> open;
+            std::vector<std::unique_ptr<Reader>> retired; // Closed without locks held: closing can stall on a share.
+            ~Sweep() { retired.clear(); sweeping = false; }
+            void run() noexcept {
+                try {
+                    retired.clear();
+                    std::erase_if(open, [](const Open& entry) { return detail::present(entry.path); });
+                    for (const auto& entry : open) {
+                        std::vector<std::unique_ptr<Reader>> gone;
+                        auto& r = registry(); const std::lock_guard lock(r.mutex);
+                        // Only the same registration, not read since: otherwise the file came back.
+                        const auto* storage = entry.storage;
+                        if (std::find(r.storages.begin(), r.storages.end(), storage) == r.storages.end() || storage->id_ != entry.id) continue;
+                        const std::unique_lock other(storage->mutex_, std::try_to_lock);
+                        if (other && storage->reads_ == entry.reads) gone.swap(storage->readers_);
+                        // gone is declared before the locks, so it closes after they are released.
+                    }
+                } catch (...) {} // A later sweep tries again.
+            }
+        };
+        std::shared_ptr<Sweep> sweep;
+        try {
+            sweep = std::make_shared<Sweep>();
+        } catch (...) { sweeping = false; return; }
+        try {
+            constexpr auto idleAfter = std::chrono::seconds(3);
+            const auto now = std::chrono::steady_clock::now();
             auto& r = registry(); const std::lock_guard lock(r.mutex);
             for (const auto* storage : r.storages) {
                 const std::unique_lock other(storage->mutex_, std::try_to_lock); if (!other) continue;
                 auto& readers = storage->readers_;
+                sweep->retired.reserve(sweep->retired.size() + readers.size()); // Moving them out cannot fail.
                 const auto idle = std::stable_partition(readers.begin(), readers.end(), [&](const auto& reader) { return now - reader->usedAt < idleAfter; });
-                std::move(idle, readers.end(), std::back_inserter(retired)); readers.erase(idle, readers.end());
-                if (!readers.empty()) open.push_back({storage, storage->id_, storage->reads_, storage->path_});
+                std::move(idle, readers.end(), std::back_inserter(sweep->retired)); readers.erase(idle, readers.end());
+                if (!readers.empty()) sweep->open.push_back({storage, storage->id_, storage->reads_, storage->path_});
             }
-        }
+        } catch (...) {} // Out of memory: sweep what was collected.
         // A source deleted while open (FAT/exFAT on Windows) keeps its name until its handles close:
         // release them so the file can be restored or replaced under that name. Checks and closes can
-        // stall (network shares), so they run on a detached thread, one sweep at a time, without locks
-        // that reads need; the app can quit without waiting for one.
-        if (open.empty() && retired.empty()) { sweeping = false; return; }
-        auto sweep = [open = std::move(open), retired = std::move(retired)]() mutable {
-            retired.clear();
-            std::erase_if(open, [](const Open& entry) { return detail::present(entry.path); });
-            for (const auto& entry : open) {
-                std::vector<std::unique_ptr<Reader>> gone;
-                {
-                    auto& r = registry(); const std::lock_guard lock(r.mutex);
-                    // Only the same registration, not read since: otherwise the file came back.
-                    const auto* storage = entry.storage;
-                    if (std::find(r.storages.begin(), r.storages.end(), storage) == r.storages.end() || storage->id_ != entry.id) continue;
-                    const std::unique_lock other(storage->mutex_, std::try_to_lock);
-                    if (other && storage->reads_ == entry.reads) gone = std::move(storage->readers_);
-                }
-            }
-            sweeping = false;
-        };
-        if (!wait) try { std::thread(std::move(sweep)).detach(); return; } catch (const std::system_error&) {}
-        sweep(); // Tests, or no thread available: close here rather than keep the slot or throw into the timer.
+        // stall (network shares), so they run on a detached thread without locks that reads need; the
+        // app can quit without waiting for one. The thread shares the sweep, so if it cannot start, the
+        // sweep is still here to run.
+        if (sweep->open.empty() && sweep->retired.empty()) return;
+        if (!wait) try { std::thread([sweep] { sweep->run(); }).detach(); return; } catch (...) {}
+        sweep->run();
     }
 private:
     // Reading forward this far decodes through instead of seeking.
