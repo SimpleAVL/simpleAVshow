@@ -748,6 +748,24 @@ private slots:
             });
             QVERIFY(openBad["isError"].toBool());
 
+            // A valid .savshow with a UTF-8 BOM and >64 bytes of leading whitespace must still open cleanly.
+            const QString bomShow = dir.filePath("bom_padded.savshow");
+            writeProject(newProject(), bomShow);
+            QFile sf(bomShow);
+            QVERIFY(sf.open(QIODevice::ReadOnly));
+            const QByteArray rawJson = sf.readAll();
+            sf.close();
+            QVERIFY(sf.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            sf.write("\xEF\xBB\xBF");
+            sf.write(QByteArray(128, ' '));
+            sf.write(rawJson);
+            sf.close();
+            const auto openBom = call(server, "project_action", {
+                {"action", "open_project"}, {"path", bomShow}, {"discard_unsaved", true},
+                {"expected_revision", revision(server)}
+            });
+            QVERIFY(!openBom["isError"].toBool());
+
             window.controller().preflightLock = true;
             const auto lockedEdit = call(server, "apply_edits", {
                 {"expected_revision", revision(server)},

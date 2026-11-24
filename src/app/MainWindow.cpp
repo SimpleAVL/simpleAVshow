@@ -175,8 +175,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
         if (!clipId.isEmpty()) timeline_->selectClip(clipId);
         else if (!markerId.isEmpty()) timeline_->selectMarker(markerId);
         else if (track >= 0 && track < static_cast<int>(c_.project.show.tracks.size())) {
-            timeline_->selectedTrack = track; timeline_->selectedClip.clear(); timeline_->selectedMarker.clear();
-            updateInspector(); timeline_->update();
+            timeline_->selectTrack(track);
+            updateInspector();
         }
     };
     host.currentSelection = [this] {
@@ -953,7 +953,7 @@ void MainWindow::addMarker() {
 }
 void MainWindow::addTrack(bool visual, bool async) {
     Track track; track.id = newId().toStdString(); track.name = visual ? (async ? "Async picture layer" : "Picture layer") : async ? "Async audio" : "Audio"; track.visual = visual; track.async = async;
-    if (c_.edit([=](Project& p) { p.show.tracks.push_back(track); })) { timeline_->selectedTrack = static_cast<int>(c_.project.show.tracks.size()) - 1; timeline_->selectedClip.clear(); timeline_->selectedMarker.clear(); updateInspector(); }
+    if (c_.edit([=](Project& p) { p.show.tracks.push_back(track); })) { timeline_->selectTrack(static_cast<int>(c_.project.show.tracks.size()) - 1); updateInspector(); }
 }
 void MainWindow::deleteSelection() {
     if (auto* clip = selectedClip()) {

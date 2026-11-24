@@ -449,13 +449,35 @@ Project readProject(const QString& path, const std::function<bool()>& isCancelle
     constexpr qint64 maxProjectFileBytes = 128 * 1024 * 1024;
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) throw std::runtime_error(file.errorString().toStdString());
-    // Reject non-JSON binary files immediately before allocating a manifest buffer.
-    const QByteArray head = file.peek(64);
-    qsizetype firstNonSpace = 0;
-    while (firstNonSpace < head.size() && (head[firstNonSpace] == ' ' || head[firstNonSpace] == '\t' ||
-           head[firstNonSpace] == '\r' || head[firstNonSpace] == '\n')) ++firstNonSpace;
-    if (firstNonSpace >= head.size() || head[firstNonSpace] != '{')
-        throw std::runtime_error("Invalid project JSON");
+    // Reject non-JSON binary files immediately before allocating a manifest buffer,
+    // while allowing an optional UTF-8 BOM and arbitrary leading JSON whitespace.
+    qint64 contentStart = 0;
+    {
+        char bom[3]{};
+        const qint64 nBom = file.peek(bom, 3);
+        if (nBom == 3 && static_cast<unsigned char>(bom[0]) == 0xef &&
+            static_cast<unsigned char>(bom[1]) == 0xbb && static_cast<unsigned char>(bom[2]) == 0xbf) {
+            contentStart = 3;
+            file.seek(3);
+        }
+        bool foundObject = false;
+        QByteArray chunk(4096, '\0');
+        qint64 scanned = 0;
+        while (!file.atEnd() && scanned < maxProjectFileBytes) {
+            const qint64 n = file.read(chunk.data(), chunk.size());
+            if (n <= 0) break;
+            scanned += n;
+            for (qint64 i = 0; i < n; ++i) {
+                const char ch = chunk[static_cast<qsizetype>(i)];
+                if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') continue;
+                if (ch == '{') { foundObject = true; break; }
+                throw std::runtime_error("Invalid project JSON");
+            }
+            if (foundObject) break;
+        }
+        if (!foundObject) throw std::runtime_error("Invalid project JSON");
+        if (!file.seek(contentStart)) throw std::runtime_error(file.errorString().toStdString());
+    }
     if (file.size() > maxProjectFileBytes)
         throw std::runtime_error("Project file is too large to be a valid .savshow manifest");
     const QByteArray bytes = file.read(maxProjectFileBytes + 1);

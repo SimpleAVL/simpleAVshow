@@ -81,6 +81,7 @@ private:
     void releaseBusyLease(quint64 lease);
     void releaseAllBusyLeases();
     void releaseCancelledBusyLeases();
+    void cancelSessionRequests(const QString& sessionId);
     void invalidateEditSession();
     void invalidatePreviews();
     QString importId_, importState_, importError_;

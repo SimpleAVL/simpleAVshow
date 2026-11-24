@@ -193,7 +193,10 @@ void Controller::startMidiThread() {
                     item = std::move(testMidiQueue_.front());
                     testMidiQueue_.pop_front();
                 }
-                // Drop stale test messages if Show mode, Stop All, Play, shutdown, or bearer revocation intervened.
+                // Hold testMidiSendMutex_ across the final authorization check and midi.send() so
+                // Show-mode entry, Play, Stop All, and chat bearer revocation synchronize cleanly
+                // before returning and can abort any in-flight SysEx test immediately.
+                std::lock_guard sendLock(testMidiSendMutex_);
                 if (midiStop_.load() ||
                     showModeAtomic_.load(std::memory_order_acquire) ||
                     (item.ownerCancelled && item.ownerCancelled->load(std::memory_order_acquire)) ||
@@ -201,8 +204,11 @@ void Controller::startMidiThread() {
                     item.gen != testMidiGen_.load(std::memory_order_acquire) ||
                     transport.state() == State::Playing || transport.state() == State::Held)
                     continue;
+                testMidiActive_.store(true, std::memory_order_release);
                 QString error;
-                if (!midi.send(item.bytes, error)) {
+                const bool sent = midi.send(item.bytes, error);
+                testMidiActive_.store(false, std::memory_order_release);
+                if (!sent) {
                     QMetaObject::invokeMethod(this, [this, error] { report(error); }, Qt::QueuedConnection);
                 }
             }
@@ -454,13 +460,20 @@ bool Controller::prepareAudio() {
     } catch (const std::exception& error) { report("Cannot prepare audio. Open Outputs to choose a device. " + QString::fromUtf8(error.what())); return false; }
 }
 void Controller::cancelPendingTestMidi(const QString& owner) {
-    std::lock_guard lock(testMidiMutex_);
-    if (owner.isEmpty()) {
-        testMidiGen_.fetch_add(1, std::memory_order_release);
-        testMidiQueue_.clear();
-    } else {
-        std::erase_if(testMidiQueue_, [&](const PendingTestMidi& item) { return item.owner == owner; });
+    {
+        std::lock_guard lock(testMidiMutex_);
+        if (owner.isEmpty()) {
+            testMidiGen_.fetch_add(1, std::memory_order_release);
+            testMidiQueue_.clear();
+        } else {
+            std::erase_if(testMidiQueue_, [&](const PendingTestMidi& item) { return item.owner == owner; });
+        }
     }
+    // Synchronize with any in-flight test MIDI send (aborting a blocking WinMM SysEx if active)
+    // so no test message can reach hardware after Show-mode entry, Play, Stop All, or revocation returns.
+    if (testMidiActive_.load(std::memory_order_acquire)) midi.requestAbortSend();
+    { std::lock_guard sendLock(testMidiSendMutex_); }
+    if (!midiStop_.load()) midi.clearAbortSend();
 }
 bool Controller::testMidi(const std::vector<unsigned char>& bytes, const QString& owner,
                           std::shared_ptr<std::atomic<bool>> ownerCancelled) {

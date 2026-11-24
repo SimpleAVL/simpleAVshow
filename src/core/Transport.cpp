@@ -236,12 +236,14 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
         applyUrgentStop(0);
     } else {
         int lastOpStop = -1;
-        int lastValidStop = -1;
+        int lastExtStop = -1;
+        int lastChatStop = -1;
         for (std::size_t i = 0; i < countQueued; ++i) {
             const auto& c = batch[i];
             if (c.action == Action::StopAll && isCommandValid(c, validExt, validChat)) {
-                lastValidStop = static_cast<int>(i);
                 if (c.source == CommandSource::Operator) lastOpStop = static_cast<int>(i);
+                else if (c.source == CommandSource::ExternalAgent) lastExtStop = static_cast<int>(i);
+                else lastChatStop = static_cast<int>(i);
             }
         }
         for (std::size_t i = 0; i < countQueued; ++i) {
@@ -250,9 +252,14 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 break;
             }
             const auto& c = batch[i];
-            // Only an unrevocable operator StopAll can coalesce earlier operator Play/Pause;
-            // any valid StopAll coalesces earlier agent Play/Pause. Seeks are always preserved.
-            const int stopCutoff = c.source == CommandSource::Operator ? lastOpStop : lastValidStop;
+            // Never allow a lower-privilege or revocable StopAll domain to suppress a command from
+            // a higher-privilege or independent domain (e.g. a revoked chat StopAll can never drop
+            // an external MCP command). Seeks are always preserved.
+            const int stopCutoff = c.source == CommandSource::Operator
+                ? lastOpStop
+                : c.source == CommandSource::ExternalAgent
+                    ? std::max(lastOpStop, lastExtStop)
+                    : std::max({lastOpStop, lastExtStop, lastChatStop});
             if (static_cast<int>(i) < stopCutoff && (c.action == Action::Play || c.action == Action::Pause)) {
                 ++applied_;
                 continue;

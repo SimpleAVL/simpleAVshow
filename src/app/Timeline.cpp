@@ -200,7 +200,9 @@ void Timeline::keyPressEvent(QKeyEvent* event) {
     switch (event->key()) {
     case Qt::Key_Up: case Qt::Key_Down: {
         const int next = std::clamp(selectedTrack + (event->key() == Qt::Key_Down ? 1 : -1), 0, static_cast<int>(show.tracks.size()) - 1);
-        selectedTrack = next; selectedClip.clear(); selectedMarker.clear();
+        selectedTrack = next; lastTrackedIndex_ = next;
+        if (!show.tracks.empty()) selectedTrackId_ = show.tracks[next].id;
+        selectedClip.clear(); selectedMarker.clear();
         verticalScrollBar()->setValue(std::clamp(verticalScrollBar()->value(), (next + 1) * row - viewport()->height() + ruler, next * row));
         emit selectionChanged(); viewport()->update(); break;
     }
@@ -224,10 +226,23 @@ void Timeline::focusInEvent(QFocusEvent* event) { QAbstractScrollArea::focusInEv
 void Timeline::focusOutEvent(QFocusEvent* event) { QAbstractScrollArea::focusOutEvent(event); viewport()->update(); }
 void Timeline::selectClip(QString id) {
     selectedClip = std::move(id); selectedMarker.clear();
-    for (const auto& c : c_.project.show.clips) if (c.id == selectedClip.toStdString()) selectedTrack = c.track;
+    for (const auto& c : c_.project.show.clips) if (c.id == selectedClip.toStdString()) {
+        selectedTrack = c.track;
+        lastTrackedIndex_ = selectedTrack;
+        if (selectedTrack >= 0 && static_cast<std::size_t>(selectedTrack) < c_.project.show.tracks.size())
+            selectedTrackId_ = c_.project.show.tracks[selectedTrack].id;
+    }
     emit selectionChanged(); viewport()->update();
 }
 void Timeline::selectMarker(QString id) { selectedMarker = std::move(id); selectedClip.clear(); emit selectionChanged(); viewport()->update(); }
+void Timeline::selectTrack(int index) {
+    if (c_.project.show.tracks.empty()) return;
+    selectedTrack = std::clamp(index, 0, static_cast<int>(c_.project.show.tracks.size()) - 1);
+    lastTrackedIndex_ = selectedTrack;
+    selectedTrackId_ = c_.project.show.tracks[selectedTrack].id;
+    selectedClip.clear(); selectedMarker.clear();
+    emit selectionChanged(); viewport()->update();
+}
 void Timeline::paintEvent(QPaintEvent* event) {
     QPainter p(viewport()); p.setRenderHint(QPainter::Antialiasing);
     p.fillRect(viewport()->rect(), QColor("#111720"));

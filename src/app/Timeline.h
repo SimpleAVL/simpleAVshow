@@ -17,6 +17,7 @@ public:
     void zoomToFit();
     void selectClip(QString id);
     void selectMarker(QString id);
+    void selectTrack(int index);
     void refresh();
     // The automation property drawn and edited on the selected clip (other clips show volume/opacity).
     void setCurveProperty(int property);

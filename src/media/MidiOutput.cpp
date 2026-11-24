@@ -149,14 +149,21 @@ struct MidiOutput::CoreMidiState {};
 #endif
 
 #ifdef Q_OS_WIN
+namespace {
+QString winMmPortName(UINT devId, const MIDIOUTCAPSW& caps) {
+    // Match RtMidi 6.0's Windows port naming ("<szPname> <portNumber>") so saved preferences from
+    // earlier releases continue to resolve and same-model ports remain distinguishable by name.
+    return QString("%1 %2").arg(QString::fromWCharArray(caps.szPname)).arg(devId);
+}
+}
+
 struct MidiOutput::WinMmState {
     HMIDIOUT handle = nullptr;
     UINT devId = 0;
     ~WinMmState() {
-        if (handle) {
-            midiOutReset(handle);
-            midiOutClose(handle);
-        }
+        // Do not call midiOutReset() on routine close: external synths should keep sustained notes
+        // and controller state unless a SysEx wait explicitly timed out or aborted.
+        if (handle) midiOutClose(handle);
     }
     static std::unique_ptr<WinMmState> open(UINT devId, QString& error) {
         auto state = std::make_unique<WinMmState>();
@@ -202,7 +209,7 @@ QStringList MidiOutput::ports() {
     for (UINT i = 0; i < count; ++i) {
         MIDIOUTCAPSW caps{};
         if (midiOutGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
-            result << QString::fromWCharArray(caps.szPname);
+            result << winMmPortName(i, caps);
         else
             result << QString();
     }
@@ -241,7 +248,7 @@ bool MidiOutput::open(int port, QString& error) {
         error = "MIDI port is no longer available";
         return false;
     }
-    const QString portName = QString::fromWCharArray(caps.szPname);
+    const QString portName = winMmPortName(static_cast<UINT>(port), caps);
     auto state = WinMmState::open(static_cast<UINT>(port), error);
     if (!state) return false;
     winMm_ = std::move(state);
@@ -323,36 +330,50 @@ bool MidiOutput::openByName(const QString& wanted, QString& error) {
     lost_.store(false);
     return true;
 #elif defined(Q_OS_WIN)
+    // Rank RtMidi-compatible "<szPname> <portNumber>" names ahead of bare "<szPname>" aliases.
     const UINT count = midiOutGetNumDevs();
-    std::vector<std::pair<UINT, QString>> exactMatches, ciMatches;
+    struct Candidate { UINT devId; QString name; };
+    std::vector<Candidate> bestMatches;
+    int bestRank = 99; // 0 = exact numbered, 1 = CI numbered, 2 = exact raw szPname, 3 = CI raw szPname
     for (UINT i = 0; i < count; ++i) {
         MIDIOUTCAPSW caps{};
         if (midiOutGetDevCapsW(i, &caps, sizeof(caps)) != MMSYSERR_NOERROR) continue;
-        const QString portName = QString::fromWCharArray(caps.szPname);
-        if (portName == wanted) exactMatches.emplace_back(i, portName);
-        else if (portName.compare(wanted, Qt::CaseInsensitive) == 0) ciMatches.emplace_back(i, portName);
-    }
-    const auto& matches = !exactMatches.empty() ? exactMatches : ciMatches;
-    if (matches.empty()) { error = "MIDI port not found: " + wanted; return false; }
-    if (connected()) {
-        for (const auto& [devId, portName] : matches) {
-            (void)devId;
-            if (portName == name_) return true;
+        const QString numbered = winMmPortName(i, caps);
+        const QString rawName = QString::fromWCharArray(caps.szPname);
+        int rank = 99;
+        if (numbered == wanted) rank = 0;
+        else if (numbered.compare(wanted, Qt::CaseInsensitive) == 0) rank = 1;
+        else if (rawName == wanted) rank = 2;
+        else if (rawName.compare(wanted, Qt::CaseInsensitive) == 0) rank = 3;
+        if (rank < bestRank) {
+            bestRank = rank;
+            bestMatches.clear();
+            bestMatches.push_back({i, numbered});
+        } else if (rank == bestRank && rank < 99) {
+            bestMatches.push_back({i, numbered});
         }
     }
-    if (matches.size() > 1) {
+    if (bestMatches.empty()) { error = "MIDI port not found: " + wanted; return false; }
+    if (connected()) {
+        for (const auto& cand : bestMatches) {
+            if (cand.name == name_) return true;
+        }
+    }
+    if (bestMatches.size() > 1) {
         error = "Multiple MIDI ports share the name “" + wanted + "”; choose the port manually in Outputs";
         return false;
     }
-    const UINT matchedId = matches.front().first;
-    const QString matchedName = matches.front().second;
+    const UINT matchedId = bestMatches.front().devId;
+    const QString matchedName = bestMatches.front().name;
     MIDIOUTCAPSW verifyCaps{};
     if (matchedId >= midiOutGetNumDevs() ||
         midiOutGetDevCapsW(matchedId, &verifyCaps, sizeof(verifyCaps)) != MMSYSERR_NOERROR ||
-        QString::fromWCharArray(verifyCaps.szPname) != matchedName) {
+        winMmPortName(matchedId, verifyCaps) != matchedName) {
         error = "MIDI port list changed before opening " + matchedName;
         return false;
     }
+    // Release an already-lost handle before reopening so single-client WinMM ports do not fail with MMSYSERR_ALLOCATED.
+    if (winMm_ && lost_.load()) close();
     auto candidate = WinMmState::open(matchedId, error);
     if (!candidate) return false;
     close();
@@ -473,8 +494,10 @@ bool MidiOutput::send(const std::vector<unsigned char>& message, QString& error)
         lost_.store(true);
         return false;
     }
-    // Bounded 500 ms wait that also honors abortSend_ so a stalled driver can never hang midiThread_ or shutdown.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    // Scale the SysEx deadline for 31.25 kbps DIN MIDI (~3.125 bytes/ms, so 4096 bytes needs >1.31 s)
+    // plus margin, while still honoring abortSend_ within ~1 ms on shutdown/revocation/Play.
+    const auto timeoutMs = std::max<std::int64_t>(1500, static_cast<std::int64_t>(message.size()) + 1500);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     while ((res = midiOutUnprepareHeader(winMm_->handle, &sysex->hdr, sizeof(MIDIHDR))) == MIDIERR_STILLPLAYING) {
         if (abortSend_.load(std::memory_order_acquire) || std::chrono::steady_clock::now() >= deadline) {
             midiOutReset(winMm_->handle);

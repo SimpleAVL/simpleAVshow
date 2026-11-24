@@ -393,6 +393,21 @@ void McpServer::releaseCancelledBusyLeases() {
     });
     for (quint64 lease : toRelease) c_.releaseBusy(lease);
 }
+void McpServer::cancelSessionRequests(const QString& sessionId) {
+    if (sessionId.isEmpty()) return;
+    const QString prefix = "sid:" + sessionId + "|";
+    for (auto it = inflightRequests_.begin(); it != inflightRequests_.end();) {
+        if (it.key().startsWith(prefix)) {
+            auto entry = it.value();
+            it = inflightRequests_.erase(it);
+            if (entry.cancelled) entry.cancelled->store(true);
+            if (entry.abortConnection) entry.abortConnection();
+        } else {
+            ++it;
+        }
+    }
+    releaseCancelledBusyLeases();
+}
 void McpServer::invalidateEditSession() {
     ++editGeneration_;
     if (editSessionCancelled_) editSessionCancelled_->store(true);
@@ -1979,11 +1994,13 @@ void McpServer::dispatch(const QJsonObject& request, const QString& bearerToken,
             const QString oldest = perBearer.takeFirst();
             issuedSessions_.remove(oldest);
             sessionOrder_.removeAll(oldest);
+            cancelSessionRequests(oldest);
         }
         while (sessionOrder_.size() >= maxTotalSessions) {
             const QString oldest = sessionOrder_.takeFirst();
             const QString owner = issuedSessions_.take(oldest);
             if (!owner.isEmpty()) bearerSessions_[owner].removeAll(oldest);
+            cancelSessionRequests(oldest);
         }
         const QString sessionHeader = newId();
         issuedSessions_.insert(sessionHeader, bearerToken);
