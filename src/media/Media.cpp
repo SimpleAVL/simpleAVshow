@@ -444,7 +444,9 @@ private:
         std::mutex mutex;
         std::vector<const StreamStorage*> storages;
         std::atomic<std::size_t> open{0};
-        std::atomic<std::size_t> closing{0}; // Evicted, still counted in open until their files close.
+        // Taken out of use and closing off the lock (evicted or swept), still counted in open until their
+        // files close. Changed only under mutex, together with open for those decoders.
+        std::atomic<std::size_t> closing{0};
         std::atomic<std::uint64_t> clock{0};
     };
     // Never destroyed: a background sweep may still hold it while the process exits.
@@ -478,7 +480,7 @@ public:
                         const auto* storage = entry.storage;
                         if (std::find(r.storages.begin(), r.storages.end(), storage) == r.storages.end() || storage->id_ != entry.id) continue;
                         const std::unique_lock other(storage->mutex_, std::try_to_lock);
-                        if (other && storage->reads_ == entry.reads) gone.swap(storage->readers_);
+                        if (other && storage->reads_ == entry.reads) { for (auto& reader : storage->readers_) retire(*reader); gone.swap(storage->readers_); }
                         // gone is declared before the locks, so it closes after they are released.
                     }
                 } catch (...) {} // A later sweep tries again.
@@ -497,6 +499,7 @@ public:
                 auto& readers = storage->readers_;
                 sweep->retired.reserve(sweep->retired.size() + readers.size()); // Moving them out cannot fail.
                 const auto idle = std::stable_partition(readers.begin(), readers.end(), [&](const auto& reader) { return now - reader->usedAt < idleAfter; });
+                for (auto it = idle; it != readers.end(); ++it) retire(**it);
                 std::move(idle, readers.end(), std::back_inserter(sweep->retired)); readers.erase(idle, readers.end());
                 if (!readers.empty()) sweep->open.push_back({storage, storage->id_, storage->reads_, storage->path_});
             }
@@ -518,13 +521,22 @@ private:
         Reader(const QString& path, AudioDecoder::SeekPoints points, const detail::FileVersion& version) : decoder(path, std::move(points), version) { slot.held = true; }
         Reader(const Reader&) = delete; Reader& operator=(const Reader&) = delete;
         // Declared before the decoder, so the slot is released only after its file has closed.
-        struct Slot { bool held = false; ~Slot() { if (held) --registry().open; } } slot;
+        struct Slot {
+            bool held = false, closing = false; // closing: set under the registry lock (retire).
+            ~Slot() {
+                if (!held) return;
+                auto& r = registry();
+                if (closing) { const std::lock_guard lock(r.mutex); --r.open; --r.closing; } else --r.open;
+            }
+        } slot;
         AudioDecoder decoder;
         Frame first = 0;
         std::vector<float> samples;
         std::uint64_t used = 0;
         std::chrono::steady_clock::time_point usedAt = std::chrono::steady_clock::now();
     };
+    // Called under the registry lock as a decoder leaves use to close off the lock.
+    static void retire(Reader& reader) noexcept { if (reader.slot.held && !reader.slot.closing) { reader.slot.closing = true; ++registry().closing; } }
     QString path_;
     Frame length_;
     AudioDecoder::SeekPoints points_;
@@ -563,9 +575,9 @@ private:
         {
             auto& r = registry();
             const std::lock_guard lock(r.mutex);
-            // Decoders an earlier eviction is still closing already make room; evicting more for them
-            // would empty the pool during a burst of opens.
-            while (r.open.load() >= openBudget + evicted->size() + r.closing.load()) {
+            // Decoders still closing (this eviction's, an earlier one's or the sweep's) already make room;
+            // evicting more for them would empty the pool during a burst of opens.
+            while (r.open.load() >= openBudget + r.closing.load()) {
                 const StreamStorage* owner = nullptr; std::size_t index = 0;
                 std::vector<std::unique_lock<std::mutex>> held;
                 for (const auto* storage : r.storages) {
@@ -576,14 +588,12 @@ private:
                 if (!owner) break;
                 evicted->reserve(evicted->size() + 1);
                 const auto at = owner->readers_.begin() + static_cast<std::ptrdiff_t>(index);
-                evicted->push_back(std::move(*at)); owner->readers_.erase(at);
+                evicted->push_back(std::move(*at)); owner->readers_.erase(at); retire(*evicted->back());
             }
             ++r.open;
         }
         if (evicted->empty()) return;
-        const auto count = evicted->size(); registry().closing += count;
-        try { std::thread([evicted, count] { evicted->clear(); registry().closing -= count; }).detach(); }
-        catch (...) { evicted->clear(); registry().closing -= count; } // Closed here instead.
+        try { std::thread([evicted] { evicted->clear(); }).detach(); } catch (...) {} // Otherwise they close here.
     }
 };
 
