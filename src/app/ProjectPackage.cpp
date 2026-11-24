@@ -120,11 +120,11 @@ QString entryName(archive_entry* entry) {
     const char* name = archive_entry_pathname(entry);
     return name ? QString::fromUtf8(name) : QString();
 }
-// The lock marks a live extraction so another instance's startup sweep leaves it alone.
 // Extractions whose removal failed: a decoder closing on the background sweep can still hold one of
-// their files, and Windows cannot remove a folder while a file in it is open.
-std::mutex pendingMutex;
-std::vector<QString> pendingRemovals;
+// their files, and Windows cannot remove a folder while a file in it is open. Never destroyed: a retry
+// thread may still use it while the process exits.
+struct Pending { std::mutex mutex; std::vector<QString> paths; };
+Pending& pending() { static auto* instance = new Pending; return *instance; }
 // Removes path, or reports that it may still be there: Qt reports success for a folder it cannot see,
 // as when a temporary folder on a share drops out for a moment, so absence counts only while the
 // parent folder is reachable.
@@ -133,12 +133,13 @@ bool removeExtraction(const QString& path) {
     if (info.exists() && !QDir(path).removeRecursively()) return false;
     return info.dir().exists() && !QFileInfo::exists(path);
 }
+// The lock marks a live extraction so another instance's startup sweep leaves it alone.
 struct PackageDirectory : QTemporaryDir {
     PackageDirectory() : QTemporaryDir(QDir::tempPath() + "/simpleavshow-package-XXXXXX") {}
     ~PackageDirectory() {
         if (!isValid()) return;
         lock.unlock(); setAutoRemove(false); // Removed here, once.
-        if (!removeExtraction(path())) { const std::lock_guard guard(pendingMutex); pendingRemovals.push_back(path()); }
+        if (!removeExtraction(path())) { const std::lock_guard guard(pending().mutex); pending().paths.push_back(path()); }
     }
     QLockFile lock{filePath(".lock")};
 };
@@ -146,16 +147,16 @@ struct PackageDirectory : QTemporaryDir {
 
 void retryPackageRemovals(bool wait) {
     // Removal can stall (a redirected temporary folder), so it runs on its own thread, one retry at a time.
-    static std::atomic<bool> retrying{false};
-    if (!wait) { const std::lock_guard guard(pendingMutex); if (pendingRemovals.empty()) return; }
+    static std::atomic<bool> retrying{false}; // Trivially destructible: safe for a thread outliving exit.
+    if (!wait) { const std::lock_guard guard(pending().mutex); if (pending().paths.empty()) return; }
     // Waiting takes the slot first, so a retry already in flight finishes before this one looks.
     while (retrying.exchange(true)) { if (!wait) return; std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
     auto retry = [] {
         std::vector<QString> paths;
-        { const std::lock_guard guard(pendingMutex); paths.swap(pendingRemovals); }
+        { const std::lock_guard guard(pending().mutex); paths.swap(pending().paths); }
         try {
             std::erase_if(paths, removeExtraction);
-            const std::lock_guard guard(pendingMutex); pendingRemovals.insert(pendingRemovals.end(), paths.begin(), paths.end());
+            const std::lock_guard guard(pending().mutex); pending().paths.insert(pending().paths.end(), paths.begin(), paths.end());
         } catch (...) {} // Out of memory: the startup sweep removes what is left.
         retrying = false;
     };

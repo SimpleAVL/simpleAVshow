@@ -513,10 +513,11 @@ private:
     // Reading forward this far decodes through instead of seeking.
     static constexpr Frame continueWithin = 2 * sampleRate;
     struct Reader {
-        // Takes over the budget slot makeRoom reserved.
-        Reader(const QString& path, AudioDecoder::SeekPoints points, const detail::FileVersion& version) : decoder(path, std::move(points), version) {}
-        ~Reader() { --registry().open; }
+        // Takes over the budget slot makeRoom reserved once constructed (until then, pick releases it).
+        Reader(const QString& path, AudioDecoder::SeekPoints points, const detail::FileVersion& version) : decoder(path, std::move(points), version) { slot.held = true; }
         Reader(const Reader&) = delete; Reader& operator=(const Reader&) = delete;
+        // Declared before the decoder, so the slot is released only after its file has closed.
+        struct Slot { bool held = false; ~Slot() { if (held) --registry().open; } } slot;
         AudioDecoder decoder;
         Frame first = 0;
         std::vector<float> samples;

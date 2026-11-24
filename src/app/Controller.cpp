@@ -178,7 +178,9 @@ void Controller::toggle() {
         if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and press Play to retry, or reopen the project to rebuild changed or damaged caches."); playbackProblem = status; return; }
         // Resuming a live show never blocks on picture or MIDI; it warns and continues.
         const bool resuming = state == State::Held || transport.asyncVoices() || (state == State::Paused && device.running());
-        if (const auto missing = missingMedia(); !missing.isEmpty()) {
+        // Resuming does not look for missing files either: a stalled share would hold up the cue. Reads
+        // and the background sweep report a source that went missing; preflight lists them all.
+        if (const auto missing = resuming ? QStringList{} : missingMedia(); !missing.isEmpty()) {
             report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
             playbackProblem = warning = status;
             if (!resuming) return;

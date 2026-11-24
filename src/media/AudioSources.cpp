@@ -75,8 +75,10 @@ Probe probe(const QString& path) {
     if (file == INVALID_HANDLE_VALUE) {
         // Delete-pending files fail with access denied (as do unreadable ones, which cannot play either).
         const DWORD error = GetLastError();
+        // A card reader or drive that keeps its letter with no medium in it reports not ready.
         return {error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND && error != ERROR_ACCESS_DENIED &&
-            error != ERROR_DELETE_PENDING && error != ERROR_INVALID_NAME, {}};
+            error != ERROR_DELETE_PENDING && error != ERROR_INVALID_NAME && error != ERROR_NOT_READY &&
+            error != ERROR_NO_MEDIA_IN_DRIVE, {}};
     }
     BY_HANDLE_FILE_INFORMATION info{};
     const bool ok = GetFileInformationByHandle(file, &info); CloseHandle(file);
