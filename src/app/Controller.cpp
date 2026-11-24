@@ -218,7 +218,10 @@ bool Controller::replaceAudio(const QMap<QString, std::shared_ptr<const AudioDat
     if (!canEdit()) return false;
     // Matching by path keeps a relinked asset (same id, other file) on its own source.
     const auto swap = [&](Project& p) {
-        for (auto& a : p.assets) if (a.audio && a.audio->storage && audio.contains(a.path)) a.audio = audio.value(a.path);
+        for (auto& a : p.assets) if (a.audio && a.audio->storage && audio.contains(a.path)) {
+            a.audio = audio.value(a.path);
+            if (!a.video && !a.image) a.duration = seconds(a.audio->length()); // The file may have changed since import; new clips use it.
+        }
         bindAudio(p);
     };
     try {

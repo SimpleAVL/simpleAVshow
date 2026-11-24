@@ -1030,7 +1030,9 @@ void MainWindow::outputSettings() {
         wasEditable = editable;
         const QString reason = editable ? QString() : "Use Stop All before changing audio or MIDI connections; this stops any running async audio or video.";
         for (QWidget* control : std::initializer_list<QWidget*>{api, devices, channels, buffer, sources, midiPort, midiConnect, refreshPorts}) {
-            control->setEnabled(editable); control->setToolTip(reason);
+            // The lock reason replaces a control's own guidance only while locked.
+            if (!control->property("guidance").isValid()) control->setProperty("guidance", control->toolTip());
+            control->setEnabled(editable); control->setToolTip(editable ? control->property("guidance").toString() : reason);
         }
         const bool audioAvailable = devices->currentData().isValid();
         audioApply->setEnabled(editable && audioAvailable);

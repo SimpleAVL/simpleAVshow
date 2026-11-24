@@ -234,22 +234,22 @@ private:
 // places continue sequentially instead of seeking for every block.
 class StreamStorage final : public AudioStorage {
 public:
-    // The file as it was before the import pass measured it; a later replacement is a change.
-    struct Version { qint64 size = 0; QDateTime modified; detail::FileIdentity identity; };
-    static Version version(const QString& path) { const QFileInfo info(path); return {info.size(), info.lastModified(), detail::fileIdentity(path)}; }
-    StreamStorage(QString path, Frame length, AudioDecoder::SeekPoints points, Version version)
-        : path_(std::move(path)), length_(length), points_(std::move(points)), size_(version.size), modified_(version.modified), identity_(version.identity) {}
+    // version: the file as the import hashed it, before decoding; anything else at the path is a change.
+    StreamStorage(QString path, Frame length, AudioDecoder::SeekPoints points, detail::FileVersion version)
+        : path_(std::move(path)), length_(length), points_(std::move(points)), version_(version) {
+        const std::lock_guard lock(registry().mutex); registry().storages.push_back(this);
+    }
+    ~StreamStorage() override { const std::lock_guard lock(registry().mutex); std::erase(registry().storages, this); }
     Frame length() const noexcept override { return length_; }
     bool decodes() const noexcept override { return true; }
     void read(Frame first, float* stereo, std::size_t count) const override {
         if (first < 0 || first > length_ || count > static_cast<std::size_t>(length_ - first)) throw std::runtime_error("Invalid audio source range");
         std::fill(stereo, stereo + count * 2, 0.f);
         if (!count) return;
-        const QFileInfo info(path_);
-        if (!info.exists()) throw std::runtime_error("Audio source is unavailable: " + path_.toStdString());
+        if (!QFileInfo::exists(path_)) throw std::runtime_error("Audio source is unavailable: " + path_.toStdString());
         // File identity also catches a replacement saved with the same size and modification time;
         // an in-place rewrite that keeps both is not detected.
-        if (info.size() != size_ || info.lastModified() != modified_ || detail::fileIdentity(path_) != identity_) throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString());
+        if (detail::fileVersion(path_) != version_) throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString());
         const std::lock_guard lock(mutex_);
         Reader* reader = nullptr;
         try {
@@ -267,7 +267,7 @@ public:
                 std::copy(reader->samples.begin() + (at - reader->first) * 2, reader->samples.begin() + (stop - reader->first) * 2, stereo + (at - first) * 2);
                 at = stop;
             }
-            reader->used = ++clock_;
+            reader->used = ++registry().clock;
         } catch (...) {
             // A failed decoder's position is unknown; the next read opens a fresh one.
             if (reader) std::erase_if(readers_, [reader](const auto& r) { return r.get() == reader; });
@@ -276,10 +276,24 @@ public:
     }
 private:
     static constexpr std::size_t maxReaders = 4;
+    // Each open decoder holds a file descriptor, and every armed clip prebuffers through one, so a
+    // show with hundreds of sources would exhaust the process's descriptors (256 by default on
+    // macOS). Open decoders are capped across all streamed sources: the least recently used idle
+    // one closes first and reopens with a seek (milliseconds, inside the read-ahead) when needed.
+    static constexpr std::size_t openBudget = 64;
+    struct Registry {
+        std::mutex mutex;
+        std::vector<const StreamStorage*> storages;
+        std::atomic<std::size_t> open{0};
+        std::atomic<std::uint64_t> clock{0};
+    };
+    static Registry& registry() { static Registry instance; return instance; }
     // Reading forward this far decodes through instead of seeking.
     static constexpr Frame continueWithin = 2 * sampleRate;
     struct Reader {
-        Reader(const QString& path, AudioDecoder::SeekPoints points) : decoder(path, std::move(points)) {}
+        Reader(const QString& path, AudioDecoder::SeekPoints points) : decoder(path, std::move(points)) { ++registry().open; }
+        ~Reader() { --registry().open; }
+        Reader(const Reader&) = delete; Reader& operator=(const Reader&) = delete;
         AudioDecoder decoder;
         Frame first = 0;
         std::vector<float> samples;
@@ -288,12 +302,9 @@ private:
     QString path_;
     Frame length_;
     AudioDecoder::SeekPoints points_;
-    qint64 size_ = 0;
-    QDateTime modified_;
-    detail::FileIdentity identity_;
+    detail::FileVersion version_;
     mutable std::mutex mutex_;
     mutable std::vector<std::unique_ptr<Reader>> readers_;
-    mutable std::uint64_t clock_ = 0;
     // Sets reader before seeking it, so a failed seek discards that decoder.
     void pick(Frame frame, Reader*& reader) const {
         for (const auto& r : readers_) {
@@ -302,10 +313,29 @@ private:
         }
         if (reader) return;
         if (readers_.size() < maxReaders) {
+            makeRoom();
             readers_.push_back(std::make_unique<Reader>(path_, points_)); reader = readers_.back().get();
             if (frame < continueWithin) return; // A fresh decoder starts at the beginning.
         } else reader = std::min_element(readers_.begin(), readers_.end(), [](const auto& a, const auto& b) { return a->used < b->used; })->get();
         reader->samples.clear(); reader->first = 0; reader->decoder.seek(frame);
+    }
+    // Called holding mutex_: closes least recently used decoders, here or in sources not reading
+    // right now (their locks are only tried, so two sources making room cannot deadlock), until a
+    // new one fits the budget. If every other source is busy, the budget is exceeded for now.
+    void makeRoom() const {
+        auto& r = registry();
+        const std::lock_guard lock(r.mutex);
+        while (r.open.load() >= openBudget) {
+            const StreamStorage* owner = nullptr; std::size_t index = 0;
+            std::vector<std::unique_lock<std::mutex>> held;
+            for (const auto* storage : r.storages) {
+                if (storage != this) { std::unique_lock other(storage->mutex_, std::try_to_lock); if (!other) continue; held.push_back(std::move(other)); }
+                for (std::size_t i = 0; i < storage->readers_.size(); ++i)
+                    if (!owner || storage->readers_[i]->used < owner->readers_[index]->used) { owner = storage; index = i; }
+            }
+            if (!owner) return;
+            owner->readers_.erase(owner->readers_.begin() + static_cast<std::ptrdiff_t>(index));
+        }
     }
 };
 
@@ -319,30 +349,33 @@ void addPeaks(std::vector<float>& peaks, Frame first, const std::vector<float>& 
     }
 }
 std::shared_ptr<const AudioData> loadAudio(const QString& path) {
-    const auto version = StreamStorage::version(path);
+    // The source is hashed before the decoder opens it: a replacement in between changes the stamp,
+    // which saving the summary or publishing the cache checks, instead of filing the old decode
+    // under the replacement's content key.
+    const bool streaming = preparation.load() == AudioPreparation::Stream;
+    std::optional<detail::StreamSummary> summary; std::optional<detail::AudioCache> prepared;
+    if (streaming) summary.emplace(path); else prepared.emplace(path);
     AudioDecoder decoder(path);
     auto data = std::make_shared<AudioData>(); data->mono = decoder.mono();
     Frame first = 0; std::vector<float> samples;
-    if (preparation.load() == AudioPreparation::Stream) {
+    if (streaming) {
         // One decode pass finds the exact length and waveform; playback decodes again on demand.
-        detail::StreamSummary summary(path);
-        auto known = summary.reuse(data->mono);
+        auto known = summary->reuse(data->mono);
         if (!known) {
             known = detail::AudioSummary{0, data->mono, {}, {}};
             decoder.record();
             while (decoder.next(first, samples)) { addPeaks(known->peaks, first, samples); known->length = first + static_cast<Frame>(samples.size() / 2); }
             if (known->length <= 0) throw std::runtime_error("Audio stream is empty");
             known->seekPoints = std::move(decoder).recorded();
-            summary.save(*known);
+            summary->save(*known);
         }
         data->peaks = std::move(known->peaks);
         data->storage = std::make_shared<StreamStorage>(path, known->length,
-            std::make_shared<const std::vector<detail::SeekPoint>>(std::move(known->seekPoints)), version);
+            std::make_shared<const std::vector<detail::SeekPoint>>(std::move(known->seekPoints)), summary->version());
         return data;
     }
-    detail::AudioCache prepared(path);
-    if (auto reused = prepared.reuse(data->mono)) return reused;
-    QTemporaryFile cache(prepared.temporaryTemplate());
+    if (auto reused = prepared->reuse(data->mono)) return reused;
+    QTemporaryFile cache(prepared->temporaryTemplate());
     if (!cache.open()) throw std::runtime_error("Cannot create audio cache: " + cache.errorString().toStdString());
     Frame total = 0;
     while (decoder.next(first, samples)) {
@@ -360,7 +393,7 @@ std::shared_ptr<const AudioData> loadAudio(const QString& path) {
         total += static_cast<Frame>(samples.size() / 2);
     }
     data->peaks.resize(static_cast<std::size_t>((total + AudioData::peakStride - 1) / AudioData::peakStride), 0.f);
-    data->storage = prepared.publish(cache, *data, total);
+    data->storage = prepared->publish(cache, *data, total);
     return data;
 }
 }

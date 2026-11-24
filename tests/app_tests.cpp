@@ -595,7 +595,7 @@ private slots:
             auto* dialog = window.findChild<QDialog*>("outputSettingsDialog"); if (!dialog) return;
             auto* sources = dialog->findChild<QComboBox*>("audioSourcePreparation");
             auto* late = dialog->findChild<QComboBox*>("lateAudioPolicy");
-            shown = sources && late && sources->currentData().toInt() == static_cast<int>(AudioPreparation::Prepared) &&
+            shown = sources && late && sources->currentData().toInt() == static_cast<int>(AudioPreparation::Prepared) && sources->toolTip().contains("Streaming") &&
                 late->currentData().toInt() == static_cast<int>(LateAudio::Gap);
             if (late) { late->setCurrentIndex(late->findData(static_cast<int>(LateAudio::Freeze))); emit late->activated(late->currentIndex()); }
             // Clearing keeps caches in use and reports what it freed.
@@ -1713,7 +1713,34 @@ private slots:
         QVERIFY(c.edit([](Project& p) { p.show.clips.clear(); }));
         const auto shorter = loadMedia([&] { const auto f = dir.filePath("short.wav"); writeBytes(f, waveBytes(16, 1, 2, 44100, false, 44100)); return f; }()).audio;
         QVERIFY(c.replaceAudio({{streamed.path, shorter}}));
+        QCOMPARE(c.project.assets[streamed.id].duration, seconds(shorter->length())); // New clips use the reloaded length.
         c.undo(); QCOMPARE(c.project.show.clips[0].offset, frames(1.5)); QCOMPARE(c.project.show.clips[0].audio, prepared);
+    }
+    void manyStreamedSourcesShareABoundedDecoderBudget() {
+#ifdef Q_OS_WIN
+        QSKIP("counts descriptors through /dev/fd");
+#else
+        // Every armed clip prebuffers; without a shared budget each source would keep its own file open.
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; auto show = std::make_shared<Show>();
+        show->tracks.push_back({"audio", "Audio", false, false, false, 1, 0, 0, 1});
+        constexpr int sources = 160;
+        for (int i = 0; i < sources; ++i) {
+            const auto path = dir.filePath(QString("cue-%1.wav").arg(i)); writeBytes(path, waveBytes(16, 1, 2, 44100, false, 4410 + i));
+            Clip clip; clip.audio = loadMedia(path).audio; clip.start = frames(.2) * i; clip.duration = clip.audio->length(); show->clips.push_back(clip);
+        }
+        show->duration = frames(.2) * sources;
+        const auto descriptors = [] { return QDir("/dev/fd").entryList(QDir::AllEntries | QDir::System | QDir::NoDotAndDotDot).size(); };
+        const auto before = descriptors();
+        Transport transport; transport.configure(show);
+        QVERIFY(!transport.audioReadFailed());
+        QVERIFY2(descriptors() - before <= 72, qPrintable(QString("%1 descriptors opened").arg(descriptors() - before)));
+        // Evicted decoders reopen on demand: a later cue still plays exactly.
+        transport.command({Action::Seek, show->clips[150].start}); transport.command({Action::Play});
+        std::vector<float> out(512 * 2); transport.render(out.data(), 512, 2); // The seek reads its new place cold.
+        for (int i = 0; i < 200 && transport.position() == show->clips[150].start; ++i) { QTest::qWait(2); transport.render(out.data(), 512, 2); }
+        QVERIFY(!transport.audioReadFailed()); QVERIFY(transport.position() > show->clips[150].start);
+#endif
     }
     void damagedStreamSidecarIsRejected() {
         setAudioPreparation(AudioPreparation::Stream);

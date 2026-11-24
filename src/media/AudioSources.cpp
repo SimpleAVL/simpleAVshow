@@ -44,6 +44,10 @@ FileIdentity fileIdentity(const QString& path) {
     return {static_cast<quint64>(info.st_dev), static_cast<quint64>(info.st_ino)};
 #endif
 }
+FileVersion fileVersion(const QString& path) {
+    const QFileInfo info(path);
+    return {info.size(), info.lastModified().toMSecsSinceEpoch(), fileIdentity(path)};
+}
 namespace {
 constexpr qint64 stereoBytes = 2 * sizeof(float);
 constexpr qint64 legacyHeader = 8 + 8 + 1 + 32 + 32, metadataHeader = legacyHeader + 32;
@@ -346,7 +350,7 @@ QString audioCacheDirectory() {
 
 StreamSummary::StreamSummary(const QString& source) : source_(source) {
     const auto before = stamp(source);
-    stamp_ = before.key();
+    stamp_ = before.key(); version_ = {before.size, before.modified, before.identity};
     const auto key = QString::fromLatin1(QCryptographicHash::hash(decoderRevision() + sourceHash(source), QCryptographicHash::Sha256).toHex());
     path_ = audioCacheDirectory() + '/' + key + ".stream";
 }
