@@ -1002,6 +1002,41 @@ private slots:
         QVERIFY(received.detail.contains("apply_edits"));
         QTRY_COMPARE(stopReason, QString("end_turn"));
         client.disconnectFromAgent();
+
+        // A permission request with a short content summary must still surface cached rawInput arguments.
+        AcpClient summaryClient;
+        AcpPermissionRequest summaryReq;
+        bool gotSummary = false;
+        QObject::connect(&summaryClient, &AcpClient::permissionRequested, &summaryClient, [&](const AcpPermissionRequest& req) {
+            summaryReq = req;
+            gotSummary = true;
+            summaryClient.respondPermission(req.requestKey, "allow-once");
+        });
+        QString summaryStop;
+        QObject::connect(&summaryClient, &AcpClient::promptFinished, &summaryClient, [&](const QString& reason) { summaryStop = reason; });
+        summaryClient.connectToAgent(QString::fromUtf8(SAV_MOCK_ACP_AGENT), {"--http-mcp", "--require-permission", "--summary-only-permission"},
+            QDir::tempPath(), {});
+        QTRY_COMPARE(summaryClient.state(), AcpState::Ready);
+        summaryClient.sendPrompt("test summary-only permission");
+        QTRY_VERIFY(gotSummary);
+        QVERIFY(summaryReq.detail.contains("Short summary"));
+        QVERIFY(summaryReq.detail.contains("apply_edits"));
+        QTRY_COMPARE(summaryStop, QString("end_turn"));
+        summaryClient.disconnectFromAgent();
+
+        // A clean agent exit immediately after a >32-line burst must drain all buffered lines and promptFinished.
+        AcpClient burstClient;
+        QString combined;
+        QString burstStop;
+        QObject::connect(&burstClient, &AcpClient::messageChunk, &burstClient, [&](const QString& c) { combined += c; });
+        QObject::connect(&burstClient, &AcpClient::promptFinished, &burstClient, [&](const QString& r) { burstStop = r; });
+        burstClient.connectToAgent(QString::fromUtf8(SAV_MOCK_ACP_AGENT), {"--http-mcp", "--burst-and-exit"},
+            QDir::tempPath(), {});
+        QTRY_COMPARE(burstClient.state(), AcpState::Ready);
+        burstClient.sendPrompt("burst");
+        QTRY_COMPARE(burstClient.state(), AcpState::Disconnected);
+        QCOMPARE(burstStop, QString("end_turn"));
+        QVERIFY(combined.contains("B44 "));
     }
 };
 

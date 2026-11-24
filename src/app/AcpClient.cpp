@@ -591,6 +591,30 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
             if (stopping_) return;
             deadlineTimer_.stop();
             cancelTimer_.stop();
+            // Drain any remaining buffered stdout/stderr lines before tearing down session state so a
+            // clean agent exit after a burst >32 lines never drops the tail of a reply or prompt result.
+            if (process_) {
+                constexpr qsizetype maxStdoutBufferBytes = 4 * 1024 * 1024;
+                constexpr qint64 maxStderrTailBytes = 64 * 1024;
+                constexpr int maxExitDrainLines = 2048;
+                process_->setReadChannel(QProcess::StandardError);
+                const QByteArray stderrTail = process_->read(maxStderrTailBytes);
+                process_->setReadChannel(QProcess::StandardOutput);
+                if (!stderrTail.isEmpty()) emit stderrReceived(QString::fromUtf8(stderrTail));
+                const qint64 remainingBudget = std::max<qint64>(0, maxStdoutBufferBytes * 2 - stdoutBuffer_.size());
+                if (remainingBudget > 0) stdoutBuffer_.append(process_->read(remainingBudget));
+                int drained = 0;
+                while (process_ && !stopping_ && drained < maxExitDrainLines) {
+                    const qsizetype newline = stdoutBuffer_.indexOf('\n');
+                    if (newline < 0 || newline > maxStdoutBufferBytes) break;
+                    QByteArray line = stdoutBuffer_.left(newline);
+                    stdoutBuffer_.remove(0, newline + 1);
+                    ++drained;
+                    if (!line.isEmpty() && line.endsWith('\r')) line.chop(1);
+                    if (!line.trimmed().isEmpty()) handleLine(line);
+                }
+                if (stopping_) return;
+            }
             const QString reason = exitStatus == QProcess::CrashExit
                 ? QString("ACP agent crashed (exit code %1).").arg(exitCode)
                 : QString("ACP agent exited (code %1).").arg(exitCode);
@@ -599,6 +623,7 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
             pendingPermissions_.clear();
             knownToolCalls_.clear();
             knownToolCallOrder_.clear();
+            stdoutBuffer_.clear();
             sessionId_.clear();
             if (auto tree = std::move(processTree_)) {
 #if defined(Q_OS_UNIX)
@@ -949,14 +974,22 @@ void AcpClient::handleNotification(const QString& method, const QJsonObject& par
             }
             if (!call.title.isEmpty()) tracked.title = call.title;
             if (!call.kind.isEmpty()) tracked.kind = call.kind;
-            const QString permDetail = !rawInputDetail.isEmpty() ? rawInputDetail : contentDetail;
-            if (!permDetail.isEmpty()) {
-                if (permDetail.size() > maxPermissionDetailChars) {
-                    tracked.detailTooLarge = true;
-                    tracked.detail.clear();
-                } else if (!rawInputDetail.isEmpty() || (tracked.detail.isEmpty() && !tracked.detailTooLarge)) {
-                    tracked.detailTooLarge = false;
-                    tracked.detail = permDetail;
+            if (!rawInputDetail.isEmpty()) {
+                if (rawInputDetail.size() > maxPermissionDetailChars) {
+                    tracked.rawInputTooLarge = true;
+                    tracked.rawInput.clear();
+                } else {
+                    tracked.rawInputTooLarge = false;
+                    tracked.rawInput = rawInputDetail;
+                }
+            }
+            if (!contentDetail.isEmpty()) {
+                if (contentDetail.size() > maxPermissionDetailChars) {
+                    tracked.contentTooLarge = true;
+                    tracked.content.clear();
+                } else {
+                    tracked.contentTooLarge = false;
+                    tracked.content = contentDetail;
                 }
             }
         }
@@ -997,13 +1030,27 @@ void AcpClient::handleAgentRequest(const QJsonValue& id, const QString& method, 
         if (resolvedTitle.isEmpty()) resolvedTitle = "Agent permission request";
         QString resolvedKind = toolCall["kind"].toString();
         if (resolvedKind.isEmpty() && hasTracked) resolvedKind = trackedIt->kind;
-        QString fullDetail = summarizeJson(toolCall["rawInput"]);
-        if (fullDetail.isEmpty()) fullDetail = extractContentText(toolCall["content"]);
-        bool detailTooLarge = fullDetail.size() > maxPermissionDetailChars;
-        if (fullDetail.isEmpty() && hasTracked) {
-            if (trackedIt->detailTooLarge) detailTooLarge = true;
-            else fullDetail = trackedIt->detail;
+        const QString reqRawInput = summarizeJson(toolCall["rawInput"]);
+        const QString reqContent = extractContentText(toolCall["content"]);
+        bool detailTooLarge = reqRawInput.size() > maxPermissionDetailChars || reqContent.size() > maxPermissionDetailChars;
+        QString resolvedRawInput = reqRawInput;
+        if (resolvedRawInput.isEmpty() && hasTracked) {
+            if (trackedIt->rawInputTooLarge) detailTooLarge = true;
+            else resolvedRawInput = trackedIt->rawInput;
         }
+        QString resolvedContent = reqContent;
+        if (resolvedContent.isEmpty() && hasTracked) {
+            if (trackedIt->contentTooLarge && resolvedRawInput.isEmpty()) detailTooLarge = true;
+            else resolvedContent = trackedIt->content;
+        }
+        QString fullDetail;
+        if (!resolvedContent.isEmpty() && !resolvedRawInput.isEmpty() && resolvedContent != resolvedRawInput)
+            fullDetail = resolvedContent + "\n\nArguments:\n" + resolvedRawInput;
+        else if (!resolvedRawInput.isEmpty())
+            fullDetail = resolvedRawInput;
+        else
+            fullDetail = resolvedContent;
+        if (fullDetail.size() > maxPermissionDetailChars) detailTooLarge = true;
         if (detailTooLarge) {
             // Never present a truncated permission request that could hide arguments behind Allow.
             sendResponse(id, {{"outcome", QJsonObject{{"outcome", "cancelled"}}}});

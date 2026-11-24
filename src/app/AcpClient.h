@@ -117,8 +117,10 @@ private:
     struct KnownToolCall {
         QString title;
         QString kind;
-        QString detail;
-        bool detailTooLarge = false;
+        QString rawInput;
+        QString content;
+        bool rawInputTooLarge = false;
+        bool contentTooLarge = false;
     };
 
     struct ProcessTreeHandle;

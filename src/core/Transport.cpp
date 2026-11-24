@@ -88,6 +88,7 @@ void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
     const auto retired = std::move(show_); auto reusable = std::move(buffers_);
     show_ = std::move(show);
     urgentStop_.store(false, std::memory_order_release);
+    pendingStart_ = {};
     commands_.clear(); applied_ = 0; commandsApplied_.store(0, std::memory_order_release); midi_.reset(std::max(std::size_t{1024}, show_->markers.size()));
     voices_.assign(show_->clips.size(), {}); releases_.assign(show_->clips.size(), {});
     releasing_.clear(); releasing_.reserve(show_->clips.size());
@@ -239,6 +240,7 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
 }
 
 void Transport::applyStopAll() noexcept {
+    pendingStart_ = {};
     for (std::size_t i = 0; i < voices_.size(); ++i) cut(i);
     std::fill(voices_.begin(), voices_.end(), Voice{}); state_ = State::Stopped; heldMarker_ = -1;
     epoch_.fetch_add(1); clipped_.store(false); prime();
@@ -296,7 +298,9 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
         urgentStop_.store(false, std::memory_order_release);
     };
 
-    PendingPlayStart pendingStart;
+    // Keep pendingStart_ across callbacks if the previous callback stalled on a disk read before
+    // mixing its first sample so revoking an agent during disk wait still blocks playback start.
+    PendingPlayStart& pendingStart = pendingStart_;
     if (urgent) {
         applyUrgentStop(0);
     } else {
@@ -399,10 +403,14 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                         !isSourceValid(pendingStart.resumeSource, pendingStart.resumeEpoch)) {
                         state_ = pendingStart.resumePrevState;
                         heldMarker_ = pendingStart.resumePrevHeldMarker;
-                        pendingStart.wasHeld = false;
                         pendingStart.active = false;
                     }
                 }
+                pendingStart.wasHeld = false;
+            }
+            if (state_ != State::Playing) {
+                pendingStart.active = false;
+                pendingStart.seekCueActive = false;
             }
         }
     }
@@ -553,7 +561,13 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             if (std::abs(sample) > 1.f) clipped_.store(true, std::memory_order_relaxed);
             sample = std::clamp(sample, -1.f, 1.f);
         }
-        if (!waiting && state_ == State::Playing) ++position_;
+        if (!waiting) {
+            if (f == 0 && pendingStart.active) {
+                pendingStart.active = false;
+                pendingStart.seekCueActive = false;
+            }
+            if (state_ == State::Playing) ++position_;
+        }
     }
     publish(peak);
 }

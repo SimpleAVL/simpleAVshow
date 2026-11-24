@@ -30,6 +30,8 @@ int main(int argc, char** argv) {
     const bool exitCleanAfterPermission = args.contains("--exit-clean-after-permission");
     const bool noSessionClose = args.contains("--no-session-close");
     const bool idOnlyPermission = args.contains("--id-only-permission");
+    const bool summaryOnlyPermission = args.contains("--summary-only-permission");
+    const bool burstAndExit = args.contains("--burst-and-exit");
 
     int sessionCounter = 0;
     QString sessionId = "mock-session-1";
@@ -156,7 +158,7 @@ int main(int argc, char** argv) {
                 waitingPermission = true;
                 QJsonObject rawInput{{"action", "apply_edits"}};
                 if (longPermission) rawInput.insert("payload", QString(320, 'X') + "TAIL_MARKER_END");
-                if (idOnlyPermission) {
+                if (idOnlyPermission || summaryOnlyPermission) {
                     send({{"jsonrpc", "2.0"}, {"method", "session/update"}, {"params", QJsonObject{
                         {"sessionId", pendingPromptSession},
                         {"update", QJsonObject{
@@ -168,9 +170,12 @@ int main(int argc, char** argv) {
                             {"rawInput", rawInput}
                         }}
                     }}});
+                    QJsonObject tc{{"toolCallId", "tc-perm"}};
+                    if (summaryOnlyPermission)
+                        tc.insert("content", QJsonObject{{"type", "text"}, {"text", "Short summary"}});
                     send({{"jsonrpc", "2.0"}, {"id", "perm-1"}, {"method", "session/request_permission"}, {"params", QJsonObject{
                         {"sessionId", pendingPromptSession},
-                        {"toolCall", QJsonObject{{"toolCallId", "tc-perm"}}},
+                        {"toolCall", tc},
                         {"options", QJsonArray{
                             QJsonObject{{"optionId", "allow-once"}, {"name", "Allow once"}, {"kind", "allow_once"}},
                             QJsonObject{{"optionId", "reject-once"}, {"name", "Reject"}, {"kind", "reject_once"}}
@@ -194,6 +199,18 @@ int main(int argc, char** argv) {
                 if (exitCleanAfterPermission) return 0;
             } else if (holdPrompt && (!staleOnNewSession || sessionCounter == 1)) {
                 waitingCancel = true;
+            } else if (burstAndExit) {
+                for (int i = 0; i < 45; ++i) {
+                    send({{"jsonrpc", "2.0"}, {"method", "session/update"}, {"params", QJsonObject{
+                        {"sessionId", pendingPromptSession},
+                        {"update", QJsonObject{
+                            {"sessionUpdate", "agent_message_chunk"},
+                            {"content", QJsonObject{{"type", "text"}, {"text", QString("B%1 ").arg(i)}}}
+                        }}
+                    }}});
+                }
+                send({{"jsonrpc", "2.0"}, {"id", pendingPromptId}, {"result", QJsonObject{{"stopReason", "end_turn"}}}});
+                return 0;
             } else {
                 finishPrompt("ok");
             }

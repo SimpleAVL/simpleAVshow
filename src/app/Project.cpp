@@ -388,9 +388,24 @@ void writeProject(const Project& p, const QString& path, bool allowOverwrite) {
     for (const auto& a : p.assets)
         if (a.path.isEmpty()) throw std::runtime_error("Use Export demo first to save generated media");
     const QFileInfo targetInfo(path);
+    if (allowOverwrite && targetInfo.isSymLink()) {
+        const QString canonical = targetInfo.canonicalFilePath();
+        if (!canonical.isEmpty() && !canonical.endsWith(".savshow", Qt::CaseInsensitive))
+            throw std::runtime_error("Refusing to overwrite symlink target that is not a .savshow file");
+    }
     const QString resolvedPath = (allowOverwrite && targetInfo.isSymLink() && !targetInfo.canonicalFilePath().isEmpty())
         ? targetInfo.canonicalFilePath()
         : path;
+    const auto normalizedPath = [](const QString& pth) {
+        const QFileInfo fi(pth);
+        const QString can = fi.canonicalFilePath();
+        return can.isEmpty() ? QDir::cleanPath(fi.absoluteFilePath()) : can;
+    };
+    const QString resolvedNorm = normalizedPath(resolvedPath);
+    for (const auto& a : p.assets) {
+        if (!a.path.isEmpty() && normalizedPath(a.path) == resolvedNorm)
+            throw std::runtime_error("Cannot overwrite a media file referenced by this show");
+    }
     const auto root = projectJson(p, QFileInfo(resolvedPath).absolutePath());
     QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
     if (bytes.size() > compactThresholdBytes) bytes = QJsonDocument(root).toJson(QJsonDocument::Compact);
@@ -543,7 +558,11 @@ Project readProject(const QString& path, const std::function<bool()>& isCancelle
     const QByteArray bytes = file.read(maxProjectFileBytes + 1);
     if (bytes.size() > maxProjectFileBytes)
         throw std::runtime_error("Project file is too large to be a valid .savshow manifest");
-    Project p = parseProject(bytes, QFileInfo(path).absolutePath());
+    const QFileInfo openInfo(path);
+    const QString manifestPath = (openInfo.isSymLink() && !openInfo.canonicalFilePath().isEmpty())
+        ? openInfo.canonicalFilePath()
+        : path;
+    Project p = parseProject(bytes, QFileInfo(manifestPath).absolutePath());
     loadProjectMedia(p, isCancelled); return p;
 }
 namespace {

@@ -864,7 +864,9 @@ void MainWindow::dropEvent(QDropEvent* event) {
     // A dropped show opens; anything else imports into the media library.
     if (paths.size() == 1 && (paths[0].endsWith(".savshow", Qt::CaseInsensitive) || isProjectPackage(paths[0]))) {
         quint64 confirmedRev = 0;
-        if (c_.canEdit() && checkDiscard(&confirmedRev) && c_.canEdit() && c_.projectRevision() == confirmedRev) openPath(paths[0]);
+        bool shouldDiscardAutosave = false;
+        if (c_.canEdit() && checkDiscard(&confirmedRev, false, &shouldDiscardAutosave) && c_.canEdit() && c_.projectRevision() == confirmedRev)
+            openPath(paths[0], shouldDiscardAutosave);
     }
     else importPaths(paths);
 }
@@ -1241,8 +1243,15 @@ void MainWindow::openPath(const QString& path, bool discardPreviousAutosave) {
     // A sidecar opens as unsaved edits to its show, so Save replaces the show rather than writing "x.savshow.autosave.savshow".
     QString source = path, target = isProjectPackage(path) ? QString() : path;
     bool recovered = path.endsWith(".savshow.autosave", Qt::CaseInsensitive);
+    if (!recovered && !target.isEmpty()) {
+        const QFileInfo targetInfo(target);
+        if (targetInfo.isSymLink() && !targetInfo.canonicalFilePath().isEmpty() &&
+            targetInfo.canonicalFilePath().endsWith(".savshow", Qt::CaseInsensitive)) {
+            target = targetInfo.canonicalFilePath();
+        }
+    }
     if (recovered) target = path == Controller::untitledAutosavePath() ? QString() : target.chopped(QString(".autosave").size());
-    else if (const QFileInfo sidecar(path + ".autosave"); !target.isEmpty() && sidecar.exists() && sidecar.lastModified() > QFileInfo(path).lastModified()) {
+    else if (const QFileInfo sidecar(target + ".autosave"); !target.isEmpty() && sidecar.exists() && sidecar.lastModified() > QFileInfo(target).lastModified()) {
         QMessageBox box(QMessageBox::Question, "Recover unsaved changes?",
             "An autosave of “" + QFileInfo(path).fileName() + "” from " + QLocale().toString(sidecar.lastModified(), QLocale::ShortFormat) + " is newer than the saved show.",
             QMessageBox::NoButton, this);
@@ -1446,16 +1455,22 @@ bool MainWindow::eventFilter(QObject* object, QEvent* event) {
     if (event->type() != QEvent::KeyPress || !isVisible()) return QMainWindow::eventFilter(object, event);
     auto* key = static_cast<QKeyEvent*>(event); auto* widget = qobject_cast<QWidget*>(object);
     if (!widget || (widget->window() != this && widget->window() != outputWindow_)) return QMainWindow::eventFilter(object, event);
-    auto* lineEdit = qobject_cast<QLineEdit*>(widget);
-    auto* textEdit = qobject_cast<QTextEdit*>(widget);
-    auto* plainEdit = qobject_cast<QPlainTextEdit*>(widget);
-    const bool editing = (lineEdit && !lineEdit->isReadOnly()) || (textEdit && !textEdit->isReadOnly()) ||
-        (plainEdit && !plainEdit->isReadOnly()) || qobject_cast<QAbstractSpinBox*>(widget) || qobject_cast<QComboBox*>(widget);
+    auto isEditableWidget = [](QWidget* w) {
+        if (!w) return false;
+        auto* le = qobject_cast<QLineEdit*>(w);
+        auto* te = qobject_cast<QTextEdit*>(w);
+        auto* pe = qobject_cast<QPlainTextEdit*>(w);
+        return (le && !le->isReadOnly()) || (te && !te->isReadOnly()) ||
+            (pe && !pe->isReadOnly()) || qobject_cast<QAbstractSpinBox*>(w) || qobject_cast<QComboBox*>(w);
+    };
+    QWidget* focusWidget = QApplication::focusWidget();
+    // Check both the event target and current focus widget so keys ignored by an editable field
+    // (such as Escape in QPlainTextEdit) do not become global Stop All when propagated to a parent.
+    const bool editing = isEditableWidget(widget) || isEditableWidget(focusWidget);
     // Keep Space and Backspace/Delete inside the Agent Chat drawer (transcript, logs, permission
     // cards, buttons) from accidentally toggling live playback or deleting selected timeline clips.
     // Let child controls inside the drawer handle them first; if ignored and propagated up to the
     // Agent Chat panel boundary, consume them there so they never bubble out to MainWindow.
-    QWidget* focusWidget = QApplication::focusWidget();
     const bool focusInAgentChat = agentChat_ && focusWidget && (focusWidget == agentChat_ || agentChat_->isAncestorOf(focusWidget));
     const bool targetInAgentChat = agentChat_ && (widget == agentChat_ || agentChat_->isAncestorOf(widget));
     // Outside Show mode Escape is Stop All unless it cancels a field edit. In Show mode a stray press

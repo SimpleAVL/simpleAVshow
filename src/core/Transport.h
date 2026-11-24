@@ -131,6 +131,7 @@ private:
         CommandSource seekCueSource = CommandSource::Operator;
         std::uint64_t seekCueEpoch = 0;
     };
+    PendingPlayStart pendingStart_;
     void apply(Command command, PendingPlayStart& pendingStart) noexcept;
     void applyStopAll() noexcept;
     void dispatch(int marker, CommandSource source = CommandSource::Operator, std::uint64_t sourceEpoch = 0,

@@ -369,6 +369,8 @@ private slots:
         QCOMPARE(window.controller().transport.state(), State::Held);
         QVERIFY(!call(server, "transport_control", {{"action", "stop_all"}})["isError"].toBool());
         window.controller().transport.render(samples, 1, 2);
+        // Continue must only resume a Held transport, never restart a Stopped show.
+        QVERIFY(call(server, "transport_control", {{"action", "continue"}})["isError"].toBool());
         // A pending StopAll must block an agent Play until the audio callback applies the stop.
         window.controller().transport.requestStopAll();
         QVERIFY(call(server, "transport_control", {{"action", "play"}})["isError"].toBool());
@@ -419,6 +421,10 @@ private slots:
         QVERIFY(QFile::link(showPath, symlinkShowPath));
         QVERIFY(!call(server, "project_action", {{"action", "save"}, {"path", symlinkShowPath}})["isError"].toBool());
         QCOMPARE(QFileInfo(window.controller().path).canonicalFilePath(), QFileInfo(showPath).canonicalFilePath());
+        // A .savshow symlink pointing to a non-.savshow media file must be rejected even with overwrite: true.
+        const QString mediaAlias = dir.filePath("alias.savshow");
+        QVERIFY(QFile::link(imgPath, mediaAlias));
+        QVERIFY(call(server, "project_action", {{"action", "save_as"}, {"path", mediaAlias}, {"overwrite", true}})["isError"].toBool());
 #endif
         QVERIFY(!call(server, "project_action", {{"action", "export_package"}, {"path", packPath}})["isError"].toBool());
         QVERIFY(QFileInfo::exists(packPath));

@@ -1663,10 +1663,19 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
         const bool allowOverwrite = overwrite || (action == "save" && !c_.path.isEmpty() && sameLocalPath(target, c_.path));
         if (allowOverwrite) {
             // When saving through a symlink to an existing show, resolve to the canonical manifest path so
-            // relative media paths and sibling .media staging match the actual manifest directory.
+            // relative media paths and sibling .media staging match the actual manifest directory, while
+            // refusing to follow a symlink onto a non-.savshow file or a referenced media asset.
             const QFileInfo targetInfo(target);
-            if (targetInfo.isSymLink() && !targetInfo.canonicalFilePath().isEmpty())
-                target = targetInfo.canonicalFilePath();
+            if (targetInfo.isSymLink() && !targetInfo.canonicalFilePath().isEmpty()) {
+                const QString canonical = targetInfo.canonicalFilePath();
+                if (!canonical.endsWith(".savshow", Qt::CaseInsensitive))
+                    fail("Refusing to overwrite symlink target that is not a .savshow file");
+                target = canonical;
+            }
+            for (const auto& asset : c_.project.assets) {
+                if (!asset.path.isEmpty() && sameLocalPath(asset.path, target))
+                    fail("Cannot overwrite a media file referenced by this show");
+            }
         } else {
             if (QFileInfo::exists(target) || QFileInfo(target).isSymLink())
                 fail("Destination file already exists; pass overwrite: true to replace it");
@@ -1742,8 +1751,12 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
     if (action == "export_package") {
         if (path.isEmpty() || !QFileInfo(path).isAbsolute()) fail("Provide an absolute local path for .savpack export");
         if (!isProjectPackage(path)) path += ".savpack";
-        if (!overwrite && QFileInfo::exists(path))
+        if (!overwrite && (QFileInfo::exists(path) || QFileInfo(path).isSymLink()))
             fail("Destination package already exists; pass overwrite: true to replace it");
+        for (const auto& asset : c_.project.assets) {
+            if (!asset.path.isEmpty() && sameLocalPath(asset.path, path))
+                fail("Cannot overwrite a media file referenced by this show");
+        }
         const quint64 expectedRev = revision_;
         const quint64 lease = c_.acquireBusy();
         if (!lease) fail("Wait for the current busy operation to finish");
@@ -1809,7 +1822,11 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
                      QFileInfo(path).canonicalFilePath() == QFileInfo(untitled).canonicalFilePath());
                 targetPath = isUntitled ? QString() : path.chopped(QString(".autosave").size());
             } else {
-                targetPath = path;
+                const QFileInfo openFi(path);
+                targetPath = (openFi.isSymLink() && !openFi.canonicalFilePath().isEmpty() &&
+                              openFi.canonicalFilePath().endsWith(".savshow", Qt::CaseInsensitive))
+                    ? openFi.canonicalFilePath()
+                    : path;
             }
         }
         const quint64 expectedRev = revision_;
@@ -1864,8 +1881,14 @@ QJsonObject McpServer::transportControlTool(const QJsonObject& a, const QString&
     const QString action = a["action"].toString();
     const CommandSource src = chatTokens_.contains(bearerToken) ? CommandSource::ChatAgent : CommandSource::ExternalAgent;
     bool accepted = true;
-    if (action == "play" || action == "continue") {
-        // Explicit play/continue never toggles a Playing show into Pause.
+    if (action == "play") {
+        // Explicit play never toggles a Playing show into Pause.
+        accepted = c_.play(src);
+        if (!accepted) fail(c_.playbackProblem.isEmpty() ? c_.status : c_.playbackProblem);
+    } else if (action == "continue") {
+        // Continue specifically resumes a hold and must never restart a stopped or paused rehearsal.
+        if (c_.effectiveState() != State::Held)
+            fail(QString("Cannot continue: transport is not at a hold (current state: %1)").arg(stateName(c_.effectiveState())));
         accepted = c_.play(src);
         if (!accepted) fail(c_.playbackProblem.isEmpty() ? c_.status : c_.playbackProblem);
     } else if (action == "pause") {

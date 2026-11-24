@@ -483,6 +483,26 @@ int main() {
             expect(t.epoch() == opMidiEpoch, "revoking chat play does not bump global MIDI epoch");
             expect(t.takeMidi(ev) && ev.epoch == t.epoch() && ev.source == CommandSource::Operator,
                 "earlier operator MIDI cue stays valid after chat play revocation");
+            // Revoking a chat Play during a disk cache miss prevents audible start once the read completes.
+            auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto dp = show(false); dp->duration = storage->length(); dp->clips[0].duration = dp->duration; dp->clips[0].audio = diskAudio(storage);
+            Transport dt; dt.configure(dp);
+            storage->fail.store(true);
+            const Frame farPos = frames(20 * 3600);
+            const auto diskChatEp = dt.chatAgentEpoch();
+            dt.command({Action::Seek, farPos, CommandSource::Operator, 0});
+            dt.command({Action::Play, 0, CommandSource::ChatAgent, diskChatEp});
+            std::vector<float> dout(64 * 2, 0.f);
+            checkedRender(dt, dout.data(), 64, 2); // Stalls on cache miss at farPos.
+            expect(dt.position() == farPos, "disk cache miss holds playhead stationary");
+            dt.invalidateChatAgentCommands();
+            storage->fail.store(false);
+            for (int i = 0; i < 200; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                checkedRender(dt, dout.data(), 8, 2);
+            }
+            expect(dt.state() != State::Playing && dt.position() == farPos,
+                "revoked chat play stays stopped even after stalled disk read completes");
         }}
     };
     for (const auto& [name, test] : tests) {
