@@ -1744,6 +1744,20 @@ private slots:
         QVERIFY(!transport.audioReadFailed()); QVERIFY(transport.position() > show->clips[150].start);
 #endif
     }
+    void saveLeavesARelinkedAssetsHistoryAlone() {
+        // Undo after relink and Save restores the asset as it was, not the relinked file.
+        QTemporaryDir dir; const auto first = dir.filePath("a.wav"), second = dir.filePath("b.wav");
+        writeBytes(first, waveBytes(16, 1, 2, sampleRate, false, 48000)); writeBytes(second, waveBytes(16, 1, 2, sampleRate, false, 96000));
+        Controller c; auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}};
+        auto original = loadMedia(first); project.assets.insert(original.id, original);
+        Clip clip; clip.id = "a"; clip.assetId = original.id.toStdString(); clip.audio = original.audio; clip.duration = original.audio->length(); project.show.clips.push_back(clip);
+        c.replace(project);
+        auto relinked = loadMedia(second); relinked.id = original.id; relinked.name = original.name;
+        QVERIFY(c.edit([&](Project& p) { p.assets.insert(relinked.id, relinked); }));
+        c.save(dir.filePath("show.savshow")); QVERIFY2(!c.dirty, qPrintable(c.status));
+        c.undo(); QCOMPARE(c.project.assets[original.id].path, original.path); QCOMPARE(c.project.assets[original.id].audio, original.audio);
+    }
     void manifestsThatReferToOtherFilesAreRejected() {
         // Two identical manifests can name different files, so their bytes cannot identify the audio.
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");

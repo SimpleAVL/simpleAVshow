@@ -145,6 +145,7 @@ void Controller::toggle() {
     if (busy) return;
     const State state = transport.state(); const bool playing = state == State::Playing;
     const bool recovering = !playing && !playbackProblem.isEmpty();
+    QString warning; // A problem this resume continues past; reconnecting a device must not clear it.
     if (!playing) {
         playbackProblem.clear();
         // Re-arming retries sources that were briefly unavailable; changed sources still need reopening.
@@ -154,15 +155,16 @@ void Controller::toggle() {
         const bool resuming = state == State::Held || transport.asyncVoices() || (state == State::Paused && device.running());
         if (const auto missing = missingMedia(); !missing.isEmpty()) {
             report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
-            playbackProblem = status;
+            playbackProblem = warning = status;
             if (!resuming) return;
         }
-        if (needsMidi() && !prepareMidi()) { playbackProblem = status; if (!resuming) return; }
+        if (needsMidi() && !prepareMidi()) { playbackProblem = status; if (!resuming) return; if (warning.isEmpty()) warning = status; }
         if (!prepareAudio()) { playbackProblem = status; return; }
         if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return; }
     }
     if (!transport.command({playing ? Action::Pause : Action::Play})) report("Transport command queue is full");
-    else if (recovering && playbackProblem.isEmpty()) report("Playback resumed."); // Replaces the resolved problem in the status bar.
+    else if (!warning.isEmpty()) { report(warning); playbackProblem = warning; }
+    else if (recovering) report("Playback resumed."); // Replaces the resolved problem in the status bar.
 }
 void Controller::seek(Frame time) {
     if (busy || showMode) { report(showMode ? "Leave show mode to jump on the timeline" : "Media is loading"); return; }
@@ -454,14 +456,21 @@ void Controller::commitSave(Project candidate, QString target) {
     try {
         const auto sourceDirectory = project.packageDirectory;
         const QString previous = path;
-        writeProject(candidate, target); project.assets = std::move(candidate.assets); bindAudio(project); project.packageDirectory.reset(); path = target; dirty = false;
-        // Undo must not restore temporary package paths or unsaved generated media.
+        writeProject(candidate, target);
+        // The media this Save moved (extracted package files, generated audio), by asset and previous path.
+        QMap<QString, QString> moved;
+        for (const auto& a : candidate.assets)
+            if (const auto before = project.assets.constFind(a.id); before != project.assets.cend() && before->path != a.path) moved.insert(a.id, before->path);
+        project.assets = std::move(candidate.assets); bindAudio(project); project.packageDirectory.reset(); path = target; dirty = false;
+        // Undo must not restore temporary package paths or unsaved generated media. Only those follow the
+        // saved copy: other snapshots keep their own media, such as an asset before a relink, or audio a
+        // preparation reload left valid for that snapshot alone.
         for (auto* history : {&undo_, &redo_}) for (auto& snapshot : *history) {
             bool extracted = false;
             for (auto it = snapshot.assets.begin(); it != snapshot.assets.end(); ++it) {
-                // Only media Save moved (extracted package files, generated audio) follows the saved copy; other
-                // snapshots keep their own audio, which a preparation reload may have left valid for them alone.
-                if (const auto saved = project.assets.constFind(it.key()); saved != project.assets.cend() && saved->path != it->path) { it->path = saved->path; it->audio = saved->audio; }
+                if (const auto from = moved.constFind(it.key()); from != moved.cend() && *from == it->path) {
+                    const auto& saved = project.assets[it.key()]; it->path = saved.path; it->audio = saved.audio;
+                }
                 else extracted |= sourceDirectory && it->path.startsWith(sourceDirectory->path() + "/");
             }
             if (!extracted) snapshot.packageDirectory.reset();

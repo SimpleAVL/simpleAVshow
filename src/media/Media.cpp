@@ -46,12 +46,17 @@ struct Input {
     }
     void open(const QString& path) {
         const QByteArray encoded = path.toUtf8();
-        checked(avformat_open_input(&format, encoded.constData(), nullptr, nullptr), "Open media");
-        // Playlists and manifests play other files (or URLs) that change, move and vanish independently,
-        // so neither caches keyed by this file's bytes nor change detection could follow them.
+        // Local files only: no format may reach the network on its own (an .sdp or HLS playlist would).
+        AVDictionary* options = nullptr; av_dict_set(&options, "protocol_whitelist", "file", 0);
+        const int opened = avformat_open_input(&format, encoded.constData(), nullptr, &options); av_dict_free(&options);
+        checked(opened, "Open media");
+        // Formats that play other files (playlists, manifests, split recordings, scripts) depend on files that
+        // change, move and vanish independently, so neither caches keyed by this file's bytes nor change
+        // detection could follow them.
         for (const auto& name : QByteArray(format->iformat->name).split(','))
-            if (name == "concat" || name == "hls" || name == "dash" || name == "imf" || name == "webm_dash_manifest")
-                throw std::runtime_error("Playlists and manifests that refer to other files cannot be imported; import the media files themselves");
+            if (name == "concat" || name == "hls" || name == "dash" || name == "imf" || name == "webm_dash_manifest" ||
+                name == "mlv" || name == "sdp" || name == "avisynth" || name == "vapoursynth")
+                throw std::runtime_error("Playlists, manifests and split recordings that refer to other files cannot be imported; import the media files themselves");
         checked(avformat_find_stream_info(format, nullptr), "Read media information");
     }
     void decoder(int stream) {
