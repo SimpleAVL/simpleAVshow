@@ -140,13 +140,19 @@ struct PackageDirectory : QTemporaryDir {
 void retryPackageRemovals(bool wait) {
     // Removal can stall (a redirected temporary folder), so it runs on a worker, one retry at a time.
     static std::atomic<bool> retrying{false};
-    { const std::lock_guard guard(pendingMutex); if (pendingRemovals.empty()) return; }
+    if (!wait) { const std::lock_guard guard(pendingMutex); if (pendingRemovals.empty()) return; }
+    // Waiting takes the slot first, so a retry already in flight finishes before this one looks.
     while (retrying.exchange(true)) { if (!wait) return; std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
     auto retry = [] {
         std::vector<QString> paths;
         { const std::lock_guard guard(pendingMutex); paths.swap(pendingRemovals); }
         try {
-            std::erase_if(paths, [](const QString& path) { QDir dir(path); return !dir.exists() || dir.removeRecursively(); });
+            // Dropped only once removed, or gone from a folder that is still there: a temporary folder
+            // on a share that dropped out for a moment would look like everything is gone.
+            std::erase_if(paths, [](const QString& path) {
+                const QFileInfo info(path);
+                return info.exists() ? QDir(path).removeRecursively() : info.dir().exists();
+            });
             const std::lock_guard guard(pendingMutex); pendingRemovals.insert(pendingRemovals.end(), paths.begin(), paths.end());
         } catch (...) {} // Out of memory: the startup sweep removes what is left.
         retrying = false;

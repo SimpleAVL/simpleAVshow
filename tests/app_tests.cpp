@@ -1943,6 +1943,8 @@ private slots:
         QVERIFY(detail::identityUncertain(FileIdentity{0, 5}, FileIdentity{7, 5}));
         QVERIFY(!detail::identityUncertain(FileIdentity{7, 5}, FileIdentity{7, 5}));
         QVERIFY(!detail::identityUncertain(FileIdentity{0, 5}, FileIdentity{0, 5}));
+        QVERIFY(detail::sameIdentity(FileIdentity{7, 0}, FileIdentity{7, 5})); // A share that left out the file number.
+        QVERIFY(detail::identityUncertain(FileIdentity{7, 0}, FileIdentity{7, 5}));
 #ifdef Q_OS_MACOS
         // Local volumes report a stable identifier, which tells two sticks mounted at one path apart.
         QTemporaryDir dir; const auto path = dir.filePath("id.wav"); writeBytes(path, "x");

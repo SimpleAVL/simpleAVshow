@@ -25,11 +25,8 @@
 #include <sys/stat.h>
 #ifdef Q_OS_MACOS
 #include <sys/attr.h>
-#include <sys/mount.h>
 #include <unistd.h>
 #include <uuid/uuid.h>
-#else
-#include <sys/vfs.h>
 #endif
 #endif
 extern "C" {
@@ -50,17 +47,23 @@ std::wstring windowsPath(const QString& path) {
 #endif
 #ifndef Q_OS_WIN
 namespace {
-quint64 volumeKey([[maybe_unused]] const struct statfs& volume) {
+// Not st_dev: it is renumbered when a share remounts or a stick is plugged in again, which would make
+// the same file look replaced. The volume's own identifier tells two sticks apart (FAT derives file
+// numbers from cluster positions, which two sticks can share). Asked of the file itself, not statfs,
+// which can wait for a network server to report capacity.
 #ifdef Q_OS_MACOS
-    // Volume attributes are only reported for the volume's root.
+template <typename Query> quint64 volumeKey(Query query) {
     attrlist request{}; request.bitmapcount = ATTR_BIT_MAP_COUNT; request.volattr = ATTR_VOL_INFO | ATTR_VOL_UUID;
     struct __attribute__((aligned(4), packed)) { u_int32_t length; uuid_t uuid; } reply{};
-    if (::getattrlist(volume.f_mntonname, &request, &reply, sizeof reply, 0) || reply.length < sizeof reply) return 0;
+    if (query(&request, &reply, sizeof reply) || reply.length < sizeof reply) return 0;
     quint64 high = 0, low = 0; std::memcpy(&high, reply.uuid, 8); std::memcpy(&low, reply.uuid + 8, 8);
     return high ^ low;
-#else
-    return 0;
+}
 #endif
+// Only definite absence counts; other failures (a mount briefly unreachable) are retried by reads.
+bool statPresent(const QByteArray& native, struct stat& info) {
+    if (::stat(native.constData(), &info)) return errno != ENOENT && errno != ENOTDIR;
+    return S_ISREG(info.st_mode);
 }
 }
 #endif
@@ -79,22 +82,35 @@ Probe probe(const QString& path) {
     const bool ok = GetFileInformationByHandle(file, &info); CloseHandle(file);
     return {true, ok ? FileIdentity{info.dwVolumeSerialNumber, (quint64{info.nFileIndexHigh} << 32) | info.nFileIndexLow} : FileIdentity{}};
 #else
-    // Only definite absence counts; other failures (a mount briefly unreachable) are retried by reads.
     const auto native = QFile::encodeName(path);
-    struct stat info{};
-    if (::stat(native.constData(), &info)) return {errno != ENOENT && errno != ENOTDIR, {}};
-    // Not st_dev: it is renumbered when a share remounts or a stick is plugged in again, which would make
-    // the same file look replaced. The volume's own identifier tells two sticks apart (FAT derives file
-    // numbers from cluster positions, which two sticks can share).
-    struct statfs volume{};
-    return {S_ISREG(info.st_mode), {::statfs(native.constData(), &volume) ? 0 : volumeKey(volume), static_cast<quint64>(info.st_ino)}};
+    struct stat info{}; info.st_ino = 0;
+    const bool here = statPresent(native, info);
+    if (!info.st_ino) return {here, {}};
+#ifdef Q_OS_MACOS
+    const auto volume = volumeKey([&](attrlist* request, void* reply, std::size_t size) { return ::getattrlist(native.constData(), request, reply, size, 0); });
+#else
+    const quint64 volume = 0;
+#endif
+    return {here, {volume, static_cast<quint64>(info.st_ino)}};
 #endif
 }
 #ifndef Q_OS_WIN
-quint64 volumeId(int descriptor) { struct statfs volume{}; return ::fstatfs(descriptor, &volume) ? 0 : volumeKey(volume); }
+quint64 volumeId([[maybe_unused]] int descriptor) {
+#ifdef Q_OS_MACOS
+    return volumeKey([&](attrlist* request, void* reply, std::size_t size) { return ::fgetattrlist(descriptor, request, reply, size, 0); });
+#else
+    return 0;
+#endif
+}
 #endif
 FileIdentity fileIdentity(const QString& path) { return probe(path).identity; }
-bool present(const QString& path) { return probe(path).present; }
+bool present(const QString& path) {
+#ifdef Q_OS_WIN
+    return probe(path).present;
+#else
+    struct stat info{}; return statPresent(QFile::encodeName(path), info); // No identity needed: one lookup.
+#endif
+}
 FileVersion fileVersion(const QString& path) {
     const QFileInfo info(path);
     return {info.size(), info.lastModified().toMSecsSinceEpoch(), fileIdentity(path)};

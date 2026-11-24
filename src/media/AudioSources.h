@@ -27,12 +27,11 @@ using FileIdentity = std::pair<quint64, quint64>;
 FileIdentity fileIdentity(const QString& path);
 // Whether two identities can belong to the same file: unknown parts match anything.
 inline bool sameIdentity(const FileIdentity& a, const FileIdentity& b) {
-    if (a == FileIdentity{} || b == FileIdentity{}) return true;
-    return a.second == b.second && (!a.first || !b.first || a.first == b.first);
+    return (!a.first || !b.first || a.first == b.first) && (!a.second || !b.second || a.second == b.second);
 }
 // Whether one side knows a part the other does not, so a match says less than usual.
 inline bool identityUncertain(const FileIdentity& a, const FileIdentity& b) {
-    return (a == FileIdentity{}) != (b == FileIdentity{}) || !a.first != !b.first;
+    return !a.first != !b.first || !a.second != !b.second;
 }
 #ifndef Q_OS_WIN
 // The stable identifier of the volume holding an open file (macOS: the file system UUID; 0 if none).
