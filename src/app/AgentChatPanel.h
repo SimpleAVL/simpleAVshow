@@ -60,6 +60,7 @@ private:
     bool lastCanEdit_ = true;
     bool shuttingDown_ = false;
     bool renderPending_ = false;
+    QString chatMcpToken_;
 
     QLabel* statusLabel_ = nullptr;
     QComboBox* presetCombo_ = nullptr;

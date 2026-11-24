@@ -55,8 +55,8 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
         return 2;
     }
     const QByteArray token = qgetenv("SAV_MCP_TOKEN");
-    // Per-proxy-process client ID scopes server-side cancellation so one client cannot cancel another.
-    const QByteArray clientId = QUuid::createUuid().toString(QUuid::WithoutBraces).toUtf8();
+    // Server-issued Mcp-Session-Id captured from initialize response for spec-compliant scoped cancellation.
+    QByteArray sessionId;
     QNetworkAccessManager network;
     int inFlight = 0;
     bool eof = false;
@@ -100,7 +100,7 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
         request.setRawHeader("Content-Type", "application/json");
         request.setRawHeader("Accept", "application/json, text/event-stream");
         request.setRawHeader("MCP-Protocol-Version", "2025-11-25");
-        request.setRawHeader("X-SAV-Client-Id", clientId);
+        if (!sessionId.isEmpty()) request.setRawHeader("Mcp-Session-Id", sessionId);
         if (!token.isEmpty()) request.setRawHeader("Authorization", "Bearer " + token);
 
         ++inFlight;
@@ -108,6 +108,8 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
         if (!idKey.isEmpty()) inflightReplies.insert(idKey, {reply, isMutatingToolCall(msgObj)});
         QObject::connect(reply, &QNetworkReply::finished, &app, [&, reply, requestId, idKey] {
             if (!idKey.isEmpty() && inflightReplies.value(idKey).reply == reply) inflightReplies.remove(idKey);
+            const QByteArray serverSession = reply->rawHeader("Mcp-Session-Id").trimmed();
+            if (!serverSession.isEmpty()) sessionId = serverSession;
             const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             const QByteArray body = reply->readAll().trimmed();
             const auto netError = reply->error();

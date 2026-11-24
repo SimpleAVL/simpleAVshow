@@ -176,21 +176,32 @@ bool MidiOutput::openByName(const QString& wanted, QString& error) {
             }
         }
     }
-    // Resolve directly to a stable CoreMIDI MIDIEndpointRef and open a candidate output port
-    // before touching the existing connection so hot-plug index shifts cannot redirect cues.
+    // Resolve directly to a stable CoreMIDI MIDIEndpointRef and rank matches strictly so an
+    // earlier endpoint's legacy alias can never beat a later endpoint's exact primary display name.
     const ItemCount count = MIDIGetNumberOfDestinations();
     MIDIEndpointRef matchedEp = 0;
     QString matchedName;
+    int bestRank = 99; // 0 = exact display name, 1 = CI display name, 2 = exact alias, 3 = CI alias
     for (ItemCount i = 0; i < count; ++i) {
         const MIDIEndpointRef ep = MIDIGetDestination(i);
-        const auto aliases = coreMidiEndpointAliases(ep);
-        bool exact = false, ci = false;
-        for (const auto& alias : aliases) {
-            if (alias == wanted) { exact = true; break; }
-            if (alias.compare(wanted, Qt::CaseInsensitive) == 0) ci = true;
+        const QString primary = coreMidiEndpointName(ep);
+        int rank = 99;
+        if (primary == wanted) {
+            rank = 0;
+        } else if (primary.compare(wanted, Qt::CaseInsensitive) == 0) {
+            rank = 1;
+        } else {
+            for (const auto& alias : coreMidiEndpointAliases(ep)) {
+                if (alias == wanted) { rank = std::min(rank, 2); break; }
+                if (alias.compare(wanted, Qt::CaseInsensitive) == 0) rank = std::min(rank, 3);
+            }
         }
-        if (exact) { matchedEp = ep; matchedName = coreMidiEndpointName(ep); break; }
-        if (!matchedEp && ci) { matchedEp = ep; matchedName = coreMidiEndpointName(ep); }
+        if (rank < bestRank) {
+            bestRank = rank;
+            matchedEp = ep;
+            matchedName = primary;
+            if (bestRank == 0) break;
+        }
     }
     if (!matchedEp) { error = "MIDI port not found: " + wanted; return false; }
     // Verify the endpoint's own display name directly on the MIDIEndpointRef before binding.

@@ -306,9 +306,12 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         }
     });
     connect(undoButton_, &QPushButton::clicked, this, [this] {
-        if (!c_.canEdit()) return;
+        if (!c_.canEdit() || c_.undoCount() == 0) return;
+        const quint64 before = c_.projectRevision();
         c_.undo();
-        appendEntry({ChatEntry::Kind::System, {}, {}, {}, "Reverted last show edit (Undo).", {}, {}});
+        if (c_.projectRevision() != before)
+            appendEntry({ChatEntry::Kind::System, {}, {}, {}, "Reverted last show edit (Undo).", {}, {}});
+        updateControls();
     });
     connect(allowEditing_, &QCheckBox::toggled, this, [this](bool on) {
         if (!mcp_.running()) return;
@@ -323,6 +326,10 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
     connect(&acp_, &AcpClient::stateChanged, this, [this](AcpState st) {
         if (st == AcpState::Disconnected || st == AcpState::Error) {
             clearPermissionCards();
+            if (!connecting_ && !chatMcpToken_.isEmpty()) {
+                mcp_.revokeChatToken(chatMcpToken_);
+                chatMcpToken_.clear();
+            }
         }
         // If an unexpected exit or protocol error ends a chat-owned session, revoke its auto-started MCP server.
         if (!connecting_ && (st == AcpState::Disconnected || st == AcpState::Error) && autoStartedMcp_ && mcp_.running()) {
@@ -365,12 +372,13 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         auto clampField = [](const QString& s, qsizetype limit) {
             return s.size() > limit ? (s.left(limit) + "…") : s;
         };
+        const QString toolId = clampField(update.toolCallId, 128);
         const QString title = clampField(update.title, 256);
         const QString meta = clampField(update.kind, 64);
         const QString status = clampField(update.status, 32);
         const QString detail = clampField(update.detail, 4096);
         for (auto it = entries_.rbegin(); it != entries_.rend(); ++it) {
-            if (it->kind == ChatEntry::Kind::ToolCall && !update.toolCallId.isEmpty() && it->id == update.toolCallId) {
+            if (it->kind == ChatEntry::Kind::ToolCall && !toolId.isEmpty() && it->id == toolId) {
                 if (!title.isEmpty()) it->title = title;
                 if (!meta.isEmpty()) it->meta = meta;
                 if (!status.isEmpty()) it->status = status;
@@ -379,7 +387,7 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
                 return;
             }
         }
-        appendEntry({ChatEntry::Kind::ToolCall, clampField(update.toolCallId, 128),
+        appendEntry({ChatEntry::Kind::ToolCall, toolId,
             title.isEmpty() ? QString("Tool call") : title,
             meta, detail, {}, status.isEmpty() ? QString("in_progress") : status});
     });
@@ -418,6 +426,8 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         const AcpState st = acp_.state();
         if (!mcp_.running() && (st == AcpState::Connecting || st == AcpState::Ready || st == AcpState::Prompting)) {
             autoStartedMcp_ = false;
+            chatMcpToken_.clear();
+            clearPermissionCards();
             acp_.disconnectFromAgent();
             appendEntry({ChatEntry::Kind::System, {}, {}, {}, "Disconnected because the local MCP server was stopped.", {}, {}});
         }
@@ -428,7 +438,19 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         appendEntry({ChatEntry::Kind::System, {}, {}, {}, summary, {}, {}});
         updateControls();
     });
-    connect(&c_, &Controller::changed, this, [this] { updateControls(); });
+    connect(&c_, &Controller::changed, this, [this] {
+        if (c_.showMode && permissionLayout_->count() > 0) {
+            for (int i = 0; i < permissionLayout_->count(); ++i) {
+                if (auto* w = permissionLayout_->itemAt(i)->widget()) {
+                    const auto key = w->property("requestKey").toULongLong();
+                    if (key > 0) acp_.respondPermission(key, {});
+                }
+            }
+            clearPermissionCards();
+            appendEntry({ChatEntry::Kind::System, {}, {}, {}, "Cancelled pending permission requests because Show mode became active.", {}, {}});
+        }
+        updateControls();
+    });
     connect(&c_, &Controller::tick, this, [this] {
         const bool editable = c_.canEdit(false);
         if (editable != lastCanEdit_) {
@@ -455,6 +477,10 @@ void AgentChatPanel::shutdown() {
     c_.disconnect(this);
     clearPermissionCards();
     acp_.disconnectFromAgent();
+    if (!chatMcpToken_.isEmpty()) {
+        mcp_.revokeChatToken(chatMcpToken_);
+        chatMcpToken_.clear();
+    }
     if (autoStartedMcp_ && mcp_.running()) {
         autoStartedMcp_ = false;
         mcp_.stop();
@@ -541,8 +567,9 @@ void AgentChatPanel::updateControls() {
         ? "Connect an agent (or start the local MCP server) before granting edits and controls."
         : "Allow the agent to edit this show, import/relink media, configure outputs and phone remote, save/open/export files, and run rehearsal playback. Project edits use Undo; Show mode stays operator-only.");
 
-    undoButton_->setVisible(hasAgentEdit_);
-    undoButton_->setEnabled(editable);
+    const bool canUndo = c_.undoCount() > 0;
+    undoButton_->setVisible(hasAgentEdit_ && canUndo);
+    undoButton_->setEnabled(editable && canUndo);
 
     promptInput_->setEnabled(ready || prompting);
     sendButton_->setEnabled(ready || prompting);
@@ -562,6 +589,10 @@ void AgentChatPanel::toggleConnection() {
     if (acp_.state() == AcpState::Connecting || acp_.state() == AcpState::Ready || acp_.state() == AcpState::Prompting) {
         clearPermissionCards();
         acp_.disconnectFromAgent();
+        if (!chatMcpToken_.isEmpty()) {
+            mcp_.revokeChatToken(chatMcpToken_);
+            chatMcpToken_.clear();
+        }
         if (autoStartedMcp_ && mcp_.running()) {
             autoStartedMcp_ = false;
             mcp_.stop();
@@ -604,30 +635,46 @@ void AgentChatPanel::toggleConnection() {
         autoStartedMcp_ = true;
     }
 
+    // Issue a dedicated, revocable chat session token so Disconnect / New immediately revokes this
+    // chat session's MCP access without disrupting any externally configured MCP clients.
+    if (!chatMcpToken_.isEmpty()) mcp_.revokeChatToken(chatMcpToken_);
+    chatMcpToken_ = mcp_.issueChatToken();
+
     AcpMcpConfig mcpConfig;
     mcpConfig.name = "simpleavshow";
     mcpConfig.url = mcp_.endpoint();
-    mcpConfig.token = mcp_.token();
+    mcpConfig.token = chatMcpToken_;
     mcpConfig.proxyExecutable = QCoreApplication::applicationFilePath();
 
     logsView_->clear();
     connecting_ = true;
     acp_.connectToAgent(program, args, currentWorkingDirectory(), mcpConfig);
     connecting_ = false;
-    if ((acp_.state() == AcpState::Disconnected || acp_.state() == AcpState::Error) && autoStartedMcp_ && mcp_.running()) {
-        autoStartedMcp_ = false;
-        mcp_.stop();
+    if (acp_.state() == AcpState::Disconnected || acp_.state() == AcpState::Error) {
+        if (!chatMcpToken_.isEmpty()) {
+            mcp_.revokeChatToken(chatMcpToken_);
+            chatMcpToken_.clear();
+        }
+        if (autoStartedMcp_ && mcp_.running()) {
+            autoStartedMcp_ = false;
+            mcp_.stop();
+        }
+    } else if (!autoStartedMcp_ && mcp_.editingEnabled()) {
+        appendEntry({ChatEntry::Kind::System, {}, {}, {},
+            "Attached to the running local MCP server (edits and controls are currently enabled).", {}, {}});
     }
     updateControls();
 }
 
 void AgentChatPanel::startNewSession() {
-    if (acp_.state() != AcpState::Ready && acp_.state() != AcpState::Prompting) return;
+    if (acp_.state() != AcpState::Ready) return;
     clearPermissionCards();
     entries_.clear();
     sentContextPreamble_ = false;
     hasAgentEdit_ = false;
-    AcpMcpConfig mcpConfig{"simpleavshow", mcp_.endpoint(), mcp_.token(), QCoreApplication::applicationFilePath()};
+    if (!chatMcpToken_.isEmpty()) mcp_.revokeChatToken(chatMcpToken_);
+    chatMcpToken_ = mcp_.issueChatToken();
+    AcpMcpConfig mcpConfig{"simpleavshow", mcp_.endpoint(), chatMcpToken_, QCoreApplication::applicationFilePath()};
     acp_.startNewSession(currentWorkingDirectory(), mcpConfig);
     renderTranscript();
     updateControls();
@@ -765,8 +812,16 @@ void AgentChatPanel::renderTranscript() {
 }
 
 void AgentChatPanel::addPermissionCard(const AcpPermissionRequest& request) {
+    if (c_.showMode || permissionLayout_->count() >= 8) {
+        acp_.respondPermission(request.requestKey, {});
+        appendEntry({ChatEntry::Kind::System, {}, {}, {},
+            c_.showMode ? QString("Auto-cancelled permission request “%1” during Show mode.").arg(request.title)
+                        : QString("Auto-cancelled excess permission request “%1”.").arg(request.title), {}, {}});
+        return;
+    }
     auto* card = new QFrame(permissionBox_);
     card->setObjectName(QString("permissionCard_%1").arg(request.requestKey));
+    card->setProperty("requestKey", QVariant::fromValue(request.requestKey));
     card->setStyleSheet("QFrame { background: #262118; border: 1px solid #8a6d3b; border-radius: 6px; padding: 6px; }");
     auto* layout = new QVBoxLayout(card);
     layout->setContentsMargins(8, 8, 8, 8);

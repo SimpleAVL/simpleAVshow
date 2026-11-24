@@ -45,7 +45,7 @@ int main(int argc, char** argv) {
     // Deleting a crashed instance's extraction can take a while for large media.
     QThreadPool::globalInstance()->start([] { sav::removeStalePackageDirectories(); sav::detail::trimAudioCache(); });
     sav::MainWindow window;
-    if (parser.isSet("demo")) { window.controller().replace(sav::demoProject()); window.controller().dirty = true; }
+    if (parser.isSet("demo")) window.controller().replace(sav::demoProject(), {}, true);
     if (!parser.positionalArguments().isEmpty()) window.openPath(parser.positionalArguments().front());
     if (parser.isSet("preview-time")) {
         bool ok; double time = parser.value("preview-time").toDouble(&ok);

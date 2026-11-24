@@ -58,7 +58,8 @@ struct Input {
 };
 }
 
-MediaAsset loadMedia(const QString& path) {
+MediaAsset loadMedia(const QString& path, const std::function<bool()>& isCancelled) {
+    if (isCancelled && isCancelled()) throw std::runtime_error("Media load cancelled");
     if (!QFileInfo(path).isFile()) throw std::runtime_error("Media file is missing: " + path.toStdString());
     MediaAsset asset;
     asset.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -162,11 +163,16 @@ MediaAsset loadMedia(const QString& path) {
             };
             int readResult = 0;
             while ((readResult = av_read_frame(input.format, input.packet)) >= 0) {
+                if (isCancelled && isCancelled()) {
+                    av_packet_unref(input.packet);
+                    throw std::runtime_error("Media load cancelled");
+                }
                 if (input.packet->stream_index == audio) {
                     checked(avcodec_send_packet(input.codec, input.packet), "Feed audio decoder"); receive();
                 }
                 av_packet_unref(input.packet);
             }
+            if (isCancelled && isCancelled()) throw std::runtime_error("Media load cancelled");
             if (readResult != AVERROR_EOF) checked(readResult, "Read audio packets");
             checked(avcodec_send_packet(input.codec, nullptr), "Flush audio decoder"); receive();
             while (convert(nullptr) > 0) {}
@@ -342,8 +348,9 @@ void VideoReader::run() {
     }
 }
 
-QImage videoFrameAt(const QString& path, double time, QSize maximum, QString* error) {
+QImage videoFrameAt(const QString& path, double time, QSize maximum, QString* error, const std::function<bool()>& isCancelled) {
     try {
+        if (isCancelled && isCancelled()) { if (error) *error = "Preview decode cancelled"; return {}; }
         Input input; input.open(path);
         const int index = av_find_best_stream(input.format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
         if (index < 0) { if (error) *error = "No video stream found"; return {}; }
@@ -366,6 +373,7 @@ QImage videoFrameAt(const QString& path, double time, QSize maximum, QString* er
         const double rate = frameRate.num && frameRate.den ? av_q2d(frameRate) : 24;
         QImage best; double last = -1; int decoded = 0; bool reached = false; bool sawEligibleFrame = false;
         while (decoded < 240) {
+            if (isCancelled && isCancelled()) { if (error) *error = "Preview decode cancelled"; return {}; }
             int result = avcodec_receive_frame(input.codec, input.frame);
             if (result == AVERROR_EOF) { reached = !best.isNull(); break; }
             if (result == AVERROR(EAGAIN)) {

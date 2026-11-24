@@ -59,7 +59,7 @@ The top-bar button always tells you what the agent can do right now: **Agent · 
 
 ### What the agent can and cannot do
 
-- **Can always read and advise (even during playback or Show mode):** Project settings, tracks, clips, automation curves, cues, media metadata, preflight checks, rendered preview frames, app/hardware environment (audio/MIDI/displays/remote), MIDI encoding, and the entire built-in user manual.
+- **Can always read and advise (even during playback or Show mode):** Project settings, tracks, clips, automation curves, cues, media metadata, preflight checks, app/hardware environment (audio/MIDI/displays/remote), MIDI encoding, and the entire built-in user manual. *(Outside Show mode, read-only `render_preview` also renders PNG preview frames at any timeline position.)*
 - **Can edit and operate when editing is enabled (and Show mode is off):** Update project settings; add, patch, reorder, split, or delete tracks, clips, automation curves, cues, and unused assets; undo/redo; seek and select items on the timeline; browse, import, and relink local media; configure audio/MIDI/audience display outputs and the phone remote; save/export/open shows; and run rehearsal playback (`play`, `pause`, `continue`, `stop_all`, `seek`). *(New audio tracks created by an agent start disconnected—check their routing before rehearsal.)*
 - **Operator-only live guardrail:** **Show mode** stays strictly operator-only. An agent can never enter or leave Show mode, and all mutations, hardware/file changes, and transport controls are automatically blocked while Show mode is active.
 

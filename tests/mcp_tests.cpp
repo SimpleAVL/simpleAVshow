@@ -17,7 +17,7 @@
 
 using namespace sav;
 namespace {
-struct Response { int status = 0; QJsonObject body; };
+struct Response { int status = 0; QJsonObject body; QByteArray sessionId; };
 Response http(McpServer& server, QByteArray body, QByteArray method = "POST", QMap<QByteArray, QByteArray> headers = {}) {
     QNetworkAccessManager manager;
     QNetworkRequest request{QUrl(server.endpoint())};
@@ -30,7 +30,8 @@ Response http(McpServer& server, QByteArray body, QByteArray method = "POST", QM
     QEventLoop loop; QTimer timer; timer.setSingleShot(true);
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit); timer.start(5000); loop.exec();
-    return {reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(), QJsonDocument::fromJson(reply->readAll()).object()};
+    return {reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(), QJsonDocument::fromJson(reply->readAll()).object(),
+        reply->rawHeader("Mcp-Session-Id")};
 }
 Response rpc(McpServer& server, QString method, QJsonObject params = {}) {
     return http(server, QJsonDocument(QJsonObject{{"jsonrpc", "2.0"}, {"id", "test"}, {"method", method}, {"params", params}}).toJson(QJsonDocument::Compact));
@@ -546,6 +547,78 @@ private slots:
             const auto pfShow = call(server, "get_preflight")["structuredContent"].toObject();
             QCOMPARE(pfShow["hardware_probed"].toBool(), false);
             window.controller().setShowMode(false);
+        }
+
+        // 16. Transport::forceStopAll() stops playback even if the command queue is full.
+        {
+            Controller c;
+            c.replace(demoProject());
+            c.transport.command({Action::Play});
+            c.transport.render(nullptr, 0, 0);
+            QCOMPARE(c.transport.state(), State::Playing);
+            for (int i = 0; i < 200; ++i) c.transport.command({Action::Play});
+            c.transport.forceStopAll();
+            QCOMPARE(c.transport.state(), State::Stopped);
+        }
+
+        // 17. Revocable chat tokens authenticate independently and immediately fail with 401 on revoke,
+        //     without disrupting the primary external MCP bearer token.
+        {
+            const QString chatTok = server.issueChatToken();
+            QVERIFY(!chatTok.isEmpty());
+            QVERIFY(chatTok != server.token());
+            const QByteArray ping1 = QJsonDocument(QJsonObject{{"jsonrpc", "2.0"}, {"id", 501}, {"method", "ping"}}).toJson(QJsonDocument::Compact);
+            const auto okChat = http(server, ping1, "POST", {{"Authorization", "Bearer " + chatTok.toUtf8()}});
+            QCOMPARE(okChat.status, 200);
+            server.revokeChatToken(chatTok);
+            const auto revokedChat = http(server, ping1, "POST", {{"Authorization", "Bearer " + chatTok.toUtf8()}});
+            QCOMPARE(revokedChat.status, 401);
+            const auto okPrimary = http(server, ping1, "POST");
+            QCOMPARE(okPrimary.status, 200);
+        }
+
+        // 18. Staged import_media is invalidated when the show is replaced so it cannot commit into another show.
+        {
+            QTemporaryDir dir;
+            QVERIFY(dir.isValid());
+            const QString imgPath = dir.filePath("card.png");
+            QImage img(32, 32, QImage::Format_RGBA8888);
+            img.fill(Qt::red);
+            QVERIFY(img.save(imgPath, "PNG"));
+            const auto imp = call(server, "import_media", {
+                {"expected_revision", revision(server)},
+                {"paths", QJsonArray{imgPath}}
+            })["structuredContent"].toObject();
+            const QString jobId = imp["job_id"].toString();
+            QVERIFY(!jobId.isEmpty());
+            QTRY_COMPARE_WITH_TIMEOUT(
+                call(server, "get_import", {{"job_id", jobId}})["structuredContent"].toObject()["state"].toString(),
+                QString("ready"), 5000);
+            // Replacing the show must cancel the staged import and reject commit_import.
+            window.controller().replace(newProject());
+            const auto stAfter = call(server, "get_import", {{"job_id", jobId}})["structuredContent"].toObject();
+            QCOMPARE(stAfter["state"].toString(), QString("cancelled"));
+            const auto commitErr = call(server, "commit_import", {
+                {"expected_revision", revision(server)},
+                {"job_id", jobId}
+            });
+            QVERIFY(commitErr["isError"].toBool());
+        }
+
+        // 19. initialize issues a server-generated Mcp-Session-Id instead of echoing a caller-supplied value.
+        {
+            const QByteArray initBody = QJsonDocument(QJsonObject{
+                {"jsonrpc", "2.0"}, {"id", 601}, {"method", "initialize"},
+                {"params", QJsonObject{
+                    {"protocolVersion", "2025-11-25"},
+                    {"capabilities", QJsonObject{}},
+                    {"clientInfo", QJsonObject{{"name", "test"}, {"version", "1"}}}
+                }}
+            }).toJson(QJsonDocument::Compact);
+            const auto initRes = http(server, initBody, "POST", {{"Mcp-Session-Id", "caller-forged-scope"}});
+            QCOMPARE(initRes.status, 200);
+            QVERIFY(!initRes.sessionId.isEmpty());
+            QVERIFY(initRes.sessionId != QByteArray("caller-forged-scope"));
         }
 
         window.controller().dirty = false;

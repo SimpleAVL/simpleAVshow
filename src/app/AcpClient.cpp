@@ -581,24 +581,33 @@ void AcpClient::handleNotification(const QString& method, const QJsonObject& par
 
 void AcpClient::handleAgentRequest(const QJsonValue& id, const QString& method, const QJsonObject& params) {
     if (method == "session/request_permission") {
+        constexpr int maxPendingPermissions = 8;
+        constexpr int maxPermissionOptions = 8;
         const auto sessionVal = params["sessionId"];
         const QString reqSession = sessionVal.isString() ? sessionVal.toString() : QString();
-        if (sessionId_.isEmpty() || reqSession.isEmpty() || reqSession != sessionId_ || cancelling_) {
+        if (sessionId_.isEmpty() || reqSession.isEmpty() || reqSession != sessionId_ || cancelling_ ||
+            pendingPermissions_.size() >= maxPendingPermissions) {
             sendResponse(id, {{"outcome", QJsonObject{{"outcome", "cancelled"}}}});
             return;
         }
+        auto clamp = [](const QString& s, qsizetype limit) {
+            return s.size() > limit ? (s.left(limit) + "…") : s;
+        };
         AcpPermissionRequest request;
         request.requestKey = nextPermissionKey_++;
         const auto toolCall = params["toolCall"].toObject();
-        request.toolCallId = toolCall["toolCallId"].toString();
-        request.title = toolCall["title"].toString("Agent permission request");
-        request.kind = toolCall["kind"].toString();
-        request.detail = summarizeJson(toolCall["rawInput"]);
-        if (request.detail.isEmpty()) request.detail = extractContentText(toolCall["content"]);
+        request.toolCallId = clamp(toolCall["toolCallId"].toString(), 128);
+        request.title = clamp(toolCall["title"].toString("Agent permission request"), 256);
+        request.kind = clamp(toolCall["kind"].toString(), 64);
+        request.detail = clamp(summarizeJson(toolCall["rawInput"]), 8192);
+        if (request.detail.isEmpty()) request.detail = clamp(extractContentText(toolCall["content"]), 8192);
         for (const auto& val : params["options"].toArray()) {
+            if (static_cast<int>(request.options.size()) >= maxPermissionOptions) break;
             const auto opt = val.toObject();
             if (!opt["optionId"].toString().isEmpty()) {
-                request.options.push_back({opt["optionId"].toString(), opt["name"].toString(opt["optionId"].toString()), opt["kind"].toString()});
+                request.options.push_back({clamp(opt["optionId"].toString(), 128),
+                    clamp(opt["name"].toString(opt["optionId"].toString()), 64),
+                    clamp(opt["kind"].toString(), 64)});
             }
         }
         pendingPermissions_.insert(request.requestKey, {id, reqSession});
@@ -623,11 +632,11 @@ QJsonArray AcpClient::buildMcpServers() {
             {"headers", headers}
         });
     } else {
+        // ACP v1 stdio transport schema omits a `type` discriminator field.
         const QString exe = mcp_.proxyExecutable.isEmpty() ? QCoreApplication::applicationFilePath() : mcp_.proxyExecutable;
         QJsonArray env;
         if (!mcp_.token.isEmpty()) env.append(QJsonObject{{"name", "SAV_MCP_TOKEN"}, {"value", mcp_.token}});
         servers.append(QJsonObject{
-            {"type", "stdio"},
             {"name", mcp_.name},
             {"command", exe},
             {"args", QJsonArray{"--mcp-proxy", mcp_.url}},

@@ -177,6 +177,14 @@ void Transport::apply(Command command) noexcept {
     ++applied_;
 }
 
+void Transport::forceStopAll() noexcept {
+    if (!show_) return;
+    commands_.clear();
+    apply({Action::StopAll});
+    applied_ = 0;
+    publish(0);
+}
+
 void Transport::render(float* output, unsigned count, unsigned channels) noexcept {
     if (output) std::fill(output, output + static_cast<std::size_t>(count) * channels, 0.f);
     if (!show_) return;

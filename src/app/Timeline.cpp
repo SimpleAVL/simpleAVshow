@@ -101,7 +101,17 @@ void Timeline::refresh() {
     verticalScrollBar()->setPageStep(std::max(1, viewport()->height() - ruler)); autoScroll_ = was;
     playhead_ = c_.position(); drawnState_ = c_.transport.state();
     if (curveClip_ >= 0 && static_cast<std::size_t>(curveClip_) >= c_.project.show.clips.size()) { curveDrag_ = CurveDrag::None; curveClip_ = -1; dragging_ = false; }
+    if (selectedTrack == lastTrackedIndex_ && !selectedTrackId_.empty()) {
+        for (std::size_t i = 0; i < c_.project.show.tracks.size(); ++i) {
+            if (c_.project.show.tracks[i].id == selectedTrackId_) {
+                selectedTrack = static_cast<int>(i);
+                break;
+            }
+        }
+    }
     selectedTrack = std::clamp(selectedTrack, 0, static_cast<int>(c_.project.show.tracks.size()) - 1);
+    lastTrackedIndex_ = selectedTrack;
+    if (!c_.project.show.tracks.empty()) selectedTrackId_ = c_.project.show.tracks[selectedTrack].id;
     if (!selectedClip.isEmpty() && std::none_of(c_.project.show.clips.begin(), c_.project.show.clips.end(), [this](const Clip& clip) { return clip.id == selectedClip.toStdString(); })) selectedClip.clear();
     if (!selectedMarker.isEmpty() && std::none_of(c_.project.show.markers.begin(), c_.project.show.markers.end(), [this](const Marker& m) { return m.id == selectedMarker.toStdString(); })) selectedMarker.clear();
     viewport()->update();
@@ -363,7 +373,7 @@ void Timeline::mousePressEvent(QMouseEvent* event) {
     if (press_.x() < header) {
         const int track = trackAt(press_.y());
         if (track >= 0 && static_cast<std::size_t>(track) < c_.project.show.tracks.size()) {
-            selectedTrack = track; selectedClip.clear(); selectedMarker.clear(); emit selectionChanged(); viewport()->update();
+            selectedTrack = track; lastTrackedIndex_ = track; selectedTrackId_ = c_.project.show.tracks[track].id; selectedClip.clear(); selectedMarker.clear(); emit selectionChanged(); viewport()->update();
         }
         return;
     }
@@ -410,7 +420,7 @@ void Timeline::mousePressEvent(QMouseEvent* event) {
         return;
     }
     const int track = trackAt(press_.y());
-    if (track >= 0 && static_cast<std::size_t>(track) < c_.project.show.tracks.size()) selectedTrack = track;
+    if (track >= 0 && static_cast<std::size_t>(track) < c_.project.show.tracks.size()) { selectedTrack = track; lastTrackedIndex_ = track; selectedTrackId_ = c_.project.show.tracks[track].id; }
     selectedClip.clear(); selectedMarker.clear(); emit selectionChanged(); c_.seek(snap(dragTime_));
 }
 void Timeline::mouseMoveEvent(QMouseEvent* event) {

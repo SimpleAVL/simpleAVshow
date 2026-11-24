@@ -776,7 +776,11 @@ void MainWindow::applyCurve() {
 
 void MainWindow::importMedia() {
     if (!c_.canEdit()) return;
-    importPaths(QFileDialog::getOpenFileNames(this, "Import media", {}, "Media (*.wav *.aiff *.aif *.flac *.mp3 *.ogg *.m4a *.mp4 *.mov *.mkv *.webm *.avi *.png *.jpg *.jpeg *.bmp *.webp);;All files (*)"));
+    const quint64 initialRev = c_.projectRevision();
+    const auto paths = QFileDialog::getOpenFileNames(this, "Import media", {}, "Media (*.wav *.aiff *.aif *.flac *.mp3 *.ogg *.m4a *.mp4 *.mov *.mkv *.webm *.avi *.png *.jpg *.jpeg *.bmp *.webp);;All files (*)");
+    if (paths.isEmpty()) return;
+    if (!c_.canEdit() || c_.projectRevision() != initialRev) { c_.report("Import cancelled because the show changed."); return; }
+    importPaths(paths);
 }
 void MainWindow::importPaths(const QStringList& paths) {
     if (paths.isEmpty() || !c_.canEdit()) return;
@@ -1215,14 +1219,17 @@ void MainWindow::save(bool as) {
 }
 void MainWindow::exportPackage() {
     if (!c_.canEdit()) return;
+    const quint64 initialRev = c_.projectRevision();
     const QString suggested = c_.path.isEmpty() ? "show.savpack" : QFileInfo(c_.path).absoluteDir().filePath(QFileInfo(c_.path).completeBaseName() + ".savpack");
     QFileDialog dialog(this, "Export show package", suggested, "SimpleAVShow package (*.savpack)");
     dialog.setAcceptMode(QFileDialog::AcceptSave); dialog.setDefaultSuffix("savpack");
     if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) return;
+    if (!c_.canEdit() || c_.projectRevision() != initialRev) { c_.report("Export cancelled because the show changed."); return; }
     auto target = dialog.selectedFiles().front();
     if (!isProjectPackage(target)) {
         target += ".savpack";
         if (QFileInfo::exists(target) && QMessageBox::question(this, "Replace package?", "A package with this name already exists. Replace it?", QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+        if (!c_.canEdit() || c_.projectRevision() != initialRev) { c_.report("Export cancelled because the show changed."); return; }
     }
     writePackage(target);
 }
@@ -1261,7 +1268,8 @@ void MainWindow::offerUntitledRecovery() {
     if (answer == QMessageBox::Yes) openPath(sidecar.filePath());
     else QFile::remove(sidecar.filePath());
 }
-bool MainWindow::checkDiscard(quint64* confirmedRev) {
+bool MainWindow::checkDiscard(quint64* confirmedRev, bool discardAutosaveNow, bool* shouldDiscardAutosave) {
+    if (shouldDiscardAutosave) *shouldDiscardAutosave = false;
     if (!c_.dirty) {
         if (confirmedRev) *confirmedRev = c_.projectRevision();
         return true;
@@ -1283,7 +1291,8 @@ bool MainWindow::checkDiscard(quint64* confirmedRev) {
         c_.report("Discard cancelled because the show changed while the prompt was open.");
         return false;
     }
-    c_.discardAutosave();
+    if (discardAutosaveNow) c_.discardAutosave();
+    else if (shouldDiscardAutosave) *shouldDiscardAutosave = true;
     if (confirmedRev) *confirmedRev = before;
     return true;
 }
@@ -1306,12 +1315,14 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         if (c_.busy) { c_.report("Wait for media preparation to finish before closing"); event->ignore(); return; }
     }
     quint64 confirmedRev = 0;
-    if (!checkDiscard(&confirmedRev) || c_.busy || c_.projectRevision() != confirmedRev || (!confirmedLiveStop && isLive())) {
+    bool shouldDiscardAutosave = false;
+    if (!checkDiscard(&confirmedRev, false, &shouldDiscardAutosave) || c_.busy || c_.projectRevision() != confirmedRev || (!confirmedLiveStop && isLive())) {
         if (!confirmedLiveStop && isLive()) c_.report("Quit cancelled because playback or Show mode became active.");
         else if (c_.projectRevision() != confirmedRev) c_.report("Quit cancelled because the show changed.");
         event->ignore();
         return;
     }
+    if (shouldDiscardAutosave) c_.discardAutosave();
     if (agentChat_) agentChat_->shutdown();
     c_.stopAll(); event->accept();
 }

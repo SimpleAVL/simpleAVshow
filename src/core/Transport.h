@@ -24,6 +24,8 @@ public:
     // The Show remains immutable until the device is closed.
     void configure(std::shared_ptr<const Show> show, Frame position = 0);
     bool command(Command command) noexcept { return commands_.push(command); }
+    // Safe only when the audio stream is closed: clears pending commands, stops all voices, and resets counters.
+    void forceStopAll() noexcept;
     void render(float* output, unsigned count, unsigned channels) noexcept;
     bool takeMidi(MidiEvent& event) noexcept { return midi_.pop(event); }
     Frame position() const noexcept { return publishedPosition_.load(std::memory_order_acquire); }

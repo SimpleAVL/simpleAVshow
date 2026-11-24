@@ -11,11 +11,37 @@
 #include <QUuid>
 #include <QPainter>
 #include <QDataStream>
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
 #include <set>
 #include <limits>
 #include <stdexcept>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 namespace sav {
+namespace {
+bool nativeSameFsRename(const QString& src, const QString& dst, QString& error) {
+#ifdef Q_OS_WIN
+    const std::wstring s = src.toStdWString();
+    const std::wstring d = dst.toStdWString();
+    // Never pass MOVEFILE_COPY_ALLOWED so GUI-thread publish cannot fall back to a synchronous cross-volume copy.
+    if (!MoveFileExW(s.c_str(), d.c_str(), 0)) {
+        error = QString("Win32 error %1").arg(GetLastError());
+        return false;
+    }
+    return true;
+#else
+    if (::rename(QFile::encodeName(src).constData(), QFile::encodeName(dst).constData()) != 0) {
+        error = QString::fromLocal8Bit(std::strerror(errno));
+        return false;
+    }
+    return true;
+#endif
+}
+}
 QString newId() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
 QString timecode(Frame position, double fps) {
     const auto whole = position / sampleRate;
@@ -304,12 +330,14 @@ int readInt(const QJsonObject& o, const char* key, int fallback) {
     if (std::floor(n) != n || n < std::numeric_limits<int>::min() || n > std::numeric_limits<int>::max()) invalidField(key);
     return static_cast<int>(n);
 }
-MediaAsset loadAsset(const MediaAsset& entry) {
+MediaAsset loadAsset(const MediaAsset& entry, const std::function<bool()>& isCancelled = {}) {
+    if (isCancelled && isCancelled()) throw std::runtime_error("Project load cancelled");
     try {
-        auto a = loadMedia(entry.path);
+        auto a = loadMedia(entry.path, isCancelled);
         a.id = entry.id; if (!entry.name.isEmpty()) a.name = entry.name;
         return a;
     } catch (const std::exception& e) {
+        if (isCancelled && isCancelled()) throw;
         // One missing or damaged file must not prevent opening the show.
         MediaAsset a = entry; a.offline = true; a.problem = QString::fromUtf8(e.what());
         if (a.name.isEmpty()) a.name = QFileInfo(a.path).fileName();
@@ -405,7 +433,7 @@ Project parseProject(const QByteArray& json, const QString& directory) {
 void loadProjectMedia(Project& p, const std::function<bool()>& isCancelled) {
     for (auto& a : p.assets) {
         if (isCancelled && isCancelled()) throw std::runtime_error("Project load cancelled");
-        a = loadAsset(a);
+        a = loadAsset(a, isCancelled);
     }
     if (isCancelled && isCancelled()) throw std::runtime_error("Project load cancelled");
     bindAudio(p); validate(p);
@@ -565,7 +593,9 @@ PublishedMediaRollback publishStagedProjectMedia(Project& p, const QString& stag
             if (!publishedNames.contains(fileName)) {
                 const QString src = stageDir.filePath(fileName);
                 const QString dst = targetDir.filePath(fileName);
-                if (!QFile::rename(src, dst)) throw std::runtime_error("Cannot publish staged media: " + dst.toStdString());
+                QString renameErr;
+                if (!nativeSameFsRename(src, dst, renameErr))
+                    throw std::runtime_error("Cannot publish staged media atomically: " + dst.toStdString() + " (" + renameErr.toStdString() + ")");
                 rollback.movedFiles.append(dst);
                 publishedNames.insert(fileName, dst);
             }

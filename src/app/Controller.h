@@ -34,6 +34,7 @@ public:
     quint64 acquireBusy();
     void releaseBusy(quint64 lease);
     quint64 projectRevision() const { return projectRevision_; }
+    quint64 showEpoch() const { return showEpoch_; }
     bool edit(const std::function<void(Project&)>& mutation);
     void undo();
     void redo();
@@ -47,6 +48,7 @@ public:
     bool stopAll();
     // Reflects queued transport commands immediately before the next audio callback publishes them.
     State effectiveState() const;
+    Frame effectivePosition() const;
     bool playInFlight() const { return lastPlaySeq_ > transport.commandsApplied(); }
     bool configureAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer);
     bool configureAudioByName(RtAudio::Api api, const QString& wantedName, unsigned channels, unsigned buffer);
@@ -55,7 +57,7 @@ public:
     bool testMidi(const std::vector<unsigned char>& message);
     bool needsMidi() const;
     // Offline sources and vanished videos used on the timeline.
-    QStringList missingMedia() const;
+    QStringList missingMedia(bool probeFilesystem = true) const;
     // Problems worth fixing before a performance; empty when the show is ready.
     QStringList preflight(bool probeHardware = true);
     QString midiDestination() const { return midiName_; }
@@ -100,9 +102,10 @@ private:
     Frame lastComposed_ = -1;
     std::vector<Frame> lastClocks_;
     std::deque<Project> undo_, redo_;
-    quint64 busyLease_ = 0, nextBusyLease_ = 1, projectRevision_ = 0;
+    quint64 busyLease_ = 0, nextBusyLease_ = 1, projectRevision_ = 0, showEpoch_ = 0;
     std::uint64_t commandsPosted_ = 0, lastPlaySeq_ = 0;
     State predictedState_ = State::Stopped;
+    Frame predictedPosition_ = 0;
     bool postTransportCommand(Command cmd);
     void arm(Frame position);
     void startMidiThread();

@@ -30,6 +30,9 @@ public:
     bool running() const { return server_.isListening(); }
     QString endpoint() const;
     QString token() const { return token_; }
+    // Issues a revocable bearer token for an embedded chat session without affecting external clients.
+    QString issueChatToken();
+    void revokeChatToken(const QString& token);
     QString errorString() const { return server_.errorString(); }
     bool editingEnabled() const { return editing_; }
     void setEditingEnabled(bool enabled);
@@ -44,25 +47,40 @@ private:
     McpHost host_;
     QTcpServer server_;
     QString token_;
+    QSet<QString> chatTokens_;
+    QMap<QString, QString> issuedSessions_; // Mcp-Session-Id -> issuing bearer token
     bool editing_ = false;
     quint64 revision_ = 0;
     quint64 generation_ = 0;
     quint64 editGeneration_ = 0;
+    quint64 importShowEpoch_ = 0;
     std::shared_ptr<std::atomic<bool>> editSessionCancelled_ = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<std::atomic<bool>> importCancelled_ = std::make_shared<std::atomic<bool>>(false);
     std::shared_ptr<std::atomic<bool>> previewCancelled_ = std::make_shared<std::atomic<bool>>(false);
     int activeAsyncJobs_ = 0;
     int activePreviewJobs_ = 0;
     struct InflightRequest {
+        QString bearerToken;
         std::shared_ptr<std::atomic<bool>> cancelled;
         std::function<void()> abortConnection;
     };
     QMap<QString, InflightRequest> inflightRequests_;
+    struct TrackedLease {
+        quint64 lease = 0;
+        std::weak_ptr<std::atomic<bool>> cancelled;
+    };
+    std::vector<TrackedLease> activeLeases_;
+    void trackBusyLease(quint64 lease, const std::shared_ptr<std::atomic<bool>>& cancelled);
+    void releaseBusyLease(quint64 lease);
+    void releaseAllBusyLeases();
+    void releaseCancelledBusyLeases();
     void invalidateEditSession();
     void invalidatePreviews();
     QString importId_, importState_, importError_;
     std::vector<MediaAsset> imported_;
     void acceptConnection();
-    void dispatch(const QJsonObject& request, const QString& clientScope, std::shared_ptr<std::atomic<bool>> cancelled,
+    void dispatch(const QJsonObject& request, const QString& bearerToken, const QString& clientScope,
+                  std::shared_ptr<std::atomic<bool>> cancelled,
                   std::function<void()> abortConnection, std::function<void(QJsonObject, QByteArray)> finish);
     void callTool(const QString& name, const QJsonObject& arguments, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish);
     QJsonObject snapshot() const;

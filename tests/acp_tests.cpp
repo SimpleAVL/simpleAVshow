@@ -128,7 +128,9 @@ private slots:
         QVERIFY(!client.usedHttpMcp());
         client.sendPrompt("Check stdio bridge");
         QTRY_COMPARE(finishedReason, QString("end_turn"));
-        QVERIFY(message.contains("\"type\":\"stdio\""));
+        QVERIFY(!message.contains("\"type\":\"http\""));
+        QVERIFY(!message.contains("\"type\":\"stdio\""));
+        QVERIFY(message.contains("\"command\""));
         QVERIFY(message.contains("--mcp-proxy"));
         QVERIFY(message.contains("SAV_MCP_TOKEN"));
         client.disconnectFromAgent();
@@ -465,6 +467,25 @@ private slots:
         connectButton->click();
         QTRY_COMPARE(panel->acpClient().state(), AcpState::Error);
         QVERIFY(!window.mcpServer().running());
+
+        // Connecting to an already-running external MCP server keeps the external server alive on Disconnect
+        // while keeping Undo hidden whenever undoCount() == 0 (e.g. after show replacement).
+        QVERIFY(window.mcpServer().start(0));
+        window.mcpServer().setEditingEnabled(true);
+        customCommand->setText(QString("\"%1\" --http-mcp").arg(SAV_MOCK_ACP_AGENT));
+        connectButton->click();
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
+        QVERIFY(allowEditing->isChecked());
+        auto* undoButton = panel->findChild<QPushButton*>("agentChatUndoButton");
+        QVERIFY(undoButton);
+        // Simulate a show-replacing edit that clears undo history while emitting showModified.
+        window.controller().replace(newProject());
+        QCOMPARE(window.controller().undoCount(), std::size_t(0));
+        QVERIFY(!undoButton->isVisible());
+        connectButton->click(); // Disconnect chat
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
+        QVERIFY(window.mcpServer().running());
+        window.mcpServer().stop();
 
         // Read-only chat transcript must NOT intercept Space (Space should reach Controller::toggle).
         transcript->setFocus();

@@ -111,7 +111,7 @@ private:
     void save(bool as = false);
     void exportPackage();
     void writePackage(const QString& path);
-    bool checkDiscard(quint64* confirmedRev = nullptr);
+    bool checkDiscard(quint64* confirmedRev = nullptr, bool discardAutosaveNow = true, bool* shouldDiscardAutosave = nullptr);
     Clip* selectedClip();
     Marker* selectedMarker();
 };

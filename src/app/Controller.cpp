@@ -20,8 +20,9 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
         if (configured_ && (!device.running() || stalled)) {
             const QString reason = stalled ? QString("stopped responding") : device.lastError().isEmpty() ? QString("stopped") : "failed: " + device.lastError();
             configured_ = false; device.close();
-            // Once the device is closed, it is safe to render a zero-sized control block.
-            postTransportCommand({Action::StopAll}); transport.render(nullptr, 0, 0);
+            // Once the device is closed, force-stop directly so even a full command queue cannot leave Playing behind.
+            transport.forceStopAll();
+            commandsPosted_ = 0; lastPlaySeq_ = 0; predictedState_ = State::Stopped; predictedPosition_ = position();
             report("Audio output " + reason + ". Press Play to reconnect, or choose another device in Outputs.");
             playbackProblem = status;
         }
@@ -69,17 +70,20 @@ void Controller::releaseBusy(quint64 lease) {
 }
 bool Controller::postTransportCommand(Command cmd) {
     const State base = effectiveState();
+    const Frame basePos = effectivePosition();
     if (!transport.command(cmd)) { report("Transport command queue is full"); return false; }
     ++commandsPosted_;
+    predictedPosition_ = basePos;
     switch (cmd.action) {
     case Action::Play:
-        predictedState_ = (position() >= project.show.duration && base != State::Held) ? base : State::Playing;
+        predictedState_ = (basePos >= project.show.duration && base != State::Held) ? base : State::Playing;
         lastPlaySeq_ = commandsPosted_;
         break;
     case Action::Pause:
         predictedState_ = (base == State::Playing) ? State::Paused : base;
         break;
     case Action::Seek:
+        predictedPosition_ = std::clamp(cmd.position, Frame{0}, project.show.duration);
         predictedState_ = (base == State::Playing) ? State::Playing : State::Paused;
         break;
     case Action::StopAll:
@@ -92,6 +96,11 @@ State Controller::effectiveState() const {
     const std::uint64_t applied = transport.commandsApplied();
     if (commandsPosted_ <= applied) return transport.state();
     return predictedState_;
+}
+Frame Controller::effectivePosition() const {
+    const std::uint64_t applied = transport.commandsApplied();
+    if (commandsPosted_ <= applied) return position();
+    return predictedPosition_;
 }
 bool Controller::canEdit(bool reportFailure) {
     // Acquire commandsApplied() first so publishedState_ and publishedVoices_ reflect every applied command.
@@ -116,7 +125,7 @@ void Controller::replace(Project next, QString projectPath, bool markDirty) {
     // Readers hold extracted package files open; Windows cannot remove them while open.
     videos_.clear(); lastPicture_ = {};
     project = std::move(next); path = std::move(projectPath); dirty = markDirty; playbackProblem.clear();
-    undo_.clear(); redo_.clear(); ++projectRevision_;
+    undo_.clear(); redo_.clear(); ++projectRevision_; ++showEpoch_;
     arm(0); report("Project ready. Space plays or pauses; Stop All stops async audio and video."); emit changed();
 }
 void Controller::undo() {
@@ -142,14 +151,14 @@ void Controller::arm(Frame position) {
         if (asset != project.assets.cend() && asset->video && !asset->offline) clip.videoLength = frames(asset->duration);
     }
     armed_ = std::move(armed); transport.configure(armed_, position);
-    commandsPosted_ = 0; lastPlaySeq_ = 0; predictedState_ = State::Stopped;
+    commandsPosted_ = 0; lastPlaySeq_ = 0; predictedState_ = State::Stopped; predictedPosition_ = position;
     if (keep && device.resume()) stall_.restart();
     else if (configured_) {
         QString error;
         bool reopened = false;
         if (!audioName.isEmpty()) {
             QString resolvedName;
-            reopened = device.openByName(api_, audioName, audioName, channels_, buffer_, resolvedName, error, &deviceId_);
+            reopened = device.openByName(api_, audioName, audioName, channels_, buffer_, resolvedName, error, &deviceId_, deviceId_);
             if (reopened) audioName = resolvedName;
         } else {
             reopened = device.open(api_, deviceId_, channels_, buffer_, error);
@@ -215,7 +224,7 @@ bool Controller::pause() {
     // Always enqueue Action::Pause (never Play) so a Pause queued behind Play runs in order and
     // a Playing → Held transition can never accidentally resume a hold.
     if (!postTransportCommand({Action::Pause})) return false;
-    if (!device.running()) transport.render(nullptr, 0, 0);
+    if (!device.streamActive()) transport.render(nullptr, 0, 0);
     return true;
 }
 bool Controller::toggle() {
@@ -225,13 +234,13 @@ bool Controller::toggle() {
 bool Controller::seek(Frame time) {
     if (busy || showMode) { report(showMode ? "Leave show mode to jump on the timeline" : "Media is loading"); return false; }
     if (!postTransportCommand({Action::Seek, time})) return false;
-    if (!device.running()) transport.render(nullptr, 0, 0);
+    if (!device.streamActive()) transport.render(nullptr, 0, 0);
     lastComposed_ = -1;
     return true;
 }
 bool Controller::stopAll() {
     if (!postTransportCommand({Action::StopAll})) return false;
-    if (!device.running()) transport.render(nullptr, 0, 0);
+    if (!device.streamActive()) transport.render(nullptr, 0, 0);
     return true;
 }
 bool Controller::configureAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer) {
@@ -310,7 +319,7 @@ bool Controller::openMidi(int port) {
 QStringList Controller::preflight(bool probeHardware) {
     QStringList problems;
     if (dirty) problems << "The show has unsaved changes.";
-    for (const auto& missing : missingMedia()) problems << "Media is missing: " + missing;
+    for (const auto& missing : missingMedia(probeHardware)) problems << "Media is missing: " + missing;
     if (needsMidi() && !midi.connected()) {
         const QString remembered = QSettings().value("midi/port").toString();
         if (remembered.isEmpty()) problems << "MIDI cues need a destination. Choose one in Outputs.";
@@ -328,12 +337,12 @@ QStringList Controller::preflight(bool probeHardware) {
     } else if (device.running() && !routesValid()) problems << "A track is routed to more outputs than the audio interface provides.";
     return problems;
 }
-QStringList Controller::missingMedia() const {
+QStringList Controller::missingMedia(bool probeFilesystem) const {
     QStringList missing;
     for (const auto& clip : project.show.clips) {
         const auto asset = project.assets.constFind(QString::fromStdString(clip.assetId));
         if (asset == project.assets.cend() || missing.contains(asset->path)) continue;
-        if (asset->offline || (asset->video && !QFileInfo::exists(asset->path))) missing << asset->path;
+        if (asset->offline || (probeFilesystem && asset->video && !QFileInfo::exists(asset->path))) missing << asset->path;
     }
     return missing;
 }

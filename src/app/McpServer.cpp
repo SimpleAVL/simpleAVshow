@@ -353,6 +353,14 @@ void applyOperations(Project& p, const QJsonArray& operations) {
 McpServer::McpServer(Controller& controller, QObject* parent) : QObject(parent), c_(controller) {
     connect(&c_, &Controller::changed, this, [this] {
         ++revision_;
+        if (c_.showEpoch() != importShowEpoch_ && !importId_.isEmpty() &&
+            (importState_ == "preparing" || importState_ == "ready")) {
+            if (importCancelled_) importCancelled_->store(true);
+            importCancelled_ = std::make_shared<std::atomic<bool>>(false);
+            imported_.clear();
+            importState_ = "cancelled";
+            importError_ = "Import cancelled because the show was replaced";
+        }
         if (c_.showMode) {
             invalidateEditSession();
             invalidatePreviews();
@@ -360,10 +368,38 @@ McpServer::McpServer(Controller& controller, QObject* parent) : QObject(parent),
     });
     connect(&server_, &QTcpServer::newConnection, this, &McpServer::acceptConnection);
 }
+void McpServer::trackBusyLease(quint64 lease, const std::shared_ptr<std::atomic<bool>>& cancelled) {
+    if (lease != 0) activeLeases_.push_back({lease, cancelled});
+}
+void McpServer::releaseBusyLease(quint64 lease) {
+    if (lease == 0) return;
+    std::erase_if(activeLeases_, [lease](const TrackedLease& item) { return item.lease == lease; });
+    c_.releaseBusy(lease);
+}
+void McpServer::releaseAllBusyLeases() {
+    auto leases = std::move(activeLeases_);
+    activeLeases_.clear();
+    for (const auto& item : leases) c_.releaseBusy(item.lease);
+}
+void McpServer::releaseCancelledBusyLeases() {
+    std::vector<quint64> toRelease;
+    std::erase_if(activeLeases_, [&toRelease](const TrackedLease& item) {
+        auto flag = item.cancelled.lock();
+        if (!flag || flag->load()) {
+            toRelease.push_back(item.lease);
+            return true;
+        }
+        return false;
+    });
+    for (quint64 lease : toRelease) c_.releaseBusy(lease);
+}
 void McpServer::invalidateEditSession() {
     ++editGeneration_;
     if (editSessionCancelled_) editSessionCancelled_->store(true);
     editSessionCancelled_ = std::make_shared<std::atomic<bool>>(false);
+    if (importCancelled_) importCancelled_->store(true);
+    importCancelled_ = std::make_shared<std::atomic<bool>>(false);
+    releaseAllBusyLeases();
     if (importState_ == "preparing" || importState_ == "ready") {
         imported_.clear();
         importState_ = "cancelled";
@@ -378,6 +414,8 @@ bool McpServer::start(quint16 port) {
     if (running()) return true;
     if (!server_.listen(QHostAddress::LocalHost, port)) return false;
     token_ = newId() + newId(); editing_ = false;
+    chatTokens_.clear();
+    issuedSessions_.clear();
     invalidateEditSession();
     invalidatePreviews();
     c_.report("Agent collaboration enabled (read only). Open Project → Agent collaboration to allow edits.");
@@ -392,11 +430,37 @@ void McpServer::stop() {
     for (auto it = inflight.cbegin(); it != inflight.cend(); ++it) {
         if (it.value().cancelled) it.value().cancelled->store(true);
     }
-    server_.close(); token_.clear(); editing_ = false;
-    // Invalidate outstanding connections as well as the credential.
+    server_.close(); token_.clear(); chatTokens_.clear(); issuedSessions_.clear(); editing_ = false;
+    // Invalidate outstanding connections as well as all credentials.
     for (auto* socket : findChildren<QTcpSocket*>()) socket->abort();
-    imported_.clear(); importId_.clear(); importState_.clear();
+    imported_.clear(); importId_.clear(); importState_.clear(); importError_.clear(); importShowEpoch_ = 0;
     emit stateChanged();
+}
+QString McpServer::issueChatToken() {
+    if (!running()) return {};
+    const QString tok = newId() + newId();
+    chatTokens_.insert(tok);
+    return tok;
+}
+void McpServer::revokeChatToken(const QString& token) {
+    if (token.isEmpty()) return;
+    chatTokens_.remove(token);
+    for (auto it = issuedSessions_.begin(); it != issuedSessions_.end();) {
+        if (it.value() == token) it = issuedSessions_.erase(it);
+        else ++it;
+    }
+    for (auto it = inflightRequests_.begin(); it != inflightRequests_.end();) {
+        if (it.value().bearerToken == token) {
+            if (it.value().cancelled) it.value().cancelled->store(true);
+            it = inflightRequests_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto* socket : findChildren<QTcpSocket*>()) {
+        if (socket->property("savBearer").toString() == token) socket->abort();
+    }
+    releaseCancelledBusyLeases();
 }
 void McpServer::setEditingEnabled(bool enabled) {
     const bool next = enabled && running();
@@ -542,7 +606,7 @@ QJsonObject McpServer::preflightReport() const {
         [this](const Clip& clip) { return c_.project.show.tracks[clip.track].visual; });
     if (hasPicture && host_.displayStatus && !host_.displayStatus()["output_open"].toBool(false))
         problems << "The program output is not open. Open it from Audience display.";
-    const auto missing = c_.missingMedia();
+    const auto missing = c_.missingMedia(safeToProbe);
     QJsonArray problemList, missingList, disconnectedTracks, unusedAssets;
     for (const auto& item : problems) problemList.append(item);
     for (const auto& item : missing) missingList.append(item);
@@ -693,7 +757,7 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::shared_ptr
             for (const auto& req : videoRequests) {
                 if (previewAborted()) return out;
                 QString err;
-                QImage frame = videoFrameAt(req.path, req.sourceTime, targetSize, &err);
+                QImage frame = videoFrameAt(req.path, req.sourceTime, targetSize, &err, previewAborted);
                 if (frame.isNull()) {
                     out.error = err.isEmpty() ? QString("Failed to decode preview frame for %1").arg(QFileInfo(req.path).fileName()) : err;
                     return out;
@@ -775,7 +839,7 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::shared_ptr
         for (const auto& req : videoRequests) {
             if (previewAborted()) return result;
             QString err;
-            QImage frame = videoFrameAt(req.path, req.sourceTime, targetSize, &err);
+            QImage frame = videoFrameAt(req.path, req.sourceTime, targetSize, &err, previewAborted);
             if (frame.isNull()) {
                 result.error = err.isEmpty() ? QString("Failed to decode preview frame for %1").arg(QFileInfo(req.path).fileName()) : err;
                 return result;
@@ -991,6 +1055,7 @@ void McpServer::relinkMediaAsync(const QJsonObject& a, std::shared_ptr<std::atom
     const auto editCancelled = editSessionCancelled_;
     const quint64 lease = c_.acquireBusy();
     if (!lease) fail("Wait for the current busy operation to finish");
+    trackBusyLease(lease, cancelled);
     ++activeAsyncJobs_;
 
     struct RelinkResult {
@@ -1004,7 +1069,7 @@ void McpServer::relinkMediaAsync(const QJsonObject& a, std::shared_ptr<std::atom
     connect(watcher, &QFutureWatcher<RelinkResult>::finished, this,
         [this, watcher, expectedRev, jobGen, jobEditGen, lease, cancelled, finish = std::move(finish)]() mutable {
             const auto res = watcher->result(); watcher->deleteLater();
-            c_.releaseBusy(lease);
+            releaseBusyLease(lease);
             activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1);
             if (cancelled->load() || generation_ != jobGen) return;
             if (!running() || !editing_ || editGeneration_ != jobEditGen || c_.showMode || !c_.canEdit(false)) {
@@ -1117,7 +1182,9 @@ void McpServer::relinkMediaAsync(const QJsonObject& a, std::shared_ptr<std::atom
                 }
             }
             try {
-                auto asset = loadMedia(chosen);
+                auto isCancelled = [cancelled, editCancelled]() { return cancelled->load() || editCancelled->load(); };
+                auto asset = loadMedia(chosen, isCancelled);
+                if (isCancelled()) return out;
                 asset.id = item.id; asset.name = item.name;
                 out.loaded.push_back(std::move(asset));
             } catch (const std::exception& e) {
@@ -1430,20 +1497,24 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
             return;
         }
         const quint64 expectedRev = revision_;
+        const QString finalMediaDir = Controller::mediaDirectory(target);
         const quint64 lease = c_.acquireBusy();
         if (!lease) fail("Wait for the current busy operation to finish");
-        auto stagingDir = std::make_shared<QTemporaryDir>(QFileInfo(target).absolutePath() + "/.simpleavshow-save-XXXXXX");
+        // Stage inside an existing .media directory so same-filesystem rename succeeds even if .media is a mountpoint or symlink.
+        const QString stageParent = QDir(finalMediaDir).exists() ? finalMediaDir : QFileInfo(target).absolutePath();
+        auto stagingDir = std::make_shared<QTemporaryDir>(stageParent + "/.simpleavshow-save-XXXXXX");
         if (!stagingDir->isValid()) {
             c_.releaseBusy(lease);
             fail("Cannot create staging directory next to target file");
         }
+        trackBusyLease(lease, cancelled);
         ++activeAsyncJobs_;
         struct SavePrep { Project candidate; StagedProjectMedia staged; QString error; };
         auto* watcher = new QFutureWatcher<SavePrep>(this);
         connect(watcher, &QFutureWatcher<SavePrep>::finished, this,
             [this, watcher, action, target, expectedRev, jobGen, jobEditGen, lease, stagingDir, cancelled, finish = std::move(finish)]() mutable {
                 auto prep = watcher->result(); watcher->deleteLater();
-                c_.releaseBusy(lease);
+                releaseBusyLease(lease);
                 activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1);
                 if (cancelled->load() || generation_ != jobGen) return;
                 if (!prep.error.isEmpty()) {
@@ -1470,7 +1541,6 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
                 auto result = snapshot(); result.insert("action", action); result.insert("target_path", target);
                 finish(toolResult(result));
             });
-        const QString finalMediaDir = Controller::mediaDirectory(target);
         watcher->setFuture(QtConcurrent::run([candidate = c_.project, stagePath = stagingDir->path(), finalMediaDir, isCancelled]() mutable {
             SavePrep out;
             try {
@@ -1495,13 +1565,14 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
             c_.releaseBusy(lease);
             fail("Cannot create staging directory next to target package");
         }
+        trackBusyLease(lease, cancelled);
         const QString stagedPackage = stagingDir->filePath("staged.savpack");
         ++activeAsyncJobs_;
         auto* watcher = new QFutureWatcher<QString>(this);
         connect(watcher, &QFutureWatcher<QString>::finished, this,
             [this, watcher, action, path, stagedPackage, expectedRev, jobGen, jobEditGen, lease, stagingDir, cancelled, finish = std::move(finish)]() mutable {
                 const QString err = watcher->result(); watcher->deleteLater();
-                c_.releaseBusy(lease);
+                releaseBusyLease(lease);
                 activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1);
                 if (cancelled->load() || generation_ != jobGen) return;
                 if (!err.isEmpty()) {
@@ -1550,13 +1621,14 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
         const quint64 expectedRev = revision_;
         const quint64 lease = c_.acquireBusy();
         if (!lease) fail("Wait for the current busy operation to finish");
+        trackBusyLease(lease, cancelled);
         ++activeAsyncJobs_;
         struct LoadResult { Project project; QString error; };
         auto* watcher = new QFutureWatcher<LoadResult>(this);
         connect(watcher, &QFutureWatcher<LoadResult>::finished, this,
             [this, watcher, action, path, targetPath, pkg, autosave, discard, expectedRev, jobGen, jobEditGen, lease, cancelled, finish = std::move(finish)]() mutable {
                 auto loaded = watcher->result(); watcher->deleteLater();
-                c_.releaseBusy(lease);
+                releaseBusyLease(lease);
                 activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1);
                 if (cancelled->load() || generation_ != jobGen) return;
                 if (!loaded.error.isEmpty()) {
@@ -1651,6 +1723,7 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, std::shared_
             if (name == "get_import") { finish(toolResult(importStatus())); return; }
             checkWrite(a);
             if (importState_ != "ready") fail("Import job is not ready to commit");
+            if (c_.showEpoch() != importShowEpoch_) fail("Staged import belongs to a different show; re-import media for the current show");
             if (!c_.edit([&](Project& p) { for (const auto& asset : imported_) p.assets.insert(asset.id, asset); })) fail(c_.status);
             importState_ = "committed";
             const QString summary = QString("Agent imported %1 media file%2.").arg(imported_.size()).arg(imported_.size() == 1 ? "" : "s");
@@ -1675,15 +1748,26 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, std::shared_
             if (!value.isString() || !QFileInfo(value.toString()).isAbsolute() || !QFileInfo(value.toString()).isFile()) fail("Media path must be an existing absolute local file");
             paths.append(value.toString());
         }
+        if (importCancelled_) importCancelled_->store(true);
+        importCancelled_ = std::make_shared<std::atomic<bool>>(false);
         importId_ = newId(); importState_ = "preparing"; importError_.clear(); imported_.clear();
+        importShowEpoch_ = c_.showEpoch();
         const quint64 jobGen = generation_;
         const quint64 jobEditGen = editGeneration_;
+        const quint64 jobShowEpoch = importShowEpoch_;
         const auto editCancelled = editSessionCancelled_;
+        const auto importCancelled = importCancelled_;
         struct Prepared { std::vector<MediaAsset> assets; QString error; };
         auto* watcher = new QFutureWatcher<Prepared>(this); const auto job = importId_;
-        connect(watcher, &QFutureWatcher<Prepared>::finished, this, [this, watcher, job, jobGen, jobEditGen] {
+        connect(watcher, &QFutureWatcher<Prepared>::finished, this, [this, watcher, job, jobGen, jobEditGen, jobShowEpoch] {
             const auto prepared = watcher->result(); watcher->deleteLater();
             if (job != importId_ || generation_ != jobGen) return;
+            if (c_.showEpoch() != jobShowEpoch) {
+                imported_.clear();
+                importState_ = "cancelled";
+                importError_ = "Import cancelled because the show was replaced";
+                return;
+            }
             if (!running() || !editing_ || editGeneration_ != jobEditGen || c_.showMode) {
                 imported_.clear();
                 importState_ = "cancelled";
@@ -1693,16 +1777,17 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, std::shared_
             importError_ = prepared.error; imported_ = prepared.assets; importState_ = importError_.isEmpty() ? "ready" : "failed";
             c_.report(importState_ == "ready" ? "Agent media is prepared and waiting to be added to the show." : "Agent media preparation failed: " + importError_);
         });
-        watcher->setFuture(QtConcurrent::run([paths, editCancelled] {
+        watcher->setFuture(QtConcurrent::run([paths, editCancelled, importCancelled] {
             Prepared result;
+            auto isCancelled = [editCancelled, importCancelled]() { return editCancelled->load() || importCancelled->load(); };
             try {
                 for (const auto& path : paths) {
-                    if (editCancelled->load()) {
-                        result.error = "Import cancelled because editing was disabled";
+                    if (isCancelled()) {
+                        result.error = "Import cancelled";
                         result.assets.clear();
                         return result;
                     }
-                    result.assets.push_back(loadMedia(path));
+                    result.assets.push_back(loadMedia(path, isCancelled));
                 }
             } catch (const std::exception& e) { result.error = QString::fromUtf8(e.what()); result.assets.clear(); }
             return result;
@@ -1713,7 +1798,7 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, std::shared_
     }
 }
 
-void McpServer::dispatch(const QJsonObject& request, const QString& clientScope,
+void McpServer::dispatch(const QJsonObject& request, const QString& bearerToken, const QString& clientScope,
                          std::shared_ptr<std::atomic<bool>> cancelled,
                          std::function<void()> abortConnection,
                          std::function<void(QJsonObject, QByteArray)> finish) {
@@ -1739,6 +1824,7 @@ void McpServer::dispatch(const QJsonObject& request, const QString& clientScope,
                     auto entry = it.value();
                     inflightRequests_.erase(it);
                     if (entry.cancelled) entry.cancelled->store(true);
+                    releaseCancelledBusyLeases();
                     if (entry.abortConnection) entry.abortConnection();
                 }
             }
@@ -1748,7 +1834,11 @@ void McpServer::dispatch(const QJsonObject& request, const QString& clientScope,
     }
     const QString idPart = idKeyOf(id);
     const QString scopedKey = (!clientScope.isEmpty() && !idPart.isEmpty()) ? (clientScope + "|" + idPart) : QString();
-    if (!scopedKey.isEmpty() && cancelled) inflightRequests_.insert(scopedKey, {cancelled, std::move(abortConnection)});
+    if (!scopedKey.isEmpty() && inflightRequests_.contains(scopedKey)) {
+        error(-32600, "Duplicate in-flight request ID");
+        return;
+    }
+    if (!scopedKey.isEmpty() && cancelled) inflightRequests_.insert(scopedKey, {bearerToken, cancelled, std::move(abortConnection)});
     auto wrappedFinish = [this, scopedKey, cancelled, finish = std::move(finish)](QJsonObject resp, QByteArray extraHeaders = {}) {
         if (!scopedKey.isEmpty() && inflightRequests_.value(scopedKey).cancelled == cancelled) inflightRequests_.remove(scopedKey);
         finish(std::move(resp), std::move(extraHeaders));
@@ -1757,7 +1847,9 @@ void McpServer::dispatch(const QJsonObject& request, const QString& clientScope,
     QByteArray extraHeaders;
     if (method == "initialize") {
         if (!params["protocolVersion"].isString() || !params["capabilities"].isObject() || !params["clientInfo"].isObject()) { wrappedFinish(QJsonObject{{"jsonrpc", "2.0"}, {"id", id}, {"error", QJsonObject{{"code", -32602}, {"message", "Invalid initialization parameters"}}}}); return; }
-        const QString sessionHeader = clientScope.isEmpty() ? newId() : clientScope;
+        if (issuedSessions_.size() >= 256) issuedSessions_.erase(issuedSessions_.begin());
+        const QString sessionHeader = newId();
+        issuedSessions_.insert(sessionHeader, bearerToken);
         extraHeaders = "Mcp-Session-Id: " + sessionHeader.toUtf8() + "\r\n";
         result = {{"protocolVersion", versions.contains(params["protocolVersion"].toString()) ? params["protocolVersion"] : QJsonValue(versions.front())},
             {"capabilities", QJsonObject{{"tools", QJsonObject{}}, {"resources", QJsonObject{}}}},
@@ -1818,6 +1910,7 @@ void McpServer::acceptConnection() {
         auto cleanupTracked = [this, trackedKey, cancelled] {
             if (!trackedKey->isEmpty() && inflightRequests_.value(*trackedKey).cancelled == cancelled)
                 inflightRequests_.remove(*trackedKey);
+            releaseCancelledBusyLeases();
         };
         connect(socket, &QTcpSocket::disconnected, this, [cancelled, cleanupTracked] {
             cancelled->store(true);
@@ -1857,7 +1950,11 @@ void McpServer::acceptConnection() {
                 if (origin.scheme() != "http" || (origin.host() != "127.0.0.1" && origin.host() != "localhost") || origin.port() != server_.serverPort() ||
                     !origin.userInfo().isEmpty() || !origin.path().isEmpty() || origin.hasQuery() || origin.hasFragment()) { respond(403, "Forbidden"); return; }
             }
-            if (token_.isEmpty() || headers["authorization"] != "Bearer " + token_.toUtf8()) { respond(401, "Unauthorized"); return; }
+            const QByteArray auth = headers.value("authorization");
+            const QString bearer = auth.startsWith("Bearer ") ? QString::fromUtf8(auth.mid(7)) : QString();
+            const bool validBearer = !bearer.isEmpty() && ((!token_.isEmpty() && bearer == token_) || chatTokens_.contains(bearer));
+            if (!validBearer) { respond(401, "Unauthorized"); return; }
+            socket->setProperty("savBearer", bearer);
             if (requestLine[1] != "/mcp") { respond(404, "Not Found"); return; }
             if (requestLine[0] != "POST") { respond(405, "Method Not Allowed", {}, "Allow: POST\r\n"); return; }
             if (headers.contains("transfer-encoding")) { respond(400, "Bad Request"); return; }
@@ -1882,9 +1979,9 @@ void McpServer::acceptConnection() {
             const QString toolName = reqObj["method"].toString() == "tools/call" ? reqObj["params"].toObject()["name"].toString() : QString();
             const bool longFileJob = toolName == "project_action" || toolName == "relink_media";
             timeout->start(longFileJob ? (30 * 60 * 1000) : 60000);
-            const QString clientScope = headers.contains("mcp-session-id")
-                ? QString::fromUtf8(headers["mcp-session-id"])
-                : QString::fromUtf8(headers.value("x-sav-client-id"));
+            // Only honor Mcp-Session-Id values previously issued by this server to the same bearer token.
+            const QString rawSession = QString::fromUtf8(headers.value("mcp-session-id"));
+            const QString clientScope = (!rawSession.isEmpty() && issuedSessions_.value(rawSession) == bearer) ? rawSession : QString();
             const auto reqId = reqObj["id"];
             if (!clientScope.isEmpty() && !reqId.isUndefined()) {
                 const QString idPart = reqId.isString() ? ("s:" + reqId.toString())
@@ -1896,7 +1993,7 @@ void McpServer::acceptConnection() {
                     {"error", QJsonObject{{"code", -32800}, {"message", "Request cancelled"}}}};
                 respond(200, "OK", QJsonDocument(cancelErr).toJson(QJsonDocument::Compact));
             };
-            dispatch(reqObj, clientScope, cancelled, std::move(abortConnection), [respond](QJsonObject result, QByteArray extra) {
+            dispatch(reqObj, bearer, clientScope, cancelled, std::move(abortConnection), [respond](QJsonObject result, QByteArray extra) {
                 if (result.isEmpty()) respond(202, "Accepted", {}, extra);
                 else respond(200, "OK", QJsonDocument(result).toJson(QJsonDocument::Compact), extra);
             });
