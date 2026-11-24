@@ -600,14 +600,23 @@ void AcpClient::handleAgentRequest(const QJsonValue& id, const QString& method, 
         auto clamp = [](const QString& s, qsizetype limit) {
             return s.size() > limit ? (s.left(limit) + "…") : s;
         };
+        constexpr qsizetype maxPermissionDetailChars = 128 * 1024;
+        const auto toolCall = params["toolCall"].toObject();
+        QString fullDetail = summarizeJson(toolCall["rawInput"]);
+        if (fullDetail.isEmpty()) fullDetail = extractContentText(toolCall["content"]);
+        if (fullDetail.size() > maxPermissionDetailChars) {
+            // Never present a truncated permission request that could hide arguments behind Allow.
+            sendResponse(id, {{"outcome", QJsonObject{{"outcome", "cancelled"}}}});
+            emit stderrReceived(QString("Auto-cancelled permission request “%1” because its arguments exceeded 128 KB.\n")
+                .arg(clamp(toolCall["title"].toString("Agent permission request"), 128)));
+            return;
+        }
         AcpPermissionRequest request;
         request.requestKey = nextPermissionKey_++;
-        const auto toolCall = params["toolCall"].toObject();
         request.toolCallId = clamp(toolCall["toolCallId"].toString(), 128);
         request.title = clamp(toolCall["title"].toString("Agent permission request"), 256);
         request.kind = clamp(toolCall["kind"].toString(), 64);
-        request.detail = clamp(summarizeJson(toolCall["rawInput"]), 8192);
-        if (request.detail.isEmpty()) request.detail = clamp(extractContentText(toolCall["content"]), 8192);
+        request.detail = std::move(fullDetail);
         for (const auto& val : params["options"].toArray()) {
             if (static_cast<int>(request.options.size()) >= maxPermissionOptions) break;
             const auto opt = val.toObject();

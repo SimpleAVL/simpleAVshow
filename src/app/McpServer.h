@@ -11,7 +11,7 @@ namespace sav {
 // displays, timeline selection, and the phone remote while staying testable headlessly.
 struct McpHost {
     std::function<QJsonObject()> displayStatus;
-    std::function<bool(int screen, bool allowCoverEditor, QString& error)> openDisplay;
+    std::function<bool(const QString& screenName, bool allowCoverEditor, QString& error)> openDisplay;
     std::function<void()> closeDisplay;
     std::function<QJsonObject()> remoteStatus;
     std::function<bool(bool enable, int port, bool changeKey, QString& error)> configureRemote;

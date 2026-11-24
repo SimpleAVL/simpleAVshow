@@ -18,7 +18,7 @@ The quickest way to collaborate with an AI agent is directly inside SimpleAVShow
 4. Ask the agent to inspect the show, run preflight checks, preview a frame, or check **Allow edits & controls** to let it edit the show, manage media/files, configure outputs or phone remote, and run rehearsal playback.
 5. Any permission requests from the agent appear directly as **Allow / Reject / Cancel** cards above the prompt box. Click **Undo edit** (or **Edit → Undo**) at any time to revert a project edit batch in one step.
 
-> **Keyboard safety:** Typing `Space`, `Backspace`, or `Delete` inside the writable prompt box edits your prompt as expected and never triggers playback or deletes timeline clips. Focusing the read-only transcript or logs never blocks `Space` from pausing playback.
+> **Keyboard safety:** While focus is inside the Agent chat panel (prompt box, buttons, transcript, logs, or permission cards), `Space`, `Backspace`, and `Delete` stay inside chat and never trigger live playback or delete timeline clips. `Escape` still triggers Stop All (double-`Escape` in Show mode) whenever you are not actively typing in a text field. Click back on the timeline or editor when you want `Space` to control playback.
 
 ---
 

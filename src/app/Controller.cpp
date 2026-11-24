@@ -171,6 +171,7 @@ void Controller::arm(Frame position) {
 }
 void Controller::startMidiThread() {
     const auto snapshot = armed_;
+    midi.clearAbortSend();
     midiStop_.store(false);
     // std::jthread is unavailable in the libc++ shipped with older macOS SDKs.
     midiThread_ = std::thread([this, snapshot] {
@@ -211,6 +212,7 @@ void Controller::startMidiThread() {
 }
 void Controller::stopMidiThread() {
     midiStop_.store(true);
+    midi.requestAbortSend();
     if (midiThread_.joinable()) midiThread_.join();
 }
 bool Controller::routesValid() const {

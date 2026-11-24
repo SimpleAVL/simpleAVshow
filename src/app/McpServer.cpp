@@ -199,11 +199,11 @@ QJsonArray tools() {
         objectSchema({{"expected_revision", integer()}, {"directory", QJsonObject{{"type", "string"}, {"minLength", 1}}}}, {"expected_revision", "directory"}), false);
 
     // 3. Hardware outputs, phone remote, project files & rehearsal transport
-    add("configure_outputs", "Configure audio driver/device/channels/buffer, connect or disconnect the MIDI output port, open or close the fullscreen audience display, or send a single test MIDI message. Blocked during playback and Show mode.",
+    add("configure_outputs", "Configure audio driver/device/channels/buffer, connect or disconnect the MIDI output port, open or close the fullscreen audience display (pass display.screen_name from get_environment when opening so a disconnected monitor cannot redirect output), or send a single test MIDI message. Blocked during playback and Show mode.",
         objectSchema({
             {"audio", objectSchema({{"api", field("string")}, {"device", field("string")}, {"channels", integer(1, 256)}, {"buffer", integer(32, 8192)}})},
             {"midi", objectSchema({{"port", field("string")}}, {"port"})},
-            {"display", objectSchema({{"open", field("boolean")}, {"screen", integer(0, 64)}, {"allow_cover_editor", field("boolean")}}, {"open"})},
+            {"display", objectSchema({{"open", field("boolean")}, {"screen_name", field("string")}, {"allow_cover_editor", field("boolean")}}, {"open"})},
             {"test_midi", objectSchema({{"message", QJsonObject{{"type", "array"}, {"minItems", 1}, {"items", integer(0, 255)}}}}, {"message"})}
         }), false);
     add("configure_remote", "Enable or disable the local-network phone remote, choose its port, or rotate its secret link key. Blocked in Show mode.",
@@ -1336,7 +1336,7 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a, const QString&
     struct PlannedAudio { RtAudio::Api api; QString name; unsigned channels; unsigned buffer; };
     std::optional<PlannedAudio> plannedAudio;
     std::optional<QString> plannedMidiName;
-    struct PlannedDisplay { bool open = false; int screen = 0; bool allowCover = false; };
+    struct PlannedDisplay { bool open = false; QString screenName; bool allowCover = false; };
     std::optional<PlannedDisplay> plannedDisplay;
     std::optional<std::vector<unsigned char>> plannedTestMidi;
 
@@ -1434,15 +1434,13 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a, const QString&
     if (a.contains("display")) {
         if (!a["display"].isObject()) fail("display must be an object");
         const auto disp = a["display"].toObject();
-        knownFields(disp, {{"open", {}}, {"screen", {}}, {"allow_cover_editor", {}}});
+        knownFields(disp, {{"open", {}}, {"screen_name", {}}, {"allow_cover_editor", {}}});
         if (!disp.contains("open") || !disp["open"].isBool()) fail("display.open must be a boolean");
         PlannedDisplay d;
         d.open = disp["open"].toBool();
-        if (disp.contains("screen")) {
-            const auto v = disp["screen"];
-            if (!v.isDouble() || !std::isfinite(v.toDouble()) || std::floor(v.toDouble()) != v.toDouble() || v.toDouble() < 0 || v.toDouble() > 64)
-                fail("display.screen must be an integer between 0 and 64");
-            d.screen = static_cast<int>(v.toDouble());
+        if (disp.contains("screen_name")) {
+            if (!disp["screen_name"].isString()) fail("display.screen_name must be a string");
+            d.screenName = disp["screen_name"].toString().trimmed();
         }
         if (disp.contains("allow_cover_editor")) {
             if (!disp["allow_cover_editor"].isBool()) fail("display.allow_cover_editor must be a boolean");
@@ -1450,9 +1448,22 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a, const QString&
         }
         if (d.open) {
             if (!host_.openDisplay || !host_.displayStatus) fail("Audience display control is unavailable without a main window");
+            if (d.screenName.isEmpty())
+                fail("Pass display.screen_name from get_environment so a disconnected monitor cannot redirect output");
             const auto screens = host_.displayStatus()["screens"].toArray();
-            if (d.screen < 0 || d.screen >= screens.size()) fail("Display index out of range");
-            if (screens[d.screen].toObject()["is_editor"].toBool(false) && !d.allowCover)
+            int matchCount = 0;
+            QJsonObject matchedScreen;
+            for (const auto& s : screens) {
+                const auto obj = s.toObject();
+                if (obj["name"].toString() == d.screenName) {
+                    matchedScreen = obj;
+                    ++matchCount;
+                }
+            }
+            if (matchCount == 0) fail("Display not found: " + d.screenName);
+            if (matchCount > 1)
+                fail(QString("Multiple displays share the name “%1”; choose the display manually in Audience display").arg(d.screenName));
+            if (matchedScreen["is_editor"].toBool(false) && !d.allowCover)
                 fail("That screen currently shows the editor. Choose another display or pass allow_cover_editor: true.");
         }
         plannedDisplay = d;
@@ -1472,12 +1483,6 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a, const QString&
         if (cfg["message"].toArray().size() > 64)
             fail("test_midi.message cannot exceed 64 bytes");
         if (!validMidi(bytes)) fail("Complete the MIDI message before testing it");
-#ifdef Q_OS_WIN
-        // RtMidi's WinMM backend spins indefinitely on MIDIERR_STILLPLAYING for SysEx if a driver
-        // stalls, which would block midiThread_ and GUI join() on edit/shutdown.
-        if (!bytes.empty() && bytes[0] == 0xf0)
-            fail("SysEx test_midi is disabled on Windows because WinMM drivers can block indefinitely; send a short channel MIDI message instead");
-#endif
         if (plannedMidiName && plannedMidiName->isEmpty())
             fail("Cannot send test_midi while disconnecting MIDI output");
         if (!plannedMidiName && !c_.midi.connected())
@@ -1505,7 +1510,7 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a, const QString&
             if (host_.closeDisplay) host_.closeDisplay();
         } else {
             QString error;
-            if (!host_.openDisplay(plannedDisplay->screen, plannedDisplay->allowCover, error))
+            if (!host_.openDisplay(plannedDisplay->screenName, plannedDisplay->allowCover, error))
                 failPartial(error.isEmpty() ? "Could not open audience display" : error);
         }
         applied << "display";

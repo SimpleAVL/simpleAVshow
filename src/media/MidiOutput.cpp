@@ -1,9 +1,13 @@
 #include "media/MidiOutput.h"
+#include <chrono>
 #include <cstddef>
 #include <mutex>
 #ifdef Q_OS_MACOS
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreMIDI/CoreMIDI.h>
+#elif defined(Q_OS_WIN)
+#include <windows.h>
+#include <mmsystem.h>
 #endif
 
 namespace sav {
@@ -43,8 +47,9 @@ QString coreMidiEndpointName(MIDIEndpointRef ep) {
     return name;
 }
 
-// Legacy RtMidi-style candidate names (e.g. "DeviceName EndpointName" or raw kMIDIPropertyName)
-// so saved preferences created by older RtMidi-based releases continue to resolve.
+// Legacy RtMidi-style candidate names (local endpoint/device names AND connected external
+// Audio MIDI Setup devices via kMIDIPropertyConnectionUniqueID) so saved preferences created
+// by older RtMidi-based releases continue to resolve after upgrade.
 QStringList coreMidiEndpointAliases(MIDIEndpointRef ep) {
     QStringList names;
     auto add = [&](const QString& s) { if (!s.isEmpty() && !names.contains(s)) names << s; };
@@ -61,6 +66,47 @@ QStringList coreMidiEndpointAliases(MIDIEndpointRef ep) {
             if (!devName.isEmpty() && !raw.isEmpty()) add(devName + " " + raw);
             if (!devName.isEmpty() && !entName.isEmpty()) add(devName + " " + entName);
         }
+    }
+    auto addExternalUid = [&](MIDIUniqueID uid) {
+        if (!uid) return;
+        MIDIObjectRef connObj = 0;
+        MIDIObjectType connType = kMIDIObjectType_Other;
+        if (MIDIObjectFindByUniqueID(uid, &connObj, &connType) != noErr || !connObj) return;
+        add(cfStringProperty(connObj, kMIDIPropertyDisplayName));
+        const QString objName = cfStringProperty(connObj, kMIDIPropertyName);
+        add(objName);
+        MIDIEntityRef extEntity = 0;
+        if (connType == kMIDIObjectType_ExternalEntity || connType == kMIDIObjectType_Entity) {
+            extEntity = static_cast<MIDIEntityRef>(connObj);
+        } else if (connType == kMIDIObjectType_ExternalDestination || connType == kMIDIObjectType_ExternalSource ||
+                   connType == kMIDIObjectType_Destination || connType == kMIDIObjectType_Source) {
+            MIDIEndpointGetEntity(static_cast<MIDIEndpointRef>(connObj), &extEntity);
+        }
+        if (extEntity) {
+            const QString entName = cfStringProperty(extEntity, kMIDIPropertyName);
+            add(entName);
+            MIDIDeviceRef extDev = 0;
+            if (MIDIEntityGetDevice(extEntity, &extDev) == noErr && extDev) {
+                const QString devName = cfStringProperty(extDev, kMIDIPropertyName);
+                add(devName);
+                if (!devName.isEmpty() && !objName.isEmpty() && !objName.startsWith(devName))
+                    add(devName + " " + objName);
+                if (!devName.isEmpty() && !entName.isEmpty() && !entName.startsWith(devName))
+                    add(devName + " " + entName);
+            }
+        }
+    };
+    CFDataRef connData = nullptr;
+    if (MIDIObjectGetDataProperty(ep, kMIDIPropertyConnectionUniqueID, &connData) == noErr && connData) {
+        const CFIndex count = CFDataGetLength(connData) / static_cast<CFIndex>(sizeof(MIDIUniqueID));
+        const auto* rawIds = reinterpret_cast<const SInt32*>(CFDataGetBytePtr(connData));
+        for (CFIndex i = 0; i < count; ++i)
+            addExternalUid(static_cast<MIDIUniqueID>(CFSwapInt32BigToHost(static_cast<uint32_t>(rawIds[i]))));
+        CFRelease(connData);
+    } else {
+        SInt32 singleUid = 0;
+        if (MIDIObjectGetIntegerProperty(ep, kMIDIPropertyConnectionUniqueID, &singleUid) == noErr && singleUid)
+            addExternalUid(static_cast<MIDIUniqueID>(singleUid));
     }
     return names;
 }
@@ -102,6 +148,32 @@ struct MidiOutput::CoreMidiState {
 struct MidiOutput::CoreMidiState {};
 #endif
 
+#ifdef Q_OS_WIN
+struct MidiOutput::WinMmState {
+    HMIDIOUT handle = nullptr;
+    UINT devId = 0;
+    ~WinMmState() {
+        if (handle) {
+            midiOutReset(handle);
+            midiOutClose(handle);
+        }
+    }
+    static std::unique_ptr<WinMmState> open(UINT devId, QString& error) {
+        auto state = std::make_unique<WinMmState>();
+        state->devId = devId;
+        const MMRESULT res = midiOutOpen(&state->handle, devId, 0, 0, CALLBACK_NULL);
+        if (res != MMSYSERR_NOERROR || !state->handle) {
+            error = QString("Cannot open MIDI port (WinMM error %1)").arg(static_cast<unsigned>(res));
+            state->handle = nullptr;
+            return nullptr;
+        }
+        return state;
+    }
+};
+#else
+struct MidiOutput::WinMmState {};
+#endif
+
 MidiOutput::MidiOutput() = default;
 
 MidiOutput::~MidiOutput() {
@@ -111,6 +183,8 @@ MidiOutput::~MidiOutput() {
 bool MidiOutput::connected() const {
 #ifdef Q_OS_MACOS
     return coreMidi_ && coreMidi_->outPort && coreMidi_->endpoint && !lost_.load();
+#elif defined(Q_OS_WIN)
+    return winMm_ && winMm_->handle && !lost_.load();
 #else
     return output_ && output_->isPortOpen() && !lost_.load();
 #endif
@@ -122,6 +196,15 @@ QStringList MidiOutput::ports() {
     const ItemCount count = MIDIGetNumberOfDestinations();
     for (ItemCount i = 0; i < count; ++i) {
         result << coreMidiEndpointName(MIDIGetDestination(i));
+    }
+#elif defined(Q_OS_WIN)
+    const UINT count = midiOutGetNumDevs();
+    for (UINT i = 0; i < count; ++i) {
+        MIDIOUTCAPSW caps{};
+        if (midiOutGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
+            result << QString::fromWCharArray(caps.szPname);
+        else
+            result << QString();
     }
 #else
     try {
@@ -149,6 +232,22 @@ bool MidiOutput::open(int port, QString& error) {
     coreMidi_ = std::move(state);
     name_ = epName;
     lost_.store(false);
+    return true;
+#elif defined(Q_OS_WIN)
+    const UINT count = midiOutGetNumDevs();
+    if (static_cast<UINT>(port) >= count) { error = "MIDI port is no longer available"; return false; }
+    MIDIOUTCAPSW caps{};
+    if (midiOutGetDevCapsW(static_cast<UINT>(port), &caps, sizeof(caps)) != MMSYSERR_NOERROR) {
+        error = "MIDI port is no longer available";
+        return false;
+    }
+    const QString portName = QString::fromWCharArray(caps.szPname);
+    auto state = WinMmState::open(static_cast<UINT>(port), error);
+    if (!state) return false;
+    winMm_ = std::move(state);
+    name_ = portName;
+    lost_.store(false);
+    abortSend_.store(false, std::memory_order_release);
     return true;
 #else
     try {
@@ -222,6 +321,45 @@ bool MidiOutput::openByName(const QString& wanted, QString& error) {
     coreMidi_ = std::move(candidate);
     name_ = matchedName;
     lost_.store(false);
+    return true;
+#elif defined(Q_OS_WIN)
+    const UINT count = midiOutGetNumDevs();
+    std::vector<std::pair<UINT, QString>> exactMatches, ciMatches;
+    for (UINT i = 0; i < count; ++i) {
+        MIDIOUTCAPSW caps{};
+        if (midiOutGetDevCapsW(i, &caps, sizeof(caps)) != MMSYSERR_NOERROR) continue;
+        const QString portName = QString::fromWCharArray(caps.szPname);
+        if (portName == wanted) exactMatches.emplace_back(i, portName);
+        else if (portName.compare(wanted, Qt::CaseInsensitive) == 0) ciMatches.emplace_back(i, portName);
+    }
+    const auto& matches = !exactMatches.empty() ? exactMatches : ciMatches;
+    if (matches.empty()) { error = "MIDI port not found: " + wanted; return false; }
+    if (connected()) {
+        for (const auto& [devId, portName] : matches) {
+            (void)devId;
+            if (portName == name_) return true;
+        }
+    }
+    if (matches.size() > 1) {
+        error = "Multiple MIDI ports share the name “" + wanted + "”; choose the port manually in Outputs";
+        return false;
+    }
+    const UINT matchedId = matches.front().first;
+    const QString matchedName = matches.front().second;
+    MIDIOUTCAPSW verifyCaps{};
+    if (matchedId >= midiOutGetNumDevs() ||
+        midiOutGetDevCapsW(matchedId, &verifyCaps, sizeof(verifyCaps)) != MMSYSERR_NOERROR ||
+        QString::fromWCharArray(verifyCaps.szPname) != matchedName) {
+        error = "MIDI port list changed before opening " + matchedName;
+        return false;
+    }
+    auto candidate = WinMmState::open(matchedId, error);
+    if (!candidate) return false;
+    close();
+    winMm_ = std::move(candidate);
+    name_ = matchedName;
+    lost_.store(false);
+    abortSend_.store(false, std::memory_order_release);
     return true;
 #else
     // Resolve the target port across all destinations first, preferring exact name over case-insensitive
@@ -298,6 +436,66 @@ bool MidiOutput::send(const std::vector<unsigned char>& message, QString& error)
     error = QString("MIDI cue not sent to %1 (OSStatus %2)").arg(name_).arg(static_cast<int>(status));
     lost_.store(true);
     return false;
+#elif defined(Q_OS_WIN)
+    if (message[0] != 0xf0 && message.size() <= 3) {
+        DWORD packet = 0;
+        for (std::size_t i = 0; i < message.size(); ++i)
+            packet |= static_cast<DWORD>(message[i]) << (8 * i);
+        const MMRESULT res = midiOutShortMsg(winMm_->handle, packet);
+        if (res == MMSYSERR_NOERROR) return true;
+        error = QString("MIDI cue not sent to %1 (WinMM error %2)").arg(name_).arg(static_cast<unsigned>(res));
+        lost_.store(true);
+        return false;
+    }
+    // Heap-allocate MIDIHDR + SysEx payload so if a broken driver still holds the header after
+    // timeout + midiOutReset, we can safely leak the <=4 KiB buffer instead of freeing live DMA memory.
+    struct SysexBuffer {
+        MIDIHDR hdr{};
+        std::vector<char> data;
+    };
+    auto sysex = std::make_unique<SysexBuffer>();
+    sysex->data.assign(reinterpret_cast<const char*>(message.data()),
+                       reinterpret_cast<const char*>(message.data() + message.size()));
+    sysex->hdr.lpData = sysex->data.data();
+    sysex->hdr.dwBufferLength = static_cast<DWORD>(sysex->data.size());
+    sysex->hdr.dwBytesRecorded = sysex->hdr.dwBufferLength;
+    MMRESULT res = midiOutPrepareHeader(winMm_->handle, &sysex->hdr, sizeof(MIDIHDR));
+    if (res != MMSYSERR_NOERROR) {
+        error = QString("MIDI SysEx prepare failed on %1 (WinMM error %2)").arg(name_).arg(static_cast<unsigned>(res));
+        lost_.store(true);
+        return false;
+    }
+    res = midiOutLongMsg(winMm_->handle, &sysex->hdr, sizeof(MIDIHDR));
+    if (res != MMSYSERR_NOERROR) {
+        if (midiOutUnprepareHeader(winMm_->handle, &sysex->hdr, sizeof(MIDIHDR)) == MIDIERR_STILLPLAYING)
+            sysex.release();
+        error = QString("MIDI SysEx not sent to %1 (WinMM error %2)").arg(name_).arg(static_cast<unsigned>(res));
+        lost_.store(true);
+        return false;
+    }
+    // Bounded 500 ms wait that also honors abortSend_ so a stalled driver can never hang midiThread_ or shutdown.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while ((res = midiOutUnprepareHeader(winMm_->handle, &sysex->hdr, sizeof(MIDIHDR))) == MIDIERR_STILLPLAYING) {
+        if (abortSend_.load(std::memory_order_acquire) || std::chrono::steady_clock::now() >= deadline) {
+            midiOutReset(winMm_->handle);
+            for (int tries = 0; tries < 50; ++tries) {
+                res = midiOutUnprepareHeader(winMm_->handle, &sysex->hdr, sizeof(MIDIHDR));
+                if (res != MIDIERR_STILLPLAYING) break;
+                Sleep(1);
+            }
+            if (res == MIDIERR_STILLPLAYING) sysex.release();
+            error = abortSend_.load(std::memory_order_acquire)
+                ? QString("MIDI SysEx aborted on %1").arg(name_)
+                : QString("MIDI SysEx timed out on %1").arg(name_);
+            lost_.store(true);
+            return false;
+        }
+        Sleep(1);
+    }
+    if (res == MMSYSERR_NOERROR) return true;
+    error = QString("MIDI SysEx unprepare failed on %1 (WinMM error %2)").arg(name_).arg(static_cast<unsigned>(res));
+    lost_.store(true);
+    return false;
 #else
     try {
         error_.clear(); output_->sendMessage(&message);
@@ -309,7 +507,9 @@ bool MidiOutput::send(const std::vector<unsigned char>& message, QString& error)
 }
 
 void MidiOutput::close() {
+    abortSend_.store(true, std::memory_order_release);
     coreMidi_.reset();
+    winMm_.reset();
     output_.reset();
     name_.clear();
     error_.clear();

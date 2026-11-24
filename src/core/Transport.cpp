@@ -198,40 +198,69 @@ void Transport::forceStopAll() noexcept {
 void Transport::render(float* output, unsigned count, unsigned channels) noexcept {
     if (output) std::fill(output, output + static_cast<std::size_t>(count) * channels, 0.f);
     if (!show_) return;
+    // Dequeue pending commands first, THEN sample urgentStop_ and authorization epochs so any
+    // Disconnect, New, Show-mode entry, or emergency Stop All issued before dequeue takes effect
+    // on this batch rather than executing a revoked command first.
+    Command batch[128];
+    std::size_t countQueued = 0;
+    while (countQueued < 128 && commands_.pop(batch[countQueued])) ++countQueued;
+
+    const bool urgent = urgentStop_.load(std::memory_order_acquire);
     const std::uint64_t validExt = externalAgentEpoch_.load(std::memory_order_acquire);
     const std::uint64_t validChat = chatAgentEpoch_.load(std::memory_order_acquire);
-    if (urgentStop_.load(std::memory_order_acquire)) {
-        // Emergency Stop All skips queued Play/Pause so no resume MIDI cue can fire,
-        // while preserving any valid queued Seek position before stopping.
-        Command discarded;
-        while (commands_.pop(discarded)) {
-            if (discarded.action == Action::Seek && isCommandValid(discarded, validExt, validChat))
-                apply(discarded, validExt, validChat);
-            else
+
+    auto applyUrgentStop = [&](std::size_t fromIndex) noexcept {
+        for (std::size_t i = fromIndex; i < countQueued; ++i) {
+            const auto& c = batch[i];
+            if (c.action == Action::Seek &&
+                isCommandValid(c, externalAgentEpoch_.load(std::memory_order_acquire), chatAgentEpoch_.load(std::memory_order_acquire))) {
+                apply(c, externalAgentEpoch_.load(std::memory_order_acquire), chatAgentEpoch_.load(std::memory_order_acquire));
+            } else {
                 ++applied_;
+            }
+        }
+        Command residual;
+        while (commands_.pop(residual)) {
+            if (residual.action == Action::Seek &&
+                isCommandValid(residual, externalAgentEpoch_.load(std::memory_order_acquire), chatAgentEpoch_.load(std::memory_order_acquire))) {
+                apply(residual, externalAgentEpoch_.load(std::memory_order_acquire), chatAgentEpoch_.load(std::memory_order_acquire));
+            } else {
+                ++applied_;
+            }
         }
         applyStopAll();
         urgentStop_.store(false, std::memory_order_release);
+    };
+
+    if (urgent) {
+        applyUrgentStop(0);
     } else {
-        // Use one consistent authorization snapshot across scan and execution. When a valid
-        // StopAll is in the batch, skip earlier Play/Pause (so no resume MIDI cue fires before
-        // StopAll) while still applying valid Seek commands so accepted seeks keep their position.
-        Command batch[128];
-        std::size_t countQueued = 0;
-        int lastStop = -1;
-        while (countQueued < 128 && commands_.pop(batch[countQueued])) {
-            const auto& c = batch[countQueued];
-            if (c.action == Action::StopAll && isCommandValid(c, validExt, validChat))
-                lastStop = static_cast<int>(countQueued);
-            ++countQueued;
+        int lastOpStop = -1;
+        int lastValidStop = -1;
+        for (std::size_t i = 0; i < countQueued; ++i) {
+            const auto& c = batch[i];
+            if (c.action == Action::StopAll && isCommandValid(c, validExt, validChat)) {
+                lastValidStop = static_cast<int>(i);
+                if (c.source == CommandSource::Operator) lastOpStop = static_cast<int>(i);
+            }
         }
         for (std::size_t i = 0; i < countQueued; ++i) {
-            if (static_cast<int>(i) < lastStop &&
-                (batch[i].action == Action::Play || batch[i].action == Action::Pause)) {
+            if (urgentStop_.load(std::memory_order_acquire)) {
+                applyUrgentStop(i);
+                break;
+            }
+            const auto& c = batch[i];
+            // Only an unrevocable operator StopAll can coalesce earlier operator Play/Pause;
+            // any valid StopAll coalesces earlier agent Play/Pause. Seeks are always preserved.
+            const int stopCutoff = c.source == CommandSource::Operator ? lastOpStop : lastValidStop;
+            if (static_cast<int>(i) < stopCutoff && (c.action == Action::Play || c.action == Action::Pause)) {
                 ++applied_;
                 continue;
             }
-            apply(batch[i], validExt, validChat);
+            // Re-sample authorization epochs right before executing agent commands to close late revocations.
+            const std::uint64_t liveExt = externalAgentEpoch_.load(std::memory_order_acquire);
+            const std::uint64_t liveChat = chatAgentEpoch_.load(std::memory_order_acquire);
+            apply(c, liveExt, liveChat);
         }
     }
     float peak = 0; bool waiting = false;

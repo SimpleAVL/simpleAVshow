@@ -133,14 +133,29 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
             {"output_open", bool(outputWindow_ && outputWindow_->isVisible())},
             {"output_screen", outputScreen_}};
     };
-    host.openDisplay = [this](int index, bool allowCoverEditor, QString& error) {
+    host.openDisplay = [this](const QString& screenName, bool allowCoverEditor, QString& error) {
         const auto list = QGuiApplication::screens();
-        if (index < 0 || index >= list.size()) { error = "Display index out of range"; return false; }
-        if (list[index] == screen() && !allowCoverEditor) {
+        int matchedIndex = -1;
+        int matchCount = 0;
+        for (int i = 0; i < list.size(); ++i) {
+            if (list[i]->name() == screenName) {
+                matchedIndex = i;
+                ++matchCount;
+            }
+        }
+        if (matchCount == 0) {
+            error = "Display not found: " + screenName;
+            return false;
+        }
+        if (matchCount > 1) {
+            error = QString("Multiple displays share the name “%1”; choose the display manually in Audience display").arg(screenName);
+            return false;
+        }
+        if (list[matchedIndex] == screen() && !allowCoverEditor) {
             error = "That screen currently shows the editor. Choose another display or pass allow_cover_editor: true.";
             return false;
         }
-        openOutput(index, false);
+        openOutput(matchedIndex, false);
         return bool(outputWindow_ && outputWindow_->isVisible());
     };
     host.closeDisplay = [this] { outputLost_ = false; if (outputWindow_) outputWindow_->hide(); };

@@ -454,11 +454,17 @@ private slots:
         QVERIFY(!remOff["isError"].toBool());
         QVERIFY(!window.remoteServer().running());
 
-        // 9. configure_outputs validates nested schemas before side effects & guards editor display
+        // 9. configure_outputs validates nested schemas before side effects & guards editor display by name
         QVERIFY(call(server, "configure_outputs", {{"midi", QJsonObject{}}})["isError"].toBool());
         QVERIFY(call(server, "configure_outputs", {{"display", QJsonObject{}}})["isError"].toBool());
         QVERIFY(call(server, "configure_outputs", {{"display", QJsonObject{{"open", "yes"}}}})["isError"].toBool());
-        QVERIFY(call(server, "configure_outputs", {{"display", QJsonObject{{"open", true}, {"screen", 0}}}})["isError"].toBool());
+        QVERIFY(call(server, "configure_outputs", {{"display", QJsonObject{{"open", true}}}})["isError"].toBool());
+        QVERIFY(call(server, "configure_outputs", {{"display", QJsonObject{{"open", true}, {"screen_name", "NoSuchDisplay"}}}})["isError"].toBool());
+        const auto envScreens = call(server, "get_environment")["structuredContent"].toObject()["displays"].toObject()["screens"].toArray();
+        if (!envScreens.isEmpty()) {
+            const QString editorScreenName = envScreens.first().toObject()["name"].toString();
+            QVERIFY(call(server, "configure_outputs", {{"display", QJsonObject{{"open", true}, {"screen_name", editorScreenName}}}})["isError"].toBool());
+        }
         QVERIFY(!call(server, "configure_outputs", {{"midi", QJsonObject{{"port", "none"}}}})["isError"].toBool());
         // test_midi must be rejected when disconnecting MIDI or when no MIDI destination is connected.
         QVERIFY(call(server, "configure_outputs", {
