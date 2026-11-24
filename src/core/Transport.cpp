@@ -443,15 +443,21 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 }
             }
             bool advancingAtBoundary = state_ == State::Playing;
+            // On sample 0 of a newly initiated Play, defer consuming markers/MIDI and starting dormant
+            // async voices until disk readiness and live authorization both succeed so a disk stall
+            // followed by Disconnect leaves markers unconsumed and async voices Dormant.
+            const bool deferStartCommit = f == 0 && pendingStart.active && state_ == State::Playing;
+            const std::size_t savedNextStart = nextStart_;
+            const std::size_t savedNextMarker = nextMarker_;
+            const std::size_t savedActiveSize = active_.size();
+            const State savedBoundaryState = state_;
+            const int savedBoundaryHeld = heldMarker_;
+            CommandSource cueSource = CommandSource::Operator;
+            std::uint64_t cueEpoch = 0;
+            CommandSource cueSource2 = CommandSource::Operator;
+            std::uint64_t cueEpoch2 = 0;
+            bool suppressSeekCue = false;
             if (state_ == State::Playing) {
-                const std::size_t savedNextStart = nextStart_;
-                const std::size_t savedNextMarker = nextMarker_;
-                const std::size_t savedActiveSize = active_.size();
-                CommandSource cueSource = CommandSource::Operator;
-                std::uint64_t cueEpoch = 0;
-                CommandSource cueSource2 = CommandSource::Operator;
-                std::uint64_t cueEpoch2 = 0;
-                bool suppressSeekCue = false;
                 if (f == 0) {
                     if (pendingStart.active && pendingStart.source != CommandSource::Operator) {
                         cueSource = pendingStart.source;
@@ -473,21 +479,20 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                     const auto i = starts_[nextStart_++];
                     if (show_->clips[i].contains(position_)) active_.push_back(i);
                 }
-                while (nextMarker_ < markers_.size() && show_->markers[markers_[nextMarker_]].time == position_) {
-                    const auto i = markers_[nextMarker_++]; const auto& marker = show_->markers[i];
-                    if (marker.timing == MidiTiming::Arrival && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
-                    if (marker.hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); }
-                    else if (marker.timing == MidiTiming::Resume && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
-                }
-                if (f == 0 && pendingStart.active && pendingStart.source != CommandSource::Operator &&
-                    !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
-                    nextStart_ = savedNextStart;
-                    nextMarker_ = savedNextMarker;
-                    active_.resize(savedActiveSize);
-                    state_ = pendingStart.prevState;
-                    heldMarker_ = pendingStart.prevHeldMarker;
-                    pendingStart.active = false;
-                    advancingAtBoundary = false;
+                if (deferStartCommit) {
+                    // Only preview whether a hold marker exists at position_ so normal clips respect the hold
+                    // during readiness checking without consuming nextMarker_ or emitting MIDI yet.
+                    for (std::size_t m = nextMarker_; m < markers_.size() && show_->markers[markers_[m]].time == position_; ++m) {
+                        const auto i = markers_[m];
+                        if (show_->markers[i].hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); }
+                    }
+                } else {
+                    while (nextMarker_ < markers_.size() && show_->markers[markers_[nextMarker_]].time == position_) {
+                        const auto i = markers_[nextMarker_++]; const auto& marker = show_->markers[i];
+                        if (marker.timing == MidiTiming::Arrival && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
+                        if (marker.hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); }
+                        else if (marker.timing == MidiTiming::Resume && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
+                    }
                 }
                 if (state_ == State::Playing && position_ >= show_->duration) {
                     state_ = State::Ended; for (std::size_t i = 0; i < voices_.size(); ++i) cut(i);
@@ -497,6 +502,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             bool ready = true;
             // Resolve all sources before mixing: a cache miss freezes the whole
             // sample clock, so tracks remain aligned and no source frames are lost.
+            // Do NOT mutate Dormant async voices to Running until !waiting && !rolledBackOnReady.
             for (std::size_t cursor = 0; cursor < active_.size();) {
                 const auto i = active_[cursor]; const auto& clip = show_->clips[i]; const auto& track = show_->tracks[clip.track]; auto& voice = voices_[i];
                 voice.ready = false;
@@ -506,11 +512,9 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 ++cursor;
                 Frame source;
                 if (track.async) {
-                    if (voice.state == VoiceState::Dormant && clip.contains(position_) && advancingAtBoundary && state_ != State::Ended) {
-                        voice.state = VoiceState::Running; voice.source = clip.offset + position_ - clip.start;
-                    }
-                    if (voice.state != VoiceState::Running) continue;
-                    source = voice.source;
+                    const bool startingAsync = voice.state == VoiceState::Dormant && clip.contains(position_) && advancingAtBoundary && state_ != State::Ended;
+                    if (!startingAsync && voice.state != VoiceState::Running) continue;
+                    source = startingAsync ? (clip.offset + position_ - clip.start) : voice.source;
                 } else {
                     if (state_ != State::Playing || !clip.contains(position_)) continue;
                     source = clip.offset + position_ - clip.start;
@@ -519,10 +523,10 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 if (length <= 0) continue;
                 if (source >= length) {
                     if (clip.loop) source = clip.offset + (source - clip.offset) % std::max(Frame{1}, length - clip.offset);
-                    else { if (track.async) voice.state = VoiceState::Finished; continue; }
+                    else { if (track.async && voice.state == VoiceState::Running) voice.state = VoiceState::Finished; continue; }
                 }
                 if (source < 0 || source >= length) continue;
-                if (track.async) voice.source = source; // Keep loops' cursors bounded, including long holds.
+                if (track.async && voice.state == VoiceState::Running) voice.source = source; // Keep loops' cursors bounded, including long holds.
                 if (track.muted || track.visual) continue;
                 if (buffers_[i]) {
                     if (!buffers_[i]->sample(source, voice.left, voice.right)) { ready = false; continue; }
@@ -561,10 +565,53 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                     pendingStart.wasHeld = false;
                 }
             }
+            if (deferStartCommit) {
+                if (waiting || rolledBackOnReady) {
+                    nextStart_ = savedNextStart;
+                    nextMarker_ = savedNextMarker;
+                    active_.resize(savedActiveSize);
+                    if (waiting) {
+                        state_ = savedBoundaryState;
+                        heldMarker_ = savedBoundaryHeld;
+                    }
+                } else {
+                    // Disk is ready and start authorization is valid: now consume boundary markers and emit MIDI.
+                    while (nextMarker_ < markers_.size() && show_->markers[markers_[nextMarker_]].time == position_) {
+                        const auto i = markers_[nextMarker_++]; const auto& marker = show_->markers[i];
+                        if (marker.timing == MidiTiming::Arrival && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
+                        if (marker.hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); }
+                        else if (marker.timing == MidiTiming::Resume && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
+                    }
+                    if (pendingStart.active && pendingStart.source != CommandSource::Operator &&
+                        !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
+                        nextStart_ = savedNextStart;
+                        nextMarker_ = savedNextMarker;
+                        active_.resize(savedActiveSize);
+                        state_ = pendingStart.prevState;
+                        heldMarker_ = pendingStart.prevHeldMarker;
+                        pendingStart.active = false;
+                        pendingStart.wasHeld = false;
+                        pendingStart.seekCueActive = false;
+                        rolledBackOnReady = true;
+                    }
+                }
+            }
             // Voices that stop sounding fade out. A miss fades every voice; normal voices fade back in once ready.
             for (const auto i : active_) if (waiting || rolledBackOnReady || !voices_[i].ready) cut(i);
             if (!waiting && !rolledBackOnReady) for (const auto i : active_) {
                 const auto& clip = show_->clips[i]; const auto& track = show_->tracks[clip.track]; auto& voice = voices_[i];
+                if (track.async && voice.state == VoiceState::Dormant && clip.contains(position_) && advancingAtBoundary && state_ != State::Ended) {
+                    Frame startSource = clip.offset + position_ - clip.start;
+                    const Frame length = sourceLength(clip);
+                    if (length > 0 && startSource >= length) {
+                        if (clip.loop) startSource = clip.offset + (startSource - clip.offset) % std::max(Frame{1}, length - clip.offset);
+                        else { voice.state = VoiceState::Finished; continue; }
+                    }
+                    if (length > 0 && startSource >= 0 && startSource < length) {
+                        voice.state = VoiceState::Running;
+                        voice.source = startSource;
+                    }
+                }
                 if (track.async && voice.state == VoiceState::Running) ++voice.source;
                 if (!voice.ready) continue;
                 voice.audible = true; voice.next = voice.at + 1;

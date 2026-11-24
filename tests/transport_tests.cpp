@@ -540,6 +540,31 @@ int main() {
             checkedRender(ht, dout.data(), 64, 2);
             expect(ht.state() == State::Playing && ht.takeMidi(holdEv) && !ht.takeMidi(holdEv),
                 "operator continue after rolled-back disk stall emits resume MIDI exactly once");
+            // Revoking a chat Play during a disk stall inside an async clip with an Arrival cue must leave
+            // the async voice Dormant and preserve the Arrival cue for the operator's subsequent Play.
+            auto asyncStorage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto ap = show(true); ap->duration = asyncStorage->length(); ap->clips[0].duration = ap->duration; ap->clips[0].audio = diskAudio(asyncStorage);
+            const Frame asyncPos = frames(20 * 3600);
+            ap->markers.push_back({"arr", "Arr", asyncPos, false, MidiTiming::Arrival, {0x90, 62, 100}});
+            Transport at; at.configure(ap);
+            asyncStorage->fail.store(true);
+            const auto asyncChatEp = at.chatAgentEpoch();
+            at.command({Action::Seek, asyncPos, CommandSource::Operator, 0});
+            at.command({Action::Play, 0, CommandSource::ChatAgent, asyncChatEp});
+            checkedRender(at, dout.data(), 64, 2); // Stalls on disk miss.
+            at.invalidateChatAgentCommands();
+            asyncStorage->fail.store(false);
+            for (int i = 0; i < 100; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                checkedRender(at, dout.data(), 8, 2);
+            }
+            MidiEvent asyncEv;
+            expect(at.state() == State::Paused && at.asyncVoices() == 0 && !at.takeMidi(asyncEv),
+                "revoked chat play during async disk stall leaves voice dormant and emits no arrival MIDI");
+            at.command({Action::Play, 0, CommandSource::Operator, 0});
+            checkedRender(at, dout.data(), 64, 2);
+            expect(at.state() == State::Playing && at.asyncVoices() == 1 && at.takeMidi(asyncEv) && asyncEv.source == CommandSource::Operator,
+                "operator play after revoked async disk stall starts voice and fires preserved arrival MIDI");
         }}
     };
     for (const auto& [name, test] : tests) {

@@ -49,9 +49,11 @@ void RemoteServer::stop() {
 }
 bool RemoteServer::reconfigure(bool enable, quint16 targetPort, bool rotateKey, QString& error) {
     if (!enable) {
+        const bool wasRunning = running();
         if (targetPort >= 1024) QSettings().setValue("remote/port", targetPort);
         if (rotateKey) changeKey();
-        if (running()) { stop(); c_.report("Phone remote disabled."); }
+        if (wasRunning) { stop(); c_.report("Phone remote disabled."); }
+        else if (targetPort >= 1024) emit stateChanged();
         return true;
     }
     if (running() && port() == targetPort) {

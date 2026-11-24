@@ -514,7 +514,7 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
     agentName_.clear(); agentVersion_.clear(); sessionId_.clear(); lastError_.clear();
     agentSupportsHttpMcp_ = false; agentSupportsSessionClose_ = false; usedHttpMcp_ = false;
     stdoutBuffer_.clear(); pending_.clear(); pendingPermissions_.clear();
-    knownToolCalls_.clear(); knownToolCallOrder_.clear(); knownToolCallsBytes_ = 0;
+    knownToolCalls_.clear(); knownToolCallOrder_.clear(); knownToolCallsBytes_ = 0; hadToolCallEviction_ = false;
     nextId_ = 1;
 
     process_ = new QProcess(this);
@@ -551,8 +551,9 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
 #endif
     process_->setProcessEnvironment(env);
 
-    connect(process_, &QProcess::started, this, [this] {
-        if (!process_) return;
+    QProcess* const spawnedProcess = process_;
+    connect(spawnedProcess, &QProcess::started, this, [this, spawnedProcess] {
+        if (!process_ || process_ != spawnedProcess) return;
 #ifdef Q_OS_WIN
         QString jobError;
         if (!processTree_ || !processTree_->attachAndResume(process_->processId(), jobError)) {
@@ -581,30 +582,31 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
     });
     connect(process_, &QProcess::readyReadStandardOutput, this, &AcpClient::handleStdout);
     connect(process_, &QProcess::readyReadStandardError, this, &AcpClient::handleStderr);
-    connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-        if (stopping_ || !process_) return;
+    connect(spawnedProcess, &QProcess::errorOccurred, this, [this, spawnedProcess](QProcess::ProcessError error) {
+        if (stopping_ || !process_ || process_ != spawnedProcess) return;
         if (error == QProcess::FailedToStart) failConnection("Failed to start ACP agent: " + process_->errorString());
         else if (state_ != AcpState::Disconnected) failConnection("ACP agent process error: " + process_->errorString());
     });
-    connect(process_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-        [this](int exitCode, QProcess::ExitStatus exitStatus) {
-            if (stopping_) return;
+    connect(spawnedProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+        [this, spawnedProcess](int exitCode, QProcess::ExitStatus exitStatus) {
+            if (stopping_ || process_ != spawnedProcess) return;
             deadlineTimer_.stop();
             cancelTimer_.stop();
             // Drain any remaining buffered stdout/stderr lines before tearing down session state so a
             // clean agent exit after a burst >32 lines never drops the tail of a reply or prompt result.
-            if (process_) {
+            // Guard against handleLine() launching a replacement process (e.g. session/close fallback).
+            if (process_ == spawnedProcess) {
                 constexpr qsizetype maxStdoutBufferBytes = 4 * 1024 * 1024;
                 constexpr qint64 maxStderrTailBytes = 64 * 1024;
                 constexpr int maxExitDrainLines = 2048;
-                process_->setReadChannel(QProcess::StandardError);
-                const QByteArray stderrTail = process_->read(maxStderrTailBytes);
-                process_->setReadChannel(QProcess::StandardOutput);
+                spawnedProcess->setReadChannel(QProcess::StandardError);
+                const QByteArray stderrTail = spawnedProcess->read(maxStderrTailBytes);
+                spawnedProcess->setReadChannel(QProcess::StandardOutput);
                 if (!stderrTail.isEmpty()) emit stderrReceived(QString::fromUtf8(stderrTail));
                 const qint64 remainingBudget = std::max<qint64>(0, maxStdoutBufferBytes * 2 - stdoutBuffer_.size());
-                if (remainingBudget > 0) stdoutBuffer_.append(process_->read(remainingBudget));
+                if (remainingBudget > 0) stdoutBuffer_.append(spawnedProcess->read(remainingBudget));
                 int drained = 0;
-                while (process_ && !stopping_ && drained < maxExitDrainLines) {
+                while (process_ == spawnedProcess && !stopping_ && drained < maxExitDrainLines) {
                     const qsizetype newline = stdoutBuffer_.indexOf('\n');
                     if (newline < 0 || newline > maxStdoutBufferBytes) break;
                     QByteArray line = stdoutBuffer_.left(newline);
@@ -613,7 +615,7 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
                     if (!line.isEmpty() && line.endsWith('\r')) line.chop(1);
                     if (!line.trimmed().isEmpty()) handleLine(line);
                 }
-                if (stopping_) return;
+                if (stopping_ || process_ != spawnedProcess) return;
             }
             const QString reason = exitStatus == QProcess::CrashExit
                 ? QString("ACP agent crashed (exit code %1).").arg(exitCode)
@@ -624,6 +626,7 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
             knownToolCalls_.clear();
             knownToolCallOrder_.clear();
             knownToolCallsBytes_ = 0;
+            hadToolCallEviction_ = false;
             stdoutBuffer_.clear();
             sessionId_.clear();
             if (auto tree = std::move(processTree_)) {
@@ -671,6 +674,7 @@ void AcpClient::startNewSession(const QString& cwd, const AcpMcpConfig& mcp) {
     knownToolCalls_.clear();
     knownToolCallOrder_.clear();
     knownToolCallsBytes_ = 0;
+    hadToolCallEviction_ = false;
     sessionId_.clear();
     setState(AcpState::Connecting);
     armDeadline(handshakeTimeoutMs_, "Timed out waiting for ACP session creation.");
@@ -726,6 +730,7 @@ void AcpClient::disconnectFromAgent() {
     knownToolCalls_.clear();
     knownToolCallOrder_.clear();
     knownToolCallsBytes_ = 0;
+    hadToolCallEviction_ = false;
     stdoutBuffer_.clear();
     sessionId_.clear();
     teardownProcess(false);
@@ -925,6 +930,7 @@ void AcpClient::handleResponse(int id, const QJsonObject& msg) {
         knownToolCalls_.clear();
         knownToolCallOrder_.clear();
         knownToolCallsBytes_ = 0;
+        hadToolCallEviction_ = false;
         sessionId_ = result["sessionId"].toString();
         if (sessionId_.isEmpty()) {
             failConnection("ACP agent returned an empty sessionId.");
@@ -982,6 +988,8 @@ void AcpClient::handleNotification(const QString& method, const QJsonObject& par
             if (isNew) knownToolCallOrder_.append(rawToolCallId);
             if (!call.title.isEmpty()) tracked.title = call.title;
             if (!call.kind.isEmpty()) tracked.kind = call.kind;
+            if (call.status == "completed" || call.status == "failed" || call.status == "cancelled")
+                tracked.finished = true;
             if (!rawInputDetail.isEmpty()) {
                 if (rawInputDetail.size() > maxPermissionDetailChars) {
                     tracked.rawInputTooLarge = true;
@@ -1003,8 +1011,16 @@ void AcpClient::handleNotification(const QString& method, const QJsonObject& par
             knownToolCallsBytes_ += entrySize(rawToolCallId, tracked);
             while (knownToolCallOrder_.size() > maxTrackedToolCalls ||
                    (knownToolCallsBytes_ > maxTrackedTotalChars && knownToolCallOrder_.size() > 1)) {
-                const QString evictId = knownToolCallOrder_.takeFirst();
+                // Prefer evicting completed/failed tool calls before pending ones.
+                qsizetype evictIdx = 0;
+                for (qsizetype idx = 0; idx < knownToolCallOrder_.size() - 1; ++idx) {
+                    const auto it = knownToolCalls_.constFind(knownToolCallOrder_[idx]);
+                    if (it != knownToolCalls_.cend() && it->finished) { evictIdx = idx; break; }
+                }
+                const QString evictId = knownToolCallOrder_.takeAt(evictIdx);
                 if (auto it = knownToolCalls_.find(evictId); it != knownToolCalls_.end()) {
+                    if (!it->finished || !it->rawInput.isEmpty() || it->rawInputTooLarge)
+                        hadToolCallEviction_ = true;
                     knownToolCallsBytes_ = std::max<qsizetype>(0, knownToolCallsBytes_ - entrySize(evictId, it.value()));
                     knownToolCalls_.erase(it);
                 }
@@ -1042,13 +1058,23 @@ void AcpClient::handleAgentRequest(const QJsonValue& id, const QString& method, 
         const QString rawToolCallId = toolCall["toolCallId"].toString();
         const auto trackedIt = rawToolCallId.isEmpty() ? knownToolCalls_.cend() : knownToolCalls_.constFind(rawToolCallId);
         const bool hasTracked = trackedIt != knownToolCalls_.cend();
-        QString resolvedTitle = toolCall["title"].toString();
+        const QString reqTitle = toolCall["title"].toString();
+        const QString reqRawInput = summarizeJson(toolCall["rawInput"]);
+        const QString reqContent = extractContentText(toolCall["content"]);
+        // Fail closed if the request omits arguments/details and its toolCallId is missing from cache
+        // (either never provided or evicted), so the operator is never asked to Allow an opaque operation.
+        if (!hasTracked && reqRawInput.isEmpty() &&
+            ((!rawToolCallId.isEmpty() && hadToolCallEviction_) || (reqContent.isEmpty() && reqTitle.isEmpty()))) {
+            sendResponse(id, {{"outcome", QJsonObject{{"outcome", "cancelled"}}}});
+            emit stderrReceived(QString("Auto-cancelled permission request “%1” because its operation arguments were missing or evicted from cache.\n")
+                .arg(clamp(reqTitle.isEmpty() ? rawToolCallId : reqTitle, 128)));
+            return;
+        }
+        QString resolvedTitle = reqTitle;
         if (resolvedTitle.isEmpty() && hasTracked) resolvedTitle = trackedIt->title;
         if (resolvedTitle.isEmpty()) resolvedTitle = "Agent permission request";
         QString resolvedKind = toolCall["kind"].toString();
         if (resolvedKind.isEmpty() && hasTracked) resolvedKind = trackedIt->kind;
-        const QString reqRawInput = summarizeJson(toolCall["rawInput"]);
-        const QString reqContent = extractContentText(toolCall["content"]);
         bool detailTooLarge = reqRawInput.size() > maxPermissionDetailChars || reqContent.size() > maxPermissionDetailChars;
         QString resolvedRawInput = reqRawInput;
         if (resolvedRawInput.isEmpty() && hasTracked) {
@@ -1147,6 +1173,7 @@ void AcpClient::failConnection(const QString& message) {
     knownToolCalls_.clear();
     knownToolCallOrder_.clear();
     knownToolCallsBytes_ = 0;
+    hadToolCallEviction_ = false;
     stdoutBuffer_.clear();
     sessionId_.clear();
     teardownProcess(false);

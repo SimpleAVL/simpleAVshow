@@ -455,8 +455,18 @@ QStringList Controller::preflight(bool probeHardware) {
         QSettings settings; const QString remembered = settings.value("audio/device").toString();
         const auto api = remembered.isEmpty() ? RtAudio::UNSPECIFIED : static_cast<RtAudio::Api>(settings.value("audio/api", 0).toInt());
         try {
-            if (!playbackDevice(device.devices(api), remembered))
+            const auto selected = playbackDevice(device.devices(api), remembered);
+            if (!selected) {
                 problems << (remembered.isEmpty() ? "No audio output is available." : "Audio output “" + remembered + "” is missing.");
+            } else {
+                unsigned required = 1;
+                for (const auto& track : project.show.tracks) if (!track.visual && !track.muted)
+                    required = std::max(required, static_cast<unsigned>(std::max(track.left, track.right) + 1));
+                if (required > selected->channels) {
+                    problems << QString("%1 has %2 outputs, but a track is routed to output %3. Choose a larger interface in Outputs or change track routing.")
+                        .arg(selected->name).arg(selected->channels).arg(required);
+                }
+            }
         } catch (const std::exception& e) { problems << "Cannot check audio outputs: " + QString::fromUtf8(e.what()); }
     } else if (!device.running()) {
         const QString remembered = QSettings().value("audio/device").toString();

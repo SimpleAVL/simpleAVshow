@@ -121,6 +121,7 @@ private:
         QString content;
         bool rawInputTooLarge = false;
         bool contentTooLarge = false;
+        bool finished = false;
     };
 
     struct ProcessTreeHandle;
@@ -152,6 +153,7 @@ private:
     QHash<QString, KnownToolCall> knownToolCalls_;
     QStringList knownToolCallOrder_;
     qsizetype knownToolCallsBytes_ = 0;
+    bool hadToolCallEviction_ = false;
     std::vector<RetiringProcess> retiringProcesses_;
     std::vector<std::shared_ptr<ProcessTreeHandle>> retiringTrees_;
     QTimer deadlineTimer_;

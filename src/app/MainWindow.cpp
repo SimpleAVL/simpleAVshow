@@ -1603,8 +1603,9 @@ void MainWindow::remoteSettings() {
             devices ? QString("%1 device%2 connected.").arg(devices).arg(devices == 1 ? "" : "s") : "Waiting for a phone to open the link.");
     };
     const auto refresh = [&] {
-        QSignalBlocker block(enabled);
+        QSignalBlocker block(enabled), blockPort(port);
         enabled->setChecked(remote_.running()); port->setEnabled(!remote_.running());
+        port->setValue(remote_.running() ? remote_.port() : QSettings().value("remote/port", 48124).toInt());
         const auto addresses = remote_.links();
         links->setPlainText(addresses.join("\n")); links->setEnabled(remote_.running());
         copy->setEnabled(!addresses.isEmpty()); change->setEnabled(true);

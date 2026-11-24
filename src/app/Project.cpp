@@ -375,11 +375,26 @@ QJsonObject projectJson(const Project& p, const QString& directory) {
             {"time", static_cast<double>(m.time)}, {"hold", m.hold}, {"timing", m.timing == MidiTiming::Arrival ? "arrival" : "resume"}, {"message", bytes}});
     }
     for (const auto& a : p.assets) {
-        assets.append(QJsonObject{{"id", a.id}, {"name", a.name}, {"path", directory.isEmpty() ? a.path : dir.relativeFilePath(a.path)}});
+        QString assetPath = a.path;
+        if (!directory.isEmpty() && !assetPath.isEmpty()) {
+            const QString canonicalAsset = QFileInfo(assetPath).canonicalFilePath();
+            if (!canonicalAsset.isEmpty()) assetPath = canonicalAsset;
+            assetPath = dir.relativeFilePath(assetPath);
+        }
+        assets.append(QJsonObject{{"id", a.id}, {"name", a.name}, {"path", assetPath}});
     }
     QJsonObject root{{"format", "simpleavshow"}, {"version", 1}, {"title", p.title}, {"width", p.width}, {"height", p.height}, {"fps", p.fps},
         {"duration", static_cast<double>(p.show.duration)}, {"tracks", tracks}, {"clips", clips}, {"markers", markers}, {"assets", assets}};
     return root;
+}
+namespace {
+QString canonicalManifestDirectory(const QString& filePath) {
+    const QFileInfo fi(filePath);
+    if (const QString canonicalFile = fi.canonicalFilePath(); !canonicalFile.isEmpty())
+        return QFileInfo(canonicalFile).absolutePath();
+    const QString canonicalDir = fi.absoluteDir().canonicalPath();
+    return canonicalDir.isEmpty() ? fi.absolutePath() : canonicalDir;
+}
 }
 void writeProject(const Project& p, const QString& path, bool allowOverwrite) {
     constexpr qint64 compactThresholdBytes = 32 * 1024 * 1024;
@@ -406,7 +421,7 @@ void writeProject(const Project& p, const QString& path, bool allowOverwrite) {
         if (!a.path.isEmpty() && normalizedPath(a.path) == resolvedNorm)
             throw std::runtime_error("Cannot overwrite a media file referenced by this show");
     }
-    const auto root = projectJson(p, QFileInfo(resolvedPath).absolutePath());
+    const auto root = projectJson(p, canonicalManifestDirectory(resolvedPath));
     QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
     if (bytes.size() > compactThresholdBytes) bytes = QJsonDocument(root).toJson(QJsonDocument::Compact);
     if (bytes.size() > maxProjectFileBytes)
@@ -558,11 +573,7 @@ Project readProject(const QString& path, const std::function<bool()>& isCancelle
     const QByteArray bytes = file.read(maxProjectFileBytes + 1);
     if (bytes.size() > maxProjectFileBytes)
         throw std::runtime_error("Project file is too large to be a valid .savshow manifest");
-    const QFileInfo openInfo(path);
-    const QString manifestPath = (openInfo.isSymLink() && !openInfo.canonicalFilePath().isEmpty())
-        ? openInfo.canonicalFilePath()
-        : path;
-    Project p = parseProject(bytes, QFileInfo(manifestPath).absolutePath());
+    Project p = parseProject(bytes, canonicalManifestDirectory(path));
     loadProjectMedia(p, isCancelled); return p;
 }
 namespace {
