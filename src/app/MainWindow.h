@@ -6,12 +6,13 @@
 #include "app/ProgramView.h"
 #include <QMainWindow>
 #include <QElapsedTimer>
+#include <QPointer>
 #include <optional>
 #include <set>
 
 class QListWidget; class QLabel; class QPushButton; class QComboBox; class QDoubleSpinBox;
 class QSpinBox; class QLineEdit; class QCheckBox; class QTextEdit; class QTableWidget;
-class QStackedWidget; class QGroupBox; class QScrollArea; class QAction; class QSplitter;
+class QStackedWidget; class QGroupBox; class QScrollArea; class QAction; class QSplitter; class QScreen;
 
 namespace sav {
 class AgentChatPanel;
@@ -25,7 +26,7 @@ public:
     McpServer& mcpServer() { return mcp_; }
     RemoteServer& remoteServer() { return remote_; }
     AgentChatPanel* agentChatPanel() { return agentChat_; }
-    void openPath(const QString& path);
+    void openPath(const QString& path, bool discardPreviousAutosave = false);
     // Offers the untitled-show sidecar left by a crash; call once after startup.
     void offerUntitledRecovery();
 protected:
@@ -64,7 +65,7 @@ private:
     QTextEdit* clipText_ = nullptr;
     QTableWidget* curveTable_ = nullptr;
     QGroupBox *audioTransform_ = nullptr, *videoTransform_ = nullptr, *trackAudio_ = nullptr;
-    bool refreshing_ = false, outputLost_ = false, inspectorDirty_ = false, automatic_ = false;
+    bool refreshing_ = false, outputLost_ = false, inspectorDirty_ = false, automatic_ = false, openingOutput_ = false, outputWasNonEditor_ = false;
     // Fields changed since the inspector last showed the model; automatic commits apply only these.
     std::set<QWidget*> touched_;
     std::optional<Clip> clipboard_;
@@ -73,7 +74,8 @@ private:
     bool use(QWidget* field) const { return !automatic_ || touched_.contains(field); }
     std::string inspectedClip_, inspectedMarker_;
     int inspectedTrack_ = -1;
-    QString outputScreen_;
+    QPointer<QScreen> outputTargetScreen_;
+    QString outputScreen_, outputScreenManufacturer_, outputScreenModel_, outputScreenSerial_;
     void buildInspector();
     void refresh();
     void updatePlayback();

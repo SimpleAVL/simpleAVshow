@@ -22,7 +22,7 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
             configured_ = false; device.close();
             // Once the device is closed, force-stop directly so even a full command queue cannot leave Playing behind.
             transport.forceStopAll();
-            commandsPosted_ = 0; lastPlaySeq_ = 0; predictedState_ = State::Stopped; predictedPosition_ = position();
+            commandsPosted_ = 0; pendingCommands_.clear();
             report("Audio output " + reason + ". Press Play to reconnect, or choose another device in Outputs.");
             playbackProblem = status;
         }
@@ -69,38 +69,65 @@ void Controller::releaseBusy(quint64 lease) {
     }
 }
 bool Controller::postTransportCommand(Command cmd) {
-    const State base = effectiveState();
-    const Frame basePos = effectivePosition();
     if (!transport.command(cmd)) { report("Transport command queue is full"); return false; }
+    const std::uint64_t applied = transport.commandsApplied();
+    while (!pendingCommands_.empty() && pendingCommands_.front().seq <= applied)
+        pendingCommands_.pop_front();
     ++commandsPosted_;
-    predictedPosition_ = basePos;
-    switch (cmd.action) {
-    case Action::Play:
-        predictedState_ = (basePos >= project.show.duration && base != State::Held) ? base : State::Playing;
-        lastPlaySeq_ = commandsPosted_;
-        break;
-    case Action::Pause:
-        predictedState_ = (base == State::Playing) ? State::Paused : base;
-        break;
-    case Action::Seek:
-        predictedPosition_ = std::clamp(cmd.position, Frame{0}, project.show.duration);
-        predictedState_ = (base == State::Playing) ? State::Playing : State::Paused;
-        break;
-    case Action::StopAll:
-        predictedState_ = State::Stopped;
-        break;
-    }
+    pendingCommands_.push_back({commandsPosted_, cmd});
     return true;
 }
-State Controller::effectiveState() const {
+std::pair<State, Frame> Controller::predictTransport(bool* hasPendingPlay) const {
+    if (hasPendingPlay) *hasPendingPlay = false;
     const std::uint64_t applied = transport.commandsApplied();
-    if (commandsPosted_ <= applied) return transport.state();
-    return predictedState_;
+    State state = transport.state();
+    Frame pos = transport.position();
+    if (transport.stopAllPending()) {
+        for (const auto& entry : pendingCommands_) {
+            if (entry.seq <= applied) continue;
+            if (entry.command.action == Action::Seek &&
+                transport.isSourceValid(entry.command.source, entry.command.sourceEpoch)) {
+                pos = std::clamp(entry.command.position, Frame{0}, project.show.duration);
+            }
+        }
+        return {State::Stopped, pos};
+    }
+    for (const auto& entry : pendingCommands_) {
+        if (entry.seq <= applied) continue;
+        const auto& cmd = entry.command;
+        if (!transport.isSourceValid(cmd.source, cmd.sourceEpoch)) continue;
+        switch (cmd.action) {
+        case Action::Play:
+            if (pos < project.show.duration || state == State::Held) {
+                state = State::Playing;
+                if (hasPendingPlay) *hasPendingPlay = true;
+            }
+            break;
+        case Action::Pause:
+            if (state == State::Playing) state = State::Paused;
+            break;
+        case Action::Seek:
+            pos = std::clamp(cmd.position, Frame{0}, project.show.duration);
+            if (state != State::Playing) state = State::Paused;
+            break;
+        case Action::StopAll:
+            state = State::Stopped;
+            if (hasPendingPlay) *hasPendingPlay = false;
+            break;
+        }
+    }
+    return {state, pos};
+}
+State Controller::effectiveState() const {
+    return predictTransport().first;
 }
 Frame Controller::effectivePosition() const {
-    const std::uint64_t applied = transport.commandsApplied();
-    if (commandsPosted_ <= applied) return position();
-    return predictedPosition_;
+    return predictTransport().second;
+}
+bool Controller::playInFlight() const {
+    bool pendingPlay = false;
+    predictTransport(&pendingPlay);
+    return pendingPlay;
 }
 bool Controller::canEdit(bool reportFailure) {
     // Acquire commandsApplied() first so publishedState_ and publishedVoices_ reflect every applied command.
@@ -152,7 +179,7 @@ void Controller::arm(Frame position) {
         if (asset != project.assets.cend() && asset->video && !asset->offline) clip.videoLength = frames(asset->duration);
     }
     armed_ = std::move(armed); transport.configure(armed_, position);
-    commandsPosted_ = 0; lastPlaySeq_ = 0; predictedState_ = State::Stopped; predictedPosition_ = position;
+    commandsPosted_ = 0; pendingCommands_.clear();
     if (keep && device.resume()) stall_.restart();
     else if (configured_) {
         QString error;
@@ -181,7 +208,6 @@ void Controller::startMidiThread() {
                 if (event.epoch != transport.epoch() || event.marker < 0 || static_cast<std::size_t>(event.marker) >= snapshot->markers.size()) continue;
                 if (!transport.isSourceValid(event.source, event.sourceEpoch)) continue;
                 const auto& marker = snapshot->markers[event.marker]; QString error;
-                if (!midiStop_.load()) midi.clearAbortSend();
                 if (!midi.send(marker.message, error)) {
                     QMetaObject::invokeMethod(this, [this, error] { report(error); }, Qt::QueuedConnection);
                 }
@@ -201,21 +227,10 @@ void Controller::startMidiThread() {
                         item.epoch == transport.epoch() &&
                         item.gen == testMidiGen_.load(std::memory_order_acquire) &&
                         transport.state() != State::Playing && transport.state() != State::Held;
-                    if (authorized) {
-                        activeTestMidi_ = true;
-                        activeTestMidiOwner_ = item.owner;
-                        midi.clearAbortSend();
-                    }
                 }
                 if (!authorized) continue;
                 QString error;
-                const bool sent = midi.send(item.bytes, error);
-                {
-                    std::lock_guard lock(testMidiMutex_);
-                    activeTestMidi_ = false;
-                    activeTestMidiOwner_.clear();
-                }
-                if (!sent) {
+                if (!midi.send(item.bytes, error) && !midiStop_.load()) {
                     QMetaObject::invokeMethod(this, [this, error] { report(error); }, Qt::QueuedConnection);
                 }
             }
@@ -292,8 +307,6 @@ bool Controller::stopAll(CommandSource source) {
         if (source != CommandSource::Operator) return false;
         // Emergency operator Stop All must never be rejected by a full bounded command queue.
         transport.requestStopAll();
-        predictedState_ = State::Stopped;
-        lastPlaySeq_ = 0;
     }
     if (!device.streamActive()) transport.render(nullptr, 0, 0);
     cancelPendingTestMidi();
@@ -468,16 +481,14 @@ bool Controller::prepareAudio() {
     } catch (const std::exception& error) { report("Cannot prepare audio. Open Outputs to choose a device. " + QString::fromUtf8(error.what())); return false; }
 }
 void Controller::cancelPendingTestMidi(const QString& owner) {
-    // Non-blocking: never stall Stop All, Play, Show-mode entry, or chat revocation waiting on a MIDI driver.
-    // Only request abort on an in-flight WinMM SysEx when it belongs to the target owner (or all owners).
+    // Non-blocking: discard queued test messages before driver submission, and let an already
+    // submitted <=4 KiB message finish naturally instead of calling midiOutReset on the shared show port.
     std::lock_guard lock(testMidiMutex_);
     if (owner.isEmpty()) {
         testMidiGen_.fetch_add(1, std::memory_order_release);
         testMidiQueue_.clear();
-        if (activeTestMidi_) midi.requestAbortSend();
     } else {
         std::erase_if(testMidiQueue_, [&](const PendingTestMidi& item) { return item.owner == owner; });
-        if (activeTestMidi_ && activeTestMidiOwner_ == owner) midi.requestAbortSend();
     }
 }
 bool Controller::testMidi(const std::vector<unsigned char>& bytes, const QString& owner,
@@ -676,14 +687,25 @@ bool Controller::save(QString target) {
 bool Controller::commitSave(Project candidate, QString target) {
     try {
         const auto sourceDirectory = project.packageDirectory;
+        const auto preSaveAssets = project.assets;
         const QString previous = path;
         writeProject(candidate, target); project.assets = std::move(candidate.assets); bindAudio(project); project.packageDirectory.reset(); path = target; dirty = false; ++projectRevision_;
-        // Undo must not restore temporary package paths or unsaved generated media.
+        // Rebase Undo/Redo history ONLY for assets actually materialized by this save whose
+        // historical source identity still matches the pre-save asset (never overwrite relink history).
         for (auto* history : {&undo_, &redo_}) for (auto& snapshot : *history) {
             bool extracted = false;
             for (auto it = snapshot.assets.begin(); it != snapshot.assets.end(); ++it) {
-                if (const auto saved = project.assets.constFind(it.key()); saved != project.assets.cend()) { it->path = saved->path; it->audio = saved->audio; }
-                else extracted |= sourceDirectory && it->path.startsWith(sourceDirectory->path() + "/");
+                const auto before = preSaveAssets.constFind(it.key());
+                const auto saved = project.assets.constFind(it.key());
+                const bool materialized = before != preSaveAssets.cend() && saved != project.assets.cend() &&
+                    saved->path != before->path &&
+                    it->path == before->path && it->offline == before->offline;
+                if (materialized) {
+                    it->path = saved->path;
+                    it->audio = saved->audio;
+                } else {
+                    extracted |= sourceDirectory && it->path.startsWith(sourceDirectory->path() + "/");
+                }
             }
             if (!extracted) snapshot.packageDirectory.reset();
             bindAudio(snapshot);

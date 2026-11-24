@@ -158,7 +158,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
         openOutput(matchedIndex, false);
         return bool(outputWindow_ && outputWindow_->isVisible());
     };
-    host.closeDisplay = [this] { outputLost_ = false; if (outputWindow_) outputWindow_->hide(); };
+    host.closeDisplay = [this] { outputLost_ = false; outputTargetScreen_.clear(); if (outputWindow_) outputWindow_->hide(); };
     host.remoteStatus = [this] {
         return QJsonObject{{"available", true}, {"running", remote_.running()},
             {"port", remote_.running() ? static_cast<int>(remote_.port()) : QSettings().value("remote/port", 48124).toInt()},
@@ -225,17 +225,20 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
     file->setToolTipsVisible(true);
     file->addAction("New show", QKeySequence::New, this, [this] {
         quint64 confirmedRev = 0;
-        if (!c_.canEdit() || !checkDiscard(&confirmedRev)) return;
+        bool shouldDiscardAutosave = false;
+        if (!c_.canEdit() || !checkDiscard(&confirmedRev, false, &shouldDiscardAutosave)) return;
         if (!c_.canEdit() || c_.projectRevision() != confirmedRev) { c_.report("New show cancelled because the show changed."); return; }
+        if (shouldDiscardAutosave) c_.discardAutosave();
         c_.replace(newProject());
     });
     file->addAction("Open…", QKeySequence::Open, this, [this] {
         quint64 confirmedRev = 0;
-        if (!c_.canEdit() || !checkDiscard(&confirmedRev)) return;
+        bool shouldDiscardAutosave = false;
+        if (!c_.canEdit() || !checkDiscard(&confirmedRev, false, &shouldDiscardAutosave)) return;
         const auto path = QFileDialog::getOpenFileName(this, "Open show", {}, "SimpleAVShow (*.savshow *.savshow.autosave *.savpack);;Show packages (*.savpack)");
         if (path.isEmpty()) return;
         if (!c_.canEdit() || c_.projectRevision() != confirmedRev) { c_.report("Open cancelled because the show changed while choosing a file."); return; }
-        openPath(path);
+        openPath(path, shouldDiscardAutosave);
     });
     file->addAction("Save", QKeySequence::Save, this, [this] { save(); });
     file->addAction("Save as…", QKeySequence::SaveAs, this, [this] { save(true); });
@@ -244,8 +247,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
     exportPackageAction_->setToolTip("Copy this show and all media library items into a portable .savpack file");
     file->addSeparator(); file->addAction("Open demonstration", this, [this] {
         quint64 confirmedRev = 0;
-        if (!c_.canEdit() || !checkDiscard(&confirmedRev)) return;
+        bool shouldDiscardAutosave = false;
+        if (!c_.canEdit() || !checkDiscard(&confirmedRev, false, &shouldDiscardAutosave)) return;
         if (!c_.canEdit() || c_.projectRevision() != confirmedRev) { c_.report("Open demonstration cancelled because the show changed."); return; }
+        if (shouldDiscardAutosave) c_.discardAutosave();
         c_.replace(demoProject(), {}, true);
     });
     file->addSeparator(); file->addAction("Import media…", QKeySequence("Ctrl+I"), this, &MainWindow::importMedia);
@@ -1076,7 +1081,7 @@ void MainWindow::outputSettings() {
     displayForm->addRow("Show picture on", displays); auto* displayOpen = button("Open fullscreen program output"); displayOpen->setObjectName("openProgramDisplay"); displayForm->addRow(displayOpen);
     if (const int remembered = displays->findText(QSettings().value("display/screen").toString(), Qt::MatchStartsWith); remembered >= 0) displays->setCurrentIndex(remembered);
     connect(displayOpen, &QPushButton::clicked, &dialog, [&] { openOutput(displays->currentData().toInt()); });
-    auto* displayClose = button("Close program output"); displayForm->addRow(displayClose); connect(displayClose, &QPushButton::clicked, &dialog, [this] { if (outputWindow_) outputWindow_->hide(); });
+    auto* displayClose = button("Close program output"); displayForm->addRow(displayClose); connect(displayClose, &QPushButton::clicked, &dialog, [this] { outputLost_ = false; outputTargetScreen_.clear(); if (outputWindow_) outputWindow_->hide(); });
     auto* feedback = new QLabel; feedback->setWordWrap(true); feedback->setStyleSheet("color: #e5c47d;"); outer->addWidget(feedback);
     connect(&c_, &Controller::message, &dialog, [feedback](const QString& text) { feedback->setText(text); });
     auto* close = new QDialogButtonBox(QDialogButtonBox::Close); outer->addWidget(close); connect(close, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
@@ -1114,45 +1119,70 @@ void MainWindow::openOutput(int index, bool confirmEditorCover) {
         outputWindow_ = new QWidget(this, Qt::Window | Qt::FramelessWindowHint); outputWindow_->setWindowTitle("SimpleAVShow — Program"); outputWindow_->setStyleSheet("background: black;");
         auto* layout = new QVBoxLayout(outputWindow_); layout->setContentsMargins(0, 0, 0, 0); output_ = new ProgramView; layout->addWidget(output_);
         outputWindow_->setCursor(Qt::BlankCursor);
-        auto* close = new QShortcut(QKeySequence::Close, outputWindow_); connect(close, &QShortcut::activated, outputWindow_, &QWidget::hide);
+        auto* close = new QShortcut(QKeySequence::Close, outputWindow_); connect(close, &QShortcut::activated, this, [this] { outputLost_ = false; outputTargetScreen_.clear(); if (outputWindow_) outputWindow_->hide(); });
     }
     if (confirmEditorCover && screens[index] == screen() && QMessageBox::question(this, "Cover the editor?",
             "This display shows the editor. The program output will cover it until you press " + QKeySequence(QKeySequence::Close).toString(QKeySequence::NativeText) + " on the output.",
             QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Ok) return;
+    QScreen* target = screens[index];
     outputLost_ = false;
-    outputScreen_ = screens[index]->name(); QSettings().setValue("display/screen", outputScreen_);
-    output_->setPicture(c_.compose()); outputWindow_->hide(); outputWindow_->winId(); outputWindow_->windowHandle()->setScreen(screens[index]);
-    outputWindow_->setGeometry(screens[index]->geometry()); outputWindow_->showFullScreen();
+    outputTargetScreen_ = target;
+    outputScreen_ = target->name();
+    outputScreenManufacturer_ = target->manufacturer();
+    outputScreenModel_ = target->model();
+    outputScreenSerial_ = target->serialNumber();
+    outputWasNonEditor_ = (target != screen());
+    QSettings().setValue("display/screen", outputScreen_);
+    openingOutput_ = true;
+    output_->setPicture(c_.compose()); outputWindow_->hide(); outputWindow_->winId();
+    if (auto* handle = outputWindow_->windowHandle()) {
+        connect(handle, &QWindow::screenChanged, this, [this](QScreen*) {
+            if (!openingOutput_) screensChanged();
+        }, Qt::UniqueConnection);
+        handle->setScreen(target);
+    }
+    outputWindow_->setGeometry(target->geometry()); outputWindow_->showFullScreen();
 #ifdef Q_OS_WIN
     // Windows can choose the primary monitor during the fullscreen transition.
     // Apply the selected screen and native geometry after that transition too.
-    outputWindow_->windowHandle()->setScreen(screens[index]);
-    outputWindow_->windowHandle()->setGeometry(screens[index]->geometry());
+    if (auto* handle = outputWindow_->windowHandle()) {
+        handle->setScreen(target);
+        handle->setGeometry(target->geometry());
+    }
 #endif
+    openingOutput_ = false;
     activateWindow();
 }
 void MainWindow::screensChanged() {
     // A display that drops out must not leave a frameless fullscreen window over the editor; it returns with the display.
-    // Check by target display name because Qt may already have relocated outputWindow_ onto the primary/editor screen.
+    // Track the exact QScreen pointer while open so same-named displays cannot hijack fullscreen output on unplug.
     if (outputWindow_ && outputWindow_->isVisible()) {
         const auto screens = QGuiApplication::screens();
-        const bool targetPresent = outputScreen_.isEmpty()
-            ? (outputWindow_->screen() && screens.contains(outputWindow_->screen()))
-            : std::any_of(screens.cbegin(), screens.cend(),
-                  [this](QScreen* s) { return s->name() == outputScreen_; });
-        const bool onTarget = outputWindow_->screen() && screens.contains(outputWindow_->screen()) &&
-            (outputScreen_.isEmpty() || outputWindow_->screen()->name() == outputScreen_);
-        if (!targetPresent || !onTarget) {
-            outputWindow_->hide(); outputLost_ = true;
+        const bool targetValid = outputTargetScreen_ && screens.contains(outputTargetScreen_.data());
+        const bool onTarget = targetValid && outputWindow_->screen() == outputTargetScreen_.data();
+        const bool hijackedEditor = outputWasNonEditor_ && outputWindow_->screen() == screen();
+        if (!targetValid || !onTarget || hijackedEditor) {
+            outputWindow_->hide(); outputTargetScreen_.clear(); outputLost_ = true;
             c_.report("Program display “" + outputScreen_ + "” disconnected. The output reopens when it returns."); c_.playbackProblem = c_.status;
             return;
         }
     } else if (outputLost_) {
         const auto screens = QGuiApplication::screens();
-        for (int i = 0; i < screens.size(); ++i) if (screens[i]->name() == outputScreen_ && screens[i] != screen()) {
-            outputLost_ = false; openOutput(i);
+        int matchedIndex = -1;
+        int matchCount = 0;
+        for (int i = 0; i < screens.size(); ++i) {
+            QScreen* s = screens[i];
+            if (s == screen()) continue;
+            const bool exactIdentity = s->name() == outputScreen_ &&
+                s->manufacturer() == outputScreenManufacturer_ &&
+                s->model() == outputScreenModel_ &&
+                s->serialNumber() == outputScreenSerial_;
+            if (exactIdentity) { matchedIndex = i; ++matchCount; }
+        }
+        // Only auto-reopen on an unambiguous non-editor identity match so a duplicate-named screen cannot steal output.
+        if (matchCount == 1 && matchedIndex >= 0) {
+            outputLost_ = false; openOutput(matchedIndex, false);
             c_.report("Program display “" + outputScreen_ + "” reconnected."); if (c_.playbackProblem.contains("Program display")) c_.playbackProblem.clear();
-            break;
         }
     }
 }
@@ -1196,9 +1226,10 @@ void MainWindow::requestShowMode(bool enabled) {
     }
     c_.setShowMode(enabled);
 }
-void MainWindow::openPath(const QString& path) {
+void MainWindow::openPath(const QString& path, bool discardPreviousAutosave) {
     if (!c_.canEdit()) return;
     const quint64 initialRev = c_.projectRevision();
+    const QString previousAutosave = discardPreviousAutosave ? c_.autosavePath() : QString();
     // A sidecar opens as unsaved edits to its show, so Save replaces the show rather than writing "x.savshow.autosave.savshow".
     QString source = path, target = isProjectPackage(path) ? QString() : path;
     bool recovered = path.endsWith(".savshow.autosave", Qt::CaseInsensitive);
@@ -1218,10 +1249,20 @@ void MainWindow::openPath(const QString& path) {
     const quint64 expectedRev = initialRev;
     auto* progress = new QProgressDialog("Opening project and preparing media…", QString(), 0, 0, this); progress->setWindowModality(Qt::WindowModal); progress->setMinimumDuration(0); progress->show();
     auto* watcher = new QFutureWatcher<ProjectResult>(this);
-    connect(watcher, &QFutureWatcher<ProjectResult>::finished, this, [this, watcher, progress, path, target, recovered, lease, expectedRev] {
+    connect(watcher, &QFutureWatcher<ProjectResult>::finished, this, [this, watcher, progress, path, source, target, recovered, lease, expectedRev, previousAutosave] {
         const auto result = watcher->result(); c_.releaseBusy(lease); progress->deleteLater(); watcher->deleteLater();
         if (!result.error.isEmpty()) { QMessageBox::warning(this, "Could not open project", result.error); return; }
         if (!c_.canEdit() || c_.projectRevision() != expectedRev) { c_.report("Open cancelled because the show changed while loading."); return; }
+        if (!previousAutosave.isEmpty()) {
+            const auto sameFile = [](const QString& a, const QString& b) {
+                if (a.isEmpty() || b.isEmpty()) return false;
+                const QFileInfo ia(a), ib(b);
+                if (ia.exists() && ib.exists() && ia.canonicalFilePath() == ib.canonicalFilePath()) return true;
+                return QDir::cleanPath(ia.absoluteFilePath()) == QDir::cleanPath(ib.absoluteFilePath());
+            };
+            if (!sameFile(previousAutosave, source) && !sameFile(previousAutosave, path))
+                QFile::remove(previousAutosave);
+        }
         timeline_->selectedClip.clear(); timeline_->selectedMarker.clear(); timeline_->selectedTrack = 0;
         const bool markDirty = recovered || isProjectPackage(path);
         c_.replace(result.project, target, markDirty);
@@ -1386,7 +1427,11 @@ bool MainWindow::eventFilter(QObject* object, QEvent* event) {
         (plainEdit && !plainEdit->isReadOnly()) || qobject_cast<QAbstractSpinBox*>(widget) || qobject_cast<QComboBox*>(widget);
     // Keep Space and Backspace/Delete inside the Agent Chat drawer (transcript, logs, permission
     // cards, buttons) from accidentally toggling live playback or deleting selected timeline clips.
-    const bool inAgentChat = agentChat_ && agentChat_->isAncestorOf(widget);
+    // Let child controls inside the drawer handle them first; if ignored and propagated up to the
+    // Agent Chat panel boundary, consume them there so they never bubble out to MainWindow.
+    QWidget* focusWidget = QApplication::focusWidget();
+    const bool focusInAgentChat = agentChat_ && focusWidget && (focusWidget == agentChat_ || agentChat_->isAncestorOf(focusWidget));
+    const bool targetInAgentChat = agentChat_ && (widget == agentChat_ || agentChat_->isAncestorOf(widget));
     // Outside Show mode Escape is Stop All unless it cancels a field edit. In Show mode a stray press
     // must not end the performance: two presses within 600 ms stop everything (the button still takes one click).
     if (key->key() == Qt::Key_Escape && !key->isAutoRepeat() && (c_.showMode || !editing)) {
@@ -1395,8 +1440,16 @@ bool MainWindow::eventFilter(QObject* object, QEvent* event) {
         else { escape_.start(); c_.report("Press Escape again to Stop All."); }
         return true;
     }
-    if (key->key() == Qt::Key_Space && !editing && !inAgentChat && key->modifiers() == Qt::NoModifier) { if (!key->isAutoRepeat()) c_.toggle(); return true; }
-    if ((key->key() == Qt::Key_Delete || key->key() == Qt::Key_Backspace) && !editing && !inAgentChat && !qobject_cast<QTableWidget*>(widget)) { if (!key->isAutoRepeat()) deleteSelection(); return true; }
+    const bool isTransportSpace = key->key() == Qt::Key_Space && key->modifiers() == Qt::NoModifier;
+    const bool isDeleteKey = key->key() == Qt::Key_Delete || key->key() == Qt::Key_Backspace;
+    if ((isTransportSpace || isDeleteKey) && (targetInAgentChat || focusInAgentChat)) {
+        // Consume at the panel boundary (or above it if Qt already propagated out) so ignored
+        // keypresses on chat buttons/transcripts never reach timeline deletion or playback toggle.
+        if (widget == agentChat_ || !targetInAgentChat) return true;
+        return QMainWindow::eventFilter(object, event);
+    }
+    if (isTransportSpace && !editing) { if (!key->isAutoRepeat()) c_.toggle(); return true; }
+    if (isDeleteKey && !editing && !qobject_cast<QTableWidget*>(widget)) { if (!key->isAutoRepeat()) deleteSelection(); return true; }
     return QMainWindow::eventFilter(object, event);
 }
 

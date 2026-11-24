@@ -637,12 +637,24 @@ private slots:
         QVERIFY(window.mcpServer().running());
         window.mcpServer().stop();
 
-        // Space on a focused chat control button must activate the button, NOT trigger playback.
+        // Space on a focused chat control button must activate the button, NOT trigger playback,
+        // and ignored Backspace/Delete on a focused chat button must NOT delete a selected timeline clip.
+        window.controller().replace(demoProject());
+        auto* timeline = window.findChild<Timeline*>();
+        QVERIFY(timeline);
+        QVERIFY(!window.controller().project.show.clips.empty());
+        timeline->selectedClip = QString::fromStdString(window.controller().project.show.clips.front().id);
+        const auto clipsBeforeButtonKeys = window.controller().project.show.clips.size();
         connectButton->setFocus();
+        QTest::keyClick(connectButton, Qt::Key_Backspace);
+        QTest::keyClick(connectButton, Qt::Key_Delete);
+        QCOMPARE(window.controller().project.show.clips.size(), clipsBeforeButtonKeys);
         QTest::keyClick(connectButton, Qt::Key_Space);
         QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
         QCOMPARE(window.controller().transport.state(), State::Stopped);
         connectButton->setFocus();
+        QTest::keyClick(connectButton, Qt::Key_Backspace);
+        QCOMPARE(window.controller().project.show.clips.size(), clipsBeforeButtonKeys);
         QTest::keyClick(connectButton, Qt::Key_Space);
         QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
         QCOMPARE(window.controller().transport.state(), State::Stopped);
@@ -682,6 +694,70 @@ private slots:
         QVERIFY(window->mcpServer().running());
         // Direct deletion skips closeEvent; destructor must shut down panel before members die.
         delete window;
+    }
+
+    void saveAfterRelinkPreservesUndoHistory() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString replacementPath = dir.filePath("replacement.wav");
+        // Write a tiny valid mono 48kHz PCM WAV file.
+        {
+            QFile f(replacementPath);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            const quint32 dataBytes = 48000 * 2;
+            const quint32 riffSize = 36 + dataBytes;
+            QByteArray wav;
+            wav.append("RIFF", 4);
+            wav.append(reinterpret_cast<const char*>(&riffSize), 4);
+            wav.append("WAVEfmt ", 8);
+            const quint32 fmtSize = 16; const quint16 audioFmt = 1, channels = 1;
+            const quint32 sampleRate = 48000, byteRate = 96000;
+            const quint16 blockAlign = 2, bitsPerSample = 16;
+            wav.append(reinterpret_cast<const char*>(&fmtSize), 4);
+            wav.append(reinterpret_cast<const char*>(&audioFmt), 2);
+            wav.append(reinterpret_cast<const char*>(&channels), 2);
+            wav.append(reinterpret_cast<const char*>(&sampleRate), 4);
+            wav.append(reinterpret_cast<const char*>(&byteRate), 4);
+            wav.append(reinterpret_cast<const char*>(&blockAlign), 2);
+            wav.append(reinterpret_cast<const char*>(&bitsPerSample), 2);
+            wav.append("data", 4);
+            wav.append(reinterpret_cast<const char*>(&dataBytes), 4);
+            wav.append(QByteArray(static_cast<qsizetype>(dataBytes), '\0'));
+            QCOMPARE(f.write(wav), wav.size());
+        }
+
+        Controller c;
+        Project proj = newProject();
+        MediaAsset offlineAsset;
+        offlineAsset.id = "asset-relink-1";
+        offlineAsset.name = "missing.wav";
+        offlineAsset.path = dir.filePath("missing/missing.wav");
+        offlineAsset.video = false;
+        offlineAsset.offline = true;
+        offlineAsset.duration = 1.0;
+        proj.assets.insert(offlineAsset.id, offlineAsset);
+        Clip clip;
+        clip.id = "clip-relink-1";
+        clip.track = 2;
+        clip.assetId = offlineAsset.id.toStdString();
+        clip.start = 0;
+        clip.duration = frames(1.0);
+        proj.show.clips.push_back(clip);
+        c.replace(proj);
+
+        // Relink the offline asset with the replacement WAV, retaining the same asset ID.
+        MediaAsset relinked = loadMedia(replacementPath);
+        relinked.id = offlineAsset.id;
+        QVERIFY(c.edit([&](Project& p) { p.assets.insert(relinked.id, relinked); }));
+        QVERIFY(!c.project.assets[offlineAsset.id].offline);
+        QCOMPARE(c.project.assets[offlineAsset.id].path, replacementPath);
+
+        // Saving after relink must NOT overwrite the offline asset's historical path/audio in Undo history.
+        QVERIFY(c.save(dir.filePath("relinked.savshow")));
+        c.undo();
+        QVERIFY(c.project.assets[offlineAsset.id].offline);
+        QCOMPARE(c.project.assets[offlineAsset.id].path, offlineAsset.path);
+        QVERIFY(!c.project.assets[offlineAsset.id].audio);
     }
 };
 

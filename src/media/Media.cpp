@@ -414,20 +414,29 @@ QImage videoFrameAt(const QString& path, double time, QSize maximum, QString* er
         avcodec_flush_buffers(input.codec);
         const AVRational frameRate = av_guess_frame_rate(input.format, stream, nullptr);
         const double rate = frameRate.num && frameRate.den ? av_q2d(frameRate) : 24;
-        QImage best; double last = -1; int decoded = 0; bool reached = false; bool sawEligibleFrame = false;
-        while (decoded < 240) {
+        using FramePtr = std::unique_ptr<AVFrame, void(*)(AVFrame*)>;
+        FramePtr bestFrame(av_frame_alloc(), [](AVFrame* f) { av_frame_free(&f); });
+        if (!bestFrame) { if (error) *error = "Out of memory decoding video frame"; return {}; }
+        const auto decodeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        double last = -1; bool reached = false; bool sawEligibleFrame = false; bool timedOut = false;
+        for (;;) {
             if (isCancelled && isCancelled()) { if (error) *error = "Preview decode cancelled"; return {}; }
+            if (std::chrono::steady_clock::now() >= decodeDeadline) { timedOut = true; break; }
             int result = avcodec_receive_frame(input.codec, input.frame);
-            if (result == AVERROR_EOF) { reached = !best.isNull(); break; }
+            if (result == AVERROR_EOF) { reached = sawEligibleFrame; break; }
             if (result == AVERROR(EAGAIN)) {
-                while ((result = av_read_frame(input.format, input.packet)) >= 0 && input.packet->stream_index != index) av_packet_unref(input.packet);
-                if (result == AVERROR_EOF) { if (avcodec_send_packet(input.codec, nullptr) < 0) { reached = !best.isNull(); break; } }
+                while ((result = av_read_frame(input.format, input.packet)) >= 0 && input.packet->stream_index != index) {
+                    av_packet_unref(input.packet);
+                    if (isCancelled && isCancelled()) { if (error) *error = "Preview decode cancelled"; return {}; }
+                    if (std::chrono::steady_clock::now() >= decodeDeadline) { timedOut = true; break; }
+                }
+                if (timedOut) break;
+                if (result == AVERROR_EOF) { if (avcodec_send_packet(input.codec, nullptr) < 0) { reached = sawEligibleFrame; break; } }
                 else if (result < 0) break;
                 else { result = avcodec_send_packet(input.codec, input.packet); av_packet_unref(input.packet); if (result < 0) break; }
                 continue;
             }
             if (result < 0) break;
-            ++decoded;
             const auto pts = input.frame->best_effort_timestamp;
             const double frameTime = pts == AV_NOPTS_VALUE ? std::max(0., last + 1. / rate) : pts * av_q2d(stream->time_base) - start;
             last = frameTime;
@@ -437,34 +446,33 @@ QImage videoFrameAt(const QString& path, double time, QSize maximum, QString* er
                 break;
             }
             sawEligibleFrame = true;
-            QSize dimensions(input.frame->width, input.frame->height);
-            if (dimensions.width() > maximum.width() || dimensions.height() > maximum.height()) dimensions.scale(maximum, Qt::KeepAspectRatio);
-            QImage image(dimensions, QImage::Format_RGBA8888);
-            input.scaler = sws_getCachedContext(input.scaler, input.frame->width, input.frame->height,
-                static_cast<AVPixelFormat>(input.frame->format), image.width(), image.height(), AV_PIX_FMT_RGBA, SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
-            unsigned char* dest[] = {image.bits()}; int strides[] = {static_cast<int>(image.bytesPerLine())};
-            if (image.isNull() || !input.scaler || sws_scale(input.scaler, input.frame->data, input.frame->linesize, 0, input.frame->height, dest, strides) < 0) {
-                av_frame_unref(input.frame);
-                if (error) *error = "Failed to convert video frame";
-                return {};
-            }
-            best = std::move(image);
-            av_frame_unref(input.frame);
+            av_frame_unref(bestFrame.get());
+            av_frame_move_ref(bestFrame.get(), input.frame);
             if (frameTime >= target - .0001) { reached = true; break; }
         }
-        if (reached && best.isNull() && !sawEligibleFrame) {
+        if (reached && !sawEligibleFrame) {
             // Target lies before the first decoded video frame: match VideoReader's transparent output.
             QImage blank(1, 1, QImage::Format_RGBA8888); blank.fill(Qt::transparent); return blank;
         }
-        if (!reached || best.isNull()) {
+        if (!reached || !sawEligibleFrame || bestFrame->width <= 0 || bestFrame->height <= 0) {
             if (error) {
                 if (input.interrupt && input.interrupt->triggered)
                     *error = input.interrupt->timedOut ? "Preview decode timed out" : "Preview decode cancelled";
-                else if (decoded >= 240)
-                    *error = QString("Could not reach video frame at %1 s within preview decode budget").arg(target, 0, 'f', 2);
+                else if (timedOut)
+                    *error = QString("Preview decode timed out reaching %1 s").arg(target, 0, 'f', 2);
                 else
                     *error = QString("Could not decode video frame at %1 s").arg(target, 0, 'f', 2);
             }
+            return {};
+        }
+        QSize dimensions(bestFrame->width, bestFrame->height);
+        if (dimensions.width() > maximum.width() || dimensions.height() > maximum.height()) dimensions.scale(maximum, Qt::KeepAspectRatio);
+        QImage best(dimensions, QImage::Format_RGBA8888);
+        input.scaler = sws_getCachedContext(input.scaler, bestFrame->width, bestFrame->height,
+            static_cast<AVPixelFormat>(bestFrame->format), best.width(), best.height(), AV_PIX_FMT_RGBA, SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+        unsigned char* dest[] = {best.bits()}; int strides[] = {static_cast<int>(best.bytesPerLine())};
+        if (best.isNull() || !input.scaler || sws_scale(input.scaler, bestFrame->data, bestFrame->linesize, 0, bestFrame->height, dest, strides) < 0) {
+            if (error) *error = "Failed to convert video frame";
             return {};
         }
         return best;

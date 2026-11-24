@@ -136,6 +136,7 @@ private:
     QMap<int, PendingRequest> pending_;
     QMap<int, PendingPermission> pendingPermissions_;
     std::vector<RetiringProcess> retiringProcesses_;
+    std::vector<std::shared_ptr<ProcessTreeHandle>> retiringTrees_;
     QTimer deadlineTimer_;
     QTimer cancelTimer_;
     QString deadlineReason_;
@@ -146,6 +147,7 @@ private:
     void setState(AcpState next);
     void armDeadline(int ms, const QString& reason);
     void teardownProcess(bool blocking);
+    void scheduleTreeCleanup(std::shared_ptr<ProcessTreeHandle> tree);
     void sendJson(const QJsonObject& payload);
     int sendRequest(const QString& method, const QJsonObject& params, PendingKind kind, const QString& sessionId = {});
     void sendNotification(const QString& method, const QJsonObject& params);

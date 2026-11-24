@@ -5,13 +5,17 @@
 #include <QJsonDocument>
 #include <QProcessEnvironment>
 #include <QStandardPaths>
+#include <chrono>
 #include <cmath>
+#include <thread>
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <tlhelp32.h>
 #elif defined(Q_OS_UNIX)
+#include <cerrno>
 #include <csignal>
 #include <unistd.h>
 #endif
@@ -27,28 +31,77 @@ struct AcpClient::ProcessTreeHandle {
 
     void attach(qint64 childPid) {
         pid = childPid;
+    }
+
 #ifdef Q_OS_WIN
-        if (pid <= 0 || job) return;
-        HANDLE hJob = CreateJobObjectW(nullptr, nullptr);
-        if (!hJob) return;
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &info, sizeof(info))) {
-            CloseHandle(hJob);
-            return;
+    bool attachAndResume(qint64 childPid, QString& warning) {
+        pid = childPid;
+        if (pid <= 0) return false;
+        if (!job) {
+            HANDLE hJob = CreateJobObjectW(nullptr, nullptr);
+            if (!hJob) {
+                warning = QString("Warning: could not create Windows Job Object for ACP agent (error %1).").arg(GetLastError());
+            } else {
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &info, sizeof(info))) {
+                    warning = QString("Warning: could not configure Windows Job Object for ACP agent (error %1).").arg(GetLastError());
+                    CloseHandle(hJob);
+                } else {
+                    HANDLE hProc = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid));
+                    if (!hProc) {
+                        warning = QString("Warning: could not open ACP agent process for Job Object assignment (error %1).").arg(GetLastError());
+                        CloseHandle(hJob);
+                    } else {
+                        const BOOL assigned = AssignProcessToJobObject(hJob, hProc);
+                        const DWORD err = assigned ? 0 : GetLastError();
+                        CloseHandle(hProc);
+                        if (!assigned) {
+                            warning = QString("Warning: could not assign ACP agent to Windows Job Object (error %1); helper processes may survive disconnect.").arg(err);
+                            CloseHandle(hJob);
+                        } else {
+                            job = hJob;
+                        }
+                    }
+                }
+            }
         }
-        HANDLE hProc = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid));
-        if (!hProc) {
-            CloseHandle(hJob);
-            return;
+        // Child was spawned with CREATE_SUSPENDED so it cannot spawn helpers before job assignment.
+        int resumed = 0;
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snap != INVALID_HANDLE_VALUE) {
+            THREADENTRY32 te{};
+            te.dwSize = sizeof(te);
+            if (Thread32First(snap, &te)) {
+                do {
+                    if (te.dwSize >= FIELD_OFFSET(THREADENTRY32, th32OwnerProcessID) + sizeof(te.th32OwnerProcessID) &&
+                        te.th32OwnerProcessID == static_cast<DWORD>(pid)) {
+                        HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+                        if (hThread) {
+                            if (ResumeThread(hThread) != static_cast<DWORD>(-1)) ++resumed;
+                            CloseHandle(hThread);
+                        }
+                    }
+                    te.dwSize = sizeof(te);
+                } while (Thread32Next(snap, &te));
+            }
+            CloseHandle(snap);
         }
-        const BOOL assigned = AssignProcessToJobObject(hJob, hProc);
-        CloseHandle(hProc);
-        if (!assigned) {
-            CloseHandle(hJob);
-            return;
+        if (resumed == 0) {
+            killTree();
+            close();
+            return false;
         }
-        job = hJob;
+        return true;
+    }
+#endif
+
+    bool groupAlive() const {
+#if defined(Q_OS_UNIX)
+        if (closed || pid <= 0) return false;
+        return ::kill(-static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
+#else
+        return false;
 #endif
     }
 
@@ -250,23 +303,77 @@ AcpClient::~AcpClient() {
             entry.process->kill();
             entry.process->waitForFinished(400);
         }
-        if (entry.tree) entry.tree->close();
+        if (entry.tree) {
+            if (entry.tree->groupAlive()) entry.tree->killTree();
+            entry.tree->close();
+        }
         if (entry.process) delete entry.process.data();
     }
     retiringProcesses_.clear();
+    for (auto& tree : retiringTrees_) {
+        if (!tree) continue;
+        if (tree->groupAlive()) tree->killTree();
+        tree->close();
+    }
+    retiringTrees_.clear();
+}
+
+void AcpClient::scheduleTreeCleanup(std::shared_ptr<ProcessTreeHandle> tree) {
+    if (!tree || tree->closed) return;
+    retiringTrees_.erase(
+        std::remove_if(retiringTrees_.begin(), retiringTrees_.end(),
+            [](const std::shared_ptr<ProcessTreeHandle>& t) { return !t || t->closed; }),
+        retiringTrees_.end());
+    retiringTrees_.push_back(tree);
+    // Owned by `this` (not the retiring QProcess) so group cleanup survives an early leader exit.
+    QTimer::singleShot(400, this, [this, tree] {
+        if (!tree->closed) {
+            if (tree->groupAlive()) tree->killTree();
+            tree->close();
+        }
+        std::erase(retiringTrees_, tree);
+    });
 }
 
 void AcpClient::teardownProcess(bool blocking) {
     auto tree = std::move(processTree_);
     if (!process_) {
-        if (tree) tree->close();
+        if (tree) {
+            if (tree->groupAlive()) {
+                tree->terminateTree();
+                if (blocking) {
+                    for (int i = 0; i < 15 && tree->groupAlive(); ++i)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    if (tree->groupAlive()) tree->killTree();
+                    tree->close();
+                } else {
+                    scheduleTreeCleanup(std::move(tree));
+                }
+            } else {
+                tree->close();
+            }
+        }
         return;
     }
     QProcess* proc = process_;
     process_ = nullptr;
     proc->disconnect(this);
     if (proc->state() == QProcess::NotRunning) {
-        if (tree) tree->close();
+        if (tree) {
+            if (tree->groupAlive()) {
+                tree->terminateTree();
+                if (blocking) {
+                    for (int i = 0; i < 15 && tree->groupAlive(); ++i)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    if (tree->groupAlive()) tree->killTree();
+                    tree->close();
+                } else {
+                    scheduleTreeCleanup(std::move(tree));
+                }
+            } else {
+                tree->close();
+            }
+        }
         proc->deleteLater();
         return;
     }
@@ -275,24 +382,35 @@ void AcpClient::teardownProcess(bool blocking) {
     if (tree) tree->terminateTree();
     proc->terminate();
     if (blocking) {
-        if (!proc->waitForFinished(400)) {
+        const bool exited = proc->waitForFinished(400);
+        if (!exited) {
             if (tree) tree->killTree();
             proc->kill();
             proc->waitForFinished(400);
+        } else if (tree && tree->groupAlive()) {
+            // Leader exited on SIGTERM, but a child helper in its process group is still alive.
+            for (int i = 0; i < 15 && tree->groupAlive(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (tree->groupAlive()) tree->killTree();
         }
         if (tree) tree->close();
         proc->deleteLater();
         return;
     }
     // Never block the GUI thread during live performances: escalate to kill asynchronously.
+    // Keep the process-group supervisor alive on `this` even if the leader exits quickly.
     proc->setParent(nullptr);
     retiringProcesses_.erase(
         std::remove_if(retiringProcesses_.begin(), retiringProcesses_.end(),
             [](const RetiringProcess& entry) { return entry.process.isNull(); }),
         retiringProcesses_.end());
     retiringProcesses_.push_back({proc, tree});
+    scheduleTreeCleanup(tree);
     connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), proc, [proc, tree] {
+#ifdef Q_OS_WIN
+        // On Windows, closing JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE terminates all surviving descendants.
         if (tree) tree->close();
+#endif
         proc->deleteLater();
     });
     QTimer::singleShot(400, proc, [p = QPointer<QProcess>(proc), tree] {
@@ -355,7 +473,12 @@ void AcpClient::connectToAgent(const QString& program, const QStringList& args, 
     process_ = new QProcess(this);
     processTree_ = std::make_shared<ProcessTreeHandle>();
     process_->setProcessChannelMode(QProcess::SeparateChannels);
-#if defined(Q_OS_UNIX)
+#ifdef Q_OS_WIN
+    // Start suspended so the child is assigned to the kill-on-close Job Object before it can spawn helpers.
+    process_->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* createArgs) {
+        createArgs->flags |= CREATE_SUSPENDED;
+    });
+#elif defined(Q_OS_UNIX)
     // Put the agent in its own process group so Disconnect/shutdown tears down wrapper/grandchild processes too.
     process_->setChildProcessModifier([] { ::setpgid(0, 0); });
 #endif
@@ -377,8 +500,19 @@ void AcpClient::connectToAgent(const QString& program, const QStringList& args, 
     process_->setProcessEnvironment(env);
 
     connect(process_, &QProcess::started, this, [this] {
-        if (stopping_ || !process_ || state_ != AcpState::Connecting) return;
+        if (!process_) return;
+#ifdef Q_OS_WIN
+        QString jobWarning;
+        if (!processTree_ || !processTree_->attachAndResume(process_->processId(), jobWarning)) {
+            if (!jobWarning.isEmpty()) emit stderrReceived(jobWarning + "\n");
+            failConnection("Failed to start ACP agent process.");
+            return;
+        }
+        if (!jobWarning.isEmpty()) emit stderrReceived(jobWarning + "\n");
+#else
         if (processTree_) processTree_->attach(process_->processId());
+#endif
+        if (stopping_ || state_ != AcpState::Connecting) return;
         armDeadline(handshakeTimeoutMs_, "Timed out waiting for ACP agent handshake.");
         QJsonObject clientCaps{
             {"fs", QJsonObject{{"readTextFile", false}, {"writeTextFile", false}}},
@@ -417,7 +551,18 @@ void AcpClient::connectToAgent(const QString& program, const QStringList& args, 
             pending_.clear();
             pendingPermissions_.clear();
             sessionId_.clear();
-            if (processTree_) { processTree_->close(); processTree_.reset(); }
+            if (auto tree = std::move(processTree_)) {
+#if defined(Q_OS_UNIX)
+                if (tree->groupAlive()) {
+                    tree->terminateTree();
+                    scheduleTreeCleanup(std::move(tree));
+                } else {
+                    tree->close();
+                }
+#else
+                tree->close();
+#endif
+            }
             if (process_) { process_->deleteLater(); process_ = nullptr; }
             if (hadSession && exitCode != 0) failConnection(reason);
             else setState(AcpState::Disconnected);

@@ -499,7 +499,8 @@ bool MidiOutput::send(const std::vector<unsigned char>& message, QString& error)
     const auto timeoutMs = std::max<std::int64_t>(1500, static_cast<std::int64_t>(message.size()) + 1500);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     while ((res = midiOutUnprepareHeader(winMm_->handle, &sysex->hdr, sizeof(MIDIHDR))) == MIDIERR_STILLPLAYING) {
-        if (abortSend_.load(std::memory_order_acquire) || std::chrono::steady_clock::now() >= deadline) {
+        const bool aborted = abortSend_.load(std::memory_order_acquire);
+        if (aborted || std::chrono::steady_clock::now() >= deadline) {
             midiOutReset(winMm_->handle);
             for (int tries = 0; tries < 50; ++tries) {
                 res = midiOutUnprepareHeader(winMm_->handle, &sysex->hdr, sizeof(MIDIHDR));
@@ -507,10 +508,10 @@ bool MidiOutput::send(const std::vector<unsigned char>& message, QString& error)
                 Sleep(1);
             }
             if (res == MIDIERR_STILLPLAYING) sysex.release();
-            error = abortSend_.load(std::memory_order_acquire)
-                ? QString("MIDI SysEx aborted on %1").arg(name_)
+            error = aborted
+                ? QString("MIDI SysEx cancelled while closing %1").arg(name_)
                 : QString("MIDI SysEx timed out on %1").arg(name_);
-            lost_.store(true);
+            if (!aborted) lost_.store(true);
             return false;
         }
         Sleep(1);

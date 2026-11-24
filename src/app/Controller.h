@@ -47,10 +47,10 @@ public:
     bool pause(CommandSource source = CommandSource::Operator);
     bool seek(Frame position, CommandSource source = CommandSource::Operator);
     bool stopAll(CommandSource source = CommandSource::Operator);
-    // Reflects queued transport commands immediately before the next audio callback publishes them.
+    // Reflects still-authorized queued transport commands immediately before the next audio callback publishes them.
     State effectiveState() const;
     Frame effectivePosition() const;
-    bool playInFlight() const { return lastPlaySeq_ > transport.commandsApplied(); }
+    bool playInFlight() const;
     bool configureAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer);
     bool configureAudioByName(RtAudio::Api api, const QString& wantedName, unsigned channels, unsigned buffer);
     RtAudio::Api activeAudioApi() const { return api_; }
@@ -109,8 +109,6 @@ private:
         std::shared_ptr<std::atomic<bool>> ownerCancelled;
     };
     std::mutex testMidiMutex_;
-    bool activeTestMidi_ = false;
-    QString activeTestMidiOwner_;
     std::deque<PendingTestMidi> testMidiQueue_;
     QElapsedTimer midiWatch_, stall_;
     std::uint64_t heartbeat_ = 0;
@@ -120,9 +118,13 @@ private:
     std::vector<Frame> lastClocks_;
     std::deque<Project> undo_, redo_;
     quint64 busyLease_ = 0, nextBusyLease_ = 1, projectRevision_ = 0, showEpoch_ = 0;
-    std::uint64_t commandsPosted_ = 0, lastPlaySeq_ = 0;
-    State predictedState_ = State::Stopped;
-    Frame predictedPosition_ = 0;
+    struct PendingTransportCommand {
+        std::uint64_t seq = 0;
+        Command command;
+    };
+    std::uint64_t commandsPosted_ = 0;
+    std::deque<PendingTransportCommand> pendingCommands_;
+    std::pair<State, Frame> predictTransport(bool* hasPendingPlay = nullptr) const;
     bool postTransportCommand(Command cmd);
     void arm(Frame position);
     void startMidiThread();
