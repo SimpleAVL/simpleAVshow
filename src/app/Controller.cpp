@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QSet>
 #include <QMetaObject>
 #include <QPainter>
 #include <QStandardPaths>
@@ -316,13 +317,15 @@ bool Controller::needsRelink(const MediaAsset& a) {
     return a.offline || ((a.video || readsSource) && !a.path.isEmpty() && !detail::present(a.path));
 }
 QStringList Controller::missingMedia() const {
-    QStringList missing;
+    QStringList missing; QSet<QString> found; // Each file is looked up once, however many clips use it.
     for (const auto& clip : project.show.clips) {
         const auto asset = project.assets.constFind(QString::fromStdString(clip.assetId));
         if (asset == project.assets.cend() || missing.contains(asset->path)) continue;
         // Videos, and audio that plays from its original file rather than a prepared cache, need the file now.
         const bool readsSource = !project.show.tracks[clip.track].visual && asset->audio && asset->audio->storage && asset->audio->storage->readsSource();
-        if (asset->offline || ((asset->video || readsSource) && !detail::present(asset->path))) missing << asset->path;
+        if (asset->offline) { missing << asset->path; continue; }
+        if (!(asset->video || readsSource) || found.contains(asset->path)) continue;
+        if (detail::present(asset->path)) found.insert(asset->path); else missing << asset->path;
     }
     return missing;
 }

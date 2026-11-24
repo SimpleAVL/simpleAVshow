@@ -28,6 +28,9 @@ FileIdentity fileIdentity(const QString& path);
 // shares): it is not present. Other open failures (a share briefly unreachable) count as present, so
 // they are retried by reads instead of being reported as missing media.
 bool present(const QString& path);
+// Both from one file-system lookup.
+struct Probe { bool present = false; FileIdentity identity; };
+Probe probe(const QString& path);
 // Size, modification time and identity: a file that still has all three is the one that was read.
 struct FileVersion {
     qint64 size = -1, modified = 0; FileIdentity identity;

@@ -40,36 +40,31 @@ std::wstring windowsPath(const QString& path) {
     return native.toStdWString();
 }
 #endif
-FileIdentity fileIdentity(const QString& path) {
+Probe probe(const QString& path) {
 #ifdef Q_OS_WIN
-    const HANDLE file = CreateFileW(windowsPath(path).c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return {};
-    BY_HANDLE_FILE_INFORMATION info{};
-    const bool ok = GetFileInformationByHandle(file, &info); CloseHandle(file);
-    return ok ? FileIdentity{info.dwVolumeSerialNumber, (quint64{info.nFileIndexHigh} << 32) | info.nFileIndexLow} : FileIdentity{};
-#else
-    struct stat info{};
-    if (::stat(QFile::encodeName(path).constData(), &info)) return {};
-    return {static_cast<quint64>(info.st_dev), static_cast<quint64>(info.st_ino)};
-#endif
-}
-bool present(const QString& path) {
-#ifdef Q_OS_WIN
+    // One open answers both questions: on a network share every open is a round trip to the server.
     const HANDLE file = CreateFileW(windowsPath(path).c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr, OPEN_EXISTING, 0, nullptr);
-    if (file != INVALID_HANDLE_VALUE) { CloseHandle(file); return true; }
-    // Delete-pending files fail with access denied (as do unreadable ones, which cannot play either).
-    const DWORD error = GetLastError();
-    return error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND && error != ERROR_ACCESS_DENIED &&
-        error != ERROR_DELETE_PENDING && error != ERROR_INVALID_NAME;
+    if (file == INVALID_HANDLE_VALUE) {
+        // Delete-pending files fail with access denied (as do unreadable ones, which cannot play either).
+        const DWORD error = GetLastError();
+        return {error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND && error != ERROR_ACCESS_DENIED &&
+            error != ERROR_DELETE_PENDING && error != ERROR_INVALID_NAME, {}};
+    }
+    BY_HANDLE_FILE_INFORMATION info{};
+    const bool ok = GetFileInformationByHandle(file, &info); CloseHandle(file);
+    return {true, ok ? FileIdentity{info.dwVolumeSerialNumber, (quint64{info.nFileIndexHigh} << 32) | info.nFileIndexLow} : FileIdentity{}};
 #else
     // Only definite absence counts; other failures (a mount briefly unreachable) are retried by reads.
     struct stat info{};
-    if (::stat(QFile::encodeName(path).constData(), &info)) return errno != ENOENT && errno != ENOTDIR;
-    return S_ISREG(info.st_mode);
+    if (::stat(QFile::encodeName(path).constData(), &info)) return {errno != ENOENT && errno != ENOTDIR, {}};
+    // The inode alone: st_dev is renumbered when a share remounts or a stick is plugged in again
+    // (macOS), which would make the same file look replaced.
+    return {S_ISREG(info.st_mode), {0, static_cast<quint64>(info.st_ino)}};
 #endif
 }
+FileIdentity fileIdentity(const QString& path) { return probe(path).identity; }
+bool present(const QString& path) { return probe(path).present; }
 FileVersion fileVersion(const QString& path) {
     const QFileInfo info(path);
     return {info.size(), info.lastModified().toMSecsSinceEpoch(), fileIdentity(path)};

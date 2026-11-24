@@ -88,7 +88,7 @@ public:
 #else
         struct stat info{};
         if (::fstat(fd_, &info)) return {};
-        return {detail::FileIdentity{static_cast<quint64>(info.st_dev), static_cast<quint64>(info.st_ino)}, static_cast<qint64>(info.st_size)};
+        return {detail::FileIdentity{0, static_cast<quint64>(info.st_ino)}, static_cast<qint64>(info.st_size)}; // Inode alone, as detail::probe.
 #endif
     }
 private:
@@ -402,13 +402,13 @@ public:
         // unavailable too: retried, not reported as changed. An identity the file system does not report
         // right now is not a change (sameAs).
         // One lookup: values from a failed one (a share dropping now) would look like a change.
-        const QFileInfo info(path_);
-        if (!info.exists() || !info.lastModified().isValid() || !detail::present(path_)) {
+        const QFileInfo info(path_); const auto probe = detail::probe(path_);
+        if (!info.exists() || !info.lastModified().isValid() || !probe.present) {
             readers_.clear(); throw std::runtime_error("Audio source is unavailable: " + path_.toStdString());
         }
         // File identity also catches a replacement saved with the same size and modification time;
         // an in-place rewrite that keeps both is not detected.
-        const detail::FileVersion current{info.size(), info.lastModified().toMSecsSinceEpoch(), detail::fileIdentity(path_)};
+        const detail::FileVersion current{info.size(), info.lastModified().toMSecsSinceEpoch(), probe.identity};
         if (!current.sameAs(version_)) { readers_.clear(); throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString()); }
         Reader* reader = nullptr;
         try {
@@ -552,9 +552,13 @@ private:
     // concurrent opens cannot claim the same one. If every other source is busy, the budget is
     // exceeded for now.
     void makeRoom() const {
+        // Declared before the locks: evicted decoders close after they are released, since closing a
+        // file can stall on a share while the UI's sweep waits for the registry. Each still counts
+        // against the budget until it closes.
+        std::vector<std::unique_ptr<Reader>> evicted;
         auto& r = registry();
         const std::lock_guard lock(r.mutex);
-        while (r.open.load() >= openBudget) {
+        while (r.open.load() >= openBudget + evicted.size()) {
             const StreamStorage* owner = nullptr; std::size_t index = 0;
             std::vector<std::unique_lock<std::mutex>> held;
             for (const auto* storage : r.storages) {
@@ -563,7 +567,9 @@ private:
                     if (!owner || storage->readers_[i]->used < owner->readers_[index]->used) { owner = storage; index = i; }
             }
             if (!owner) break;
-            owner->readers_.erase(owner->readers_.begin() + static_cast<std::ptrdiff_t>(index));
+            evicted.reserve(evicted.size() + 1);
+            const auto at = owner->readers_.begin() + static_cast<std::ptrdiff_t>(index);
+            evicted.push_back(std::move(*at)); owner->readers_.erase(at);
         }
         ++r.open;
     }

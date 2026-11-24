@@ -1415,8 +1415,12 @@ private slots:
         auto fresh = loadMedia(source); QCOMPARE(caches.entryList({"*.pcm"}, QDir::Files).size(), count + 1);
         QVERIFY(sampleAt(*fresh.audio, 2000) != value);
         // Files modified within the timestamp granularity are never indexed, so they are always rehashed.
-        const auto recent = dir.filePath("recent.wav"); importCacheKey(recent, 4420);
+        // Ahead of the clock, so the file stays recent however long the test takes (FAT: 2 s steps).
+        const auto recent = dir.filePath("recent.wav");
+        auto recentBytes = waveBytes(16, 1, 2, 44100, false, 4420); recentBytes.replace(recentBytes.size() - 4, 4, QUuid::createUuid().toRfc4122().first(4));
+        writeBytes(recent, recentBytes); setModified(recent, QDateTime::currentDateTime().addSecs(60));
         const auto recentTime = QFileInfo(recent).lastModified();
+        QVERIFY(loadMedia(recent).audio); QCOMPARE(caches.entryList({"*.pcm"}, QDir::Files).size(), count + 2);
         QFile file(recent); QVERIFY(file.open(QIODevice::ReadWrite));
         QVERIFY(file.seek(file.size() - 2)); QCOMPARE(file.write("\x01\x02", 2), 2); file.close(); setModified(recent, recentTime);
         QVERIFY(loadMedia(recent).audio); QCOMPARE(caches.entryList({"*.pcm"}, QDir::Files).size(), count + 3);
