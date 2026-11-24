@@ -137,9 +137,10 @@ void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
     publish(0);
 }
 
-void Transport::dispatch(int marker, CommandSource source, std::uint64_t sourceEpoch) noexcept {
+void Transport::dispatch(int marker, CommandSource source, std::uint64_t sourceEpoch,
+                         CommandSource secondarySource, std::uint64_t secondaryEpoch) noexcept {
     if (!show_->markers[marker].message.empty() &&
-        !midi_.push({marker, position_, epoch_.load(), source, sourceEpoch}))
+        !midi_.push({marker, position_, epoch_.load(), source, sourceEpoch, secondarySource, secondaryEpoch}))
         overflow_.store(true);
 }
 void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept {
@@ -426,18 +427,24 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 const std::size_t savedActiveSize = active_.size();
                 CommandSource cueSource = CommandSource::Operator;
                 std::uint64_t cueEpoch = 0;
+                CommandSource cueSource2 = CommandSource::Operator;
+                std::uint64_t cueEpoch2 = 0;
                 bool suppressSeekCue = false;
                 if (f == 0) {
                     if (pendingStart.active && pendingStart.source != CommandSource::Operator) {
                         cueSource = pendingStart.source;
                         cueEpoch = pendingStart.sourceEpoch;
-                    } else if (pendingStart.seekCueActive) {
-                        cueSource = pendingStart.seekCueSource;
-                        cueEpoch = pendingStart.seekCueEpoch;
                     }
-                    if (pendingStart.seekCueActive &&
-                        !isSourceValid(pendingStart.seekCueSource, pendingStart.seekCueEpoch)) {
-                        suppressSeekCue = true;
+                    if (pendingStart.seekCueActive) {
+                        if (cueSource == CommandSource::Operator) {
+                            cueSource = pendingStart.seekCueSource;
+                            cueEpoch = pendingStart.seekCueEpoch;
+                        } else if (pendingStart.seekCueSource != cueSource || pendingStart.seekCueEpoch != cueEpoch) {
+                            cueSource2 = pendingStart.seekCueSource;
+                            cueEpoch2 = pendingStart.seekCueEpoch;
+                        }
+                        if (!isSourceValid(pendingStart.seekCueSource, pendingStart.seekCueEpoch))
+                            suppressSeekCue = true;
                     }
                 }
                 while (nextStart_ < starts_.size() && show_->clips[starts_[nextStart_]].start <= position_) {
@@ -446,9 +453,9 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 }
                 while (nextMarker_ < markers_.size() && show_->markers[markers_[nextMarker_]].time == position_) {
                     const auto i = markers_[nextMarker_++]; const auto& marker = show_->markers[i];
-                    if (marker.timing == MidiTiming::Arrival && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch);
+                    if (marker.timing == MidiTiming::Arrival && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
                     if (marker.hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); }
-                    else if (marker.timing == MidiTiming::Resume && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch);
+                    else if (marker.timing == MidiTiming::Resume && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
                 }
                 if (f == 0 && pendingStart.active && pendingStart.source != CommandSource::Operator &&
                     !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {

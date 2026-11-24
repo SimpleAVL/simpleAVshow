@@ -28,6 +28,10 @@
 #else
 #include <fcntl.h>
 #include <unistd.h>
+#ifdef Q_OS_LINUX
+#include <linux/fs.h>
+#include <sys/syscall.h>
+#endif
 #endif
 
 namespace sav {
@@ -61,6 +65,19 @@ bool atomicPublishFile(const QString& source, const QString& target, bool allowO
         }
         return true;
     }
+#ifdef Q_OS_MACOS
+    if (::renamex_np(src.constData(), dst.constData(), RENAME_EXCL) == 0) return true;
+    if (errno == EEXIST) {
+        error = "Destination file already exists; pass overwrite: true to replace it";
+        return false;
+    }
+#elif defined(Q_OS_LINUX) && defined(SYS_renameat2) && defined(RENAME_NOREPLACE)
+    if (::syscall(SYS_renameat2, AT_FDCWD, src.constData(), AT_FDCWD, dst.constData(), RENAME_NOREPLACE) == 0) return true;
+    if (errno == EEXIST) {
+        error = "Destination file already exists; pass overwrite: true to replace it";
+        return false;
+    }
+#endif
     if (::link(src.constData(), dst.constData()) == 0) {
         ::unlink(src.constData());
         return true;
@@ -69,48 +86,10 @@ bool atomicPublishFile(const QString& source, const QString& target, bool allowO
         error = "Destination file already exists; pass overwrite: true to replace it";
         return false;
     }
-    if (errno == EPERM || errno == EOPNOTSUPP || errno == EXDEV) {
-        // Fallback for filesystems without hard links (e.g. FAT32/exFAT): O_CREAT|O_EXCL still prevents overwrite.
-        const int fd = ::open(dst.constData(), O_WRONLY | O_CREAT | O_EXCL, 0644);
-        if (fd < 0) {
-            error = errno == EEXIST
-                ? QString("Destination file already exists; pass overwrite: true to replace it")
-                : QString("Cannot create file: %1").arg(QString::fromLocal8Bit(std::strerror(errno)));
-            return false;
-        }
-        QFile in(source);
-        if (!in.open(QIODevice::ReadOnly)) {
-            ::close(fd);
-            ::unlink(dst.constData());
-            error = QString("Cannot read staged file: %1").arg(in.errorString());
-            return false;
-        }
-        QByteArray buf(1024 * 1024, '\0');
-        while (!in.atEnd()) {
-            const qint64 n = in.read(buf.data(), buf.size());
-            if (n < 0) { ::close(fd); ::unlink(dst.constData()); error = in.errorString(); return false; }
-            if (n == 0) break;
-            qint64 off = 0;
-            while (off < n) {
-                const auto w = ::write(fd, buf.constData() + off, static_cast<size_t>(n - off));
-                if (w <= 0) {
-                    const int err = errno;
-                    ::close(fd);
-                    ::unlink(dst.constData());
-                    error = QString("Cannot publish file: %1").arg(QString::fromLocal8Bit(std::strerror(err)));
-                    return false;
-                }
-                off += w;
-            }
-        }
-        if (::close(fd) != 0) {
-            const int err = errno;
-            ::unlink(dst.constData());
-            error = QString("Cannot publish file: %1").arg(QString::fromLocal8Bit(std::strerror(err)));
-            return false;
-        }
-        ::unlink(src.constData());
-        return true;
+    if (errno == EPERM || errno == EOPNOTSUPP || errno == ENOTSUP || errno == EXDEV || errno == ENOSYS || errno == EINVAL) {
+        // Never fall back to copying a potentially multi-gigabyte archive on the GUI thread or exposing a partial file.
+        error = "This filesystem does not support atomic no-overwrite publish; choose another location or pass overwrite: true";
+        return false;
     }
     error = QString("Cannot publish file: %1").arg(QString::fromLocal8Bit(std::strerror(errno)));
     return false;
@@ -1682,8 +1661,14 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
         // Ordinary `save` may update the current project file; `save_as` (or saving to a different path)
         // requires explicit `overwrite: true` and publishes atomically without replacement by default.
         const bool allowOverwrite = overwrite || (action == "save" && !c_.path.isEmpty() && sameLocalPath(target, c_.path));
-        if (!allowOverwrite && QFileInfo::exists(target))
-            fail("Destination file already exists; pass overwrite: true to replace it");
+        if (!allowOverwrite) {
+            if (QFileInfo::exists(target) || QFileInfo(target).isSymLink())
+                fail("Destination file already exists; pass overwrite: true to replace it");
+            const QString targetAutosave = target + ".autosave";
+            if ((c_.path.isEmpty() || !sameLocalPath(target, c_.path)) &&
+                (QFileInfo::exists(targetAutosave) || QFileInfo(targetAutosave).isSymLink()))
+                fail("Destination recovery file (.autosave) already exists; pass overwrite: true to replace it");
+        }
         if (!c_.savingCopiesMedia()) {
             if (!c_.save(target, allowOverwrite)) fail(c_.status);
             auto result = snapshot(); result.insert("action", action); result.insert("target_path", target);

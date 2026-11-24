@@ -403,6 +403,15 @@ private slots:
         QVERIFY(call(server, "project_action", {{"action", "save_as"}, {"path", showPath}})["isError"].toBool());
         QVERIFY(!call(server, "project_action", {{"action", "save_as"}, {"path", showPath}, {"overwrite", true}})["isError"].toBool());
         QVERIFY(!call(server, "project_action", {{"action", "save"}})["isError"].toBool());
+        // A different show's .autosave sidecar at the destination must not be deleted unless overwrite: true.
+        const QString otherShowPath = dir.filePath("other-show.savshow");
+        { QFile sidecar(otherShowPath + ".autosave"); QVERIFY(sidecar.open(QIODevice::WriteOnly)); sidecar.write("{}"); }
+        QVERIFY(call(server, "project_action", {{"action", "save_as"}, {"path", otherShowPath}})["isError"].toBool());
+        QVERIFY(QFileInfo::exists(otherShowPath + ".autosave"));
+        QVERIFY(!QFileInfo::exists(otherShowPath));
+        QVERIFY(!call(server, "project_action", {{"action", "save_as"}, {"path", otherShowPath}, {"overwrite", true}})["isError"].toBool());
+        QVERIFY(QFileInfo::exists(otherShowPath));
+        QVERIFY(!call(server, "project_action", {{"action", "save_as"}, {"path", showPath}, {"overwrite", true}})["isError"].toBool());
         QVERIFY(!call(server, "project_action", {{"action", "export_package"}, {"path", packPath}})["isError"].toBool());
         QVERIFY(QFileInfo::exists(packPath));
         QVERIFY(call(server, "project_action", {{"action", "export_package"}, {"path", packPath}})["isError"].toBool());

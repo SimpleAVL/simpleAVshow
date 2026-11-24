@@ -206,12 +206,14 @@ void Controller::startMidiThread() {
             MidiEvent event;
             while (!midiStop_.load(std::memory_order_acquire) && transport.takeMidi(event)) {
                 if (event.epoch != transport.epoch() || event.marker < 0 || static_cast<std::size_t>(event.marker) >= snapshot->markers.size()) continue;
-                if (!transport.isSourceValid(event.source, event.sourceEpoch)) continue;
+                if (!transport.isSourceValid(event.source, event.sourceEpoch) ||
+                    !transport.isSourceValid(event.secondarySource, event.secondaryEpoch)) continue;
                 const auto& marker = snapshot->markers[event.marker]; QString error;
                 auto allowCueSubmit = [&]() -> bool {
                     return !midiStop_.load(std::memory_order_acquire) &&
                         event.epoch == transport.epoch() &&
-                        transport.isSourceValid(event.source, event.sourceEpoch);
+                        transport.isSourceValid(event.source, event.sourceEpoch) &&
+                        transport.isSourceValid(event.secondarySource, event.secondaryEpoch);
                 };
                 if (!midi.send(marker.message, error, allowCueSubmit) && !midiStop_.load(std::memory_order_acquire)) {
                     QMetaObject::invokeMethod(this, [this, error] { report(error); }, Qt::QueuedConnection);
@@ -298,7 +300,10 @@ bool Controller::play(CommandSource source) {
         if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and press Play to retry, or reopen the project to rebuild changed or damaged caches."); playbackProblem = status; return false; }
         // Resuming a live show never blocks on picture or MIDI; it warns and continues.
         const bool resuming = state == State::Held || transport.asyncVoices() || (state == State::Paused && device.running());
-        if (!resuming && needsMidi() && testMidiInFlight_.load(std::memory_order_acquire)) {
+        // Test MIDI is permitted while Paused (without async voices), so block playback start/resume
+        // from any non-Held, non-async state until an in-flight test transfer finishes on the MIDI worker.
+        const bool liveResume = state == State::Held || transport.asyncVoices();
+        if (!liveResume && needsMidi() && testMidiInFlight_.load(std::memory_order_acquire)) {
             report("Wait for the in-flight MIDI test message to finish before starting playback.");
             playbackProblem = status;
             return false;
@@ -739,6 +744,18 @@ bool Controller::commitSave(Project candidate, QString target, bool allowOverwri
         const auto sourceDirectory = project.packageDirectory;
         const auto preSaveAssets = project.assets;
         const QString previous = path;
+        const bool sameTarget = [&] {
+            if (previous.isEmpty()) return false;
+            const QFileInfo ia(target), ib(previous);
+            const QString ca = ia.canonicalFilePath(), cb = ib.canonicalFilePath();
+            if (!ca.isEmpty() && !cb.isEmpty()) return ca == cb;
+            return QDir::cleanPath(ia.absoluteFilePath()) == QDir::cleanPath(ib.absoluteFilePath());
+        }();
+        if (!allowOverwrite && !sameTarget) {
+            const QString targetAutosave = target + ".autosave";
+            if (QFileInfo::exists(targetAutosave) || QFileInfo(targetAutosave).isSymLink())
+                throw std::runtime_error("Destination recovery file (.autosave) already exists; pass overwrite: true to replace it");
+        }
         writeProject(candidate, target, allowOverwrite); project.assets = std::move(candidate.assets); bindAudio(project); project.packageDirectory.reset(); path = target; dirty = false; ++projectRevision_;
         // Rebase Undo/Redo history ONLY for assets actually materialized by this save whose
         // historical source identity still matches the pre-save asset (never overwrite relink history).
@@ -765,7 +782,9 @@ bool Controller::commitSave(Project candidate, QString target, bool allowOverwri
         }
         if (sourceDirectory) arm(position());
         // The edits now live in target; a sidecar left next to the previous file would offer them again.
-        for (const auto& saved : {target, previous}) if (!saved.isEmpty()) QFile::remove(saved + ".autosave");
+        // Only remove target's sidecar when overwriting or saving back to the same project path.
+        if (allowOverwrite || sameTarget) QFile::remove(target + ".autosave");
+        if (!previous.isEmpty()) QFile::remove(previous + ".autosave");
         QFile::remove(untitledAutosavePath());
         report("Saved " + QFileInfo(target).fileName()); emit changed();
         return true;

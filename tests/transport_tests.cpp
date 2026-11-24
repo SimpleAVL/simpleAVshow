@@ -460,6 +460,16 @@ int main() {
             expect(t.state() == State::Playing, "play followed by seek starts playing at target");
             expect(t.takeMidi(ev) && ev.source == CommandSource::ChatAgent && ev.sourceEpoch == seekEp,
                 "same-batch seek after agent play preserves initiating agent epoch on arrival MIDI");
+            // Cross-domain Play + Seek in the same batch carries BOTH domains' epochs on the emitted MIDI event.
+            t.configure(p);
+            const auto extEp = t.externalAgentEpoch();
+            const auto chatEp2 = t.chatAgentEpoch();
+            t.command({Action::Play, 0, CommandSource::ExternalAgent, extEp});
+            t.command({Action::Seek, 300, CommandSource::ChatAgent, chatEp2});
+            checkedRender(t, out.data(), 64, 2);
+            expect(t.takeMidi(ev) && ev.source == CommandSource::ExternalAgent && ev.sourceEpoch == extEp &&
+                   ev.secondarySource == CommandSource::ChatAgent && ev.secondaryEpoch == chatEp2,
+                "cross-domain play and seek carry both epochs on arrival MIDI");
         }}
     };
     for (const auto& [name, test] : tests) {

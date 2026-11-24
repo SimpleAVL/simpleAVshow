@@ -21,6 +21,8 @@ struct MidiEvent {
     std::uint64_t epoch = 0;
     CommandSource source = CommandSource::Operator;
     std::uint64_t sourceEpoch = 0;
+    CommandSource secondarySource = CommandSource::Operator;
+    std::uint64_t secondaryEpoch = 0;
 };
 
 class Transport {
@@ -131,7 +133,8 @@ private:
     };
     void apply(Command command, PendingPlayStart& pendingStart) noexcept;
     void applyStopAll() noexcept;
-    void dispatch(int marker, CommandSource source = CommandSource::Operator, std::uint64_t sourceEpoch = 0) noexcept;
+    void dispatch(int marker, CommandSource source = CommandSource::Operator, std::uint64_t sourceEpoch = 0,
+                  CommandSource secondarySource = CommandSource::Operator, std::uint64_t secondaryEpoch = 0) noexcept;
     void publish(float peak) noexcept;
     void stopAudioWorker();
     void locate(Frame position) noexcept;

@@ -23,6 +23,10 @@
 #else
 #include <fcntl.h>
 #include <unistd.h>
+#ifdef Q_OS_LINUX
+#include <linux/fs.h>
+#include <sys/syscall.h>
+#endif
 #endif
 
 namespace sav {
@@ -415,37 +419,28 @@ void writeProject(const Project& p, const QString& path, bool allowOverwrite) {
 #else
     const QByteArray src = QFile::encodeName(tempPath);
     const QByteArray dst = QFile::encodeName(path);
+#ifdef Q_OS_MACOS
+    if (::renamex_np(src.constData(), dst.constData(), RENAME_EXCL) == 0) {
+        temp.setAutoRemove(false);
+        return;
+    }
+    if (errno == EEXIST)
+        throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
+#elif defined(Q_OS_LINUX) && defined(SYS_renameat2) && defined(RENAME_NOREPLACE)
+    if (::syscall(SYS_renameat2, AT_FDCWD, src.constData(), AT_FDCWD, dst.constData(), RENAME_NOREPLACE) == 0) {
+        temp.setAutoRemove(false);
+        return;
+    }
+    if (errno == EEXIST)
+        throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
+#endif
     if (::link(src.constData(), dst.constData()) == 0) {
         return; // temp auto-removes its temporary directory entry while dst keeps the linked inode.
     }
     if (errno == EEXIST)
         throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
-    if (errno == EPERM || errno == EOPNOTSUPP || errno == EXDEV) {
-        // Fallback for filesystems without hard links (e.g. FAT32/exFAT): O_CREAT|O_EXCL still prevents overwrite.
-        const int fd = ::open(dst.constData(), O_WRONLY | O_CREAT | O_EXCL, 0644);
-        if (fd < 0) {
-            if (errno == EEXIST)
-                throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
-            throw std::runtime_error(std::string("Cannot create project file: ") + std::strerror(errno));
-        }
-        qint64 written = 0;
-        while (written < bytes.size()) {
-            const auto n = ::write(fd, bytes.constData() + written, static_cast<size_t>(bytes.size() - written));
-            if (n <= 0) {
-                const int err = errno;
-                ::close(fd);
-                ::unlink(dst.constData());
-                throw std::runtime_error(std::string("Cannot write project file: ") + std::strerror(err));
-            }
-            written += n;
-        }
-        if (::close(fd) != 0) {
-            const int err = errno;
-            ::unlink(dst.constData());
-            throw std::runtime_error(std::string("Cannot close project file: ") + std::strerror(err));
-        }
-        return;
-    }
+    if (errno == EPERM || errno == EOPNOTSUPP || errno == ENOTSUP || errno == EXDEV || errno == ENOSYS || errno == EINVAL)
+        throw std::runtime_error("This filesystem does not support atomic no-overwrite save; choose another location or pass overwrite: true");
     throw std::runtime_error(std::string("Cannot save project file: ") + std::strerror(errno));
 #endif
 }

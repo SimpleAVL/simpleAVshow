@@ -1,4 +1,5 @@
 #include "app/AgentChatPanel.h"
+#include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -350,7 +351,9 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         appendEntry({ChatEntry::Kind::System, {}, {}, {},
             QString("Connected to %1 (%2 · %3).").arg(name, transport, mcp_.editingEnabled() ? "editing enabled" : "read only"), {}, {}});
         updateControls();
-        focusPrompt();
+        // Never steal keyboard focus from the timeline/show controls if the operator clicked away while connecting.
+        if (!c_.showMode && isVisible() && QApplication::focusWidget() && isAncestorOf(QApplication::focusWidget()))
+            focusPrompt();
     });
     connect(&acp_, &AcpClient::messageChunk, this, [this](const QString& chunk) {
         constexpr qsizetype maxEntryChars = 8 * 1024;
