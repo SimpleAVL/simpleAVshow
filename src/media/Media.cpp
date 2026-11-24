@@ -6,6 +6,7 @@
 #include <QTemporaryFile>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <numeric>
@@ -369,7 +370,7 @@ public:
                 std::copy(reader->samples.begin() + (at - reader->first) * 2, reader->samples.begin() + (stop - reader->first) * 2, stereo + (at - first) * 2);
                 at = stop;
             }
-            reader->used = ++registry().clock;
+            reader->used = ++registry().clock; reader->usedAt = std::chrono::steady_clock::now();
         } catch (...) {
             // A failed decoder's position is unknown; the next read opens a fresh one.
             if (reader) std::erase_if(readers_, [reader](const auto& r) { return r.get() == reader; });
@@ -390,6 +391,19 @@ private:
         std::atomic<std::uint64_t> clock{0};
     };
     static Registry& registry() { static Registry instance; return instance; }
+public:
+    // Sources reading right now are skipped (their locks are only tried), and so is any decoder read
+    // within idleAfter: a playing clip reads every block, so only idle decoders close.
+    static void closeIdle() {
+        constexpr auto idleAfter = std::chrono::seconds(3);
+        const auto now = std::chrono::steady_clock::now();
+        auto& r = registry(); const std::lock_guard lock(r.mutex);
+        for (const auto* storage : r.storages) {
+            const std::unique_lock other(storage->mutex_, std::try_to_lock); if (!other) continue;
+            std::erase_if(storage->readers_, [&](const auto& reader) { return now - reader->usedAt >= idleAfter; });
+        }
+    }
+private:
     // Reading forward this far decodes through instead of seeking.
     static constexpr Frame continueWithin = 2 * sampleRate;
     struct Reader {
@@ -401,6 +415,7 @@ private:
         Frame first = 0;
         std::vector<float> samples;
         std::uint64_t used = 0;
+        std::chrono::steady_clock::time_point usedAt = std::chrono::steady_clock::now();
     };
     QString path_;
     Frame length_;
@@ -509,6 +524,7 @@ std::shared_ptr<const AudioData> loadAudio(const QString& path, AudioPreparation
 }
 }
 
+void closeIdleStreams() { StreamStorage::closeIdle(); }
 void setAudioPreparation(AudioPreparation value) noexcept { preference.store(value); }
 AudioPreparation audioPreparation() noexcept { return preference.load(); }
 

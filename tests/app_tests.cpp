@@ -1853,6 +1853,45 @@ private slots:
             QVERIFY2(!QFileInfo::exists(extraction), qPrintable(extraction));
         }
     }
+    void idleStreamDecodersCloseTheirFiles() {
+#ifdef Q_OS_WIN
+        QSKIP("counts descriptors through /dev/fd");
+#else
+        // A fully buffered clip stops reading; its decoder must not hold the file for the rest of the show.
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; const auto path = dir.filePath("short.wav"); writeBytes(path, waveBytes(16, 1, 2, 44100, false, 4410 + 97));
+        const auto audio = loadMedia(path).audio;
+        const auto descriptors = [] { return QDir("/dev/fd").entryList(QDir::AllEntries | QDir::System | QDir::NoDotAndDotDot).size(); };
+        const auto before = descriptors(); float sample[2]; audio->storage->read(0, sample, 1);
+        QCOMPARE(descriptors(), before + 1);
+        closeIdleStreams(); QCOMPARE(descriptors(), before + 1); // Just read: not idle yet.
+        QTest::qWait(3100); closeIdleStreams(); QCOMPARE(descriptors(), before);
+        audio->storage->read(4000, sample, 1); QCOMPARE(descriptors(), before + 1); // Reopens on demand.
+#endif
+    }
+    void rejectedSourceSwitchKeepsThePreviousPreference() {
+        // Selecting Prepared reloads a stem that has since shrunk below a clip's offset: the show keeps
+        // its streamed audio, so the preference must stay Stream (and a later retry must reload).
+        QSettings().setValue("audio/sources", "stream");
+        QTemporaryDir dir; const auto path = dir.filePath("stem.wav"); writeBytes(path, waveBytes(16, 1, 2, 44100, false, 88200 + 3));
+        MainWindow window; window.show(); auto& c = window.controller(); QCOMPARE(audioPreparation(), AudioPreparation::Stream);
+        auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}};
+        auto asset = loadMedia(path); project.assets.insert(asset.id, asset);
+        Clip clip; clip.id = "a"; clip.assetId = asset.id.toStdString(); clip.audio = asset.audio; clip.offset = frames(1.5); clip.duration = frames(.4); project.show.clips.push_back(clip);
+        c.replace(project);
+        writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 + 5));
+        QTimer::singleShot(0, &window, [&] {
+            auto* dialog = window.findChild<QDialog*>("outputSettingsDialog"); if (!dialog) return;
+            auto* sources = dialog->findChild<QComboBox*>("audioSourcePreparation"); if (!sources) return;
+            sources->setCurrentIndex(sources->findData(static_cast<int>(AudioPreparation::Prepared))); emit sources->activated(sources->currentIndex());
+        });
+        window.findChild<QPushButton*>("outputSettingsButton")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!c.busy, 15000);
+        QCOMPARE(audioPreparation(), AudioPreparation::Stream); QCOMPARE(QSettings().value("audio/sources").toString(), QString("stream"));
+        QVERIFY2(c.status.startsWith("Audio sources were not changed"), qPrintable(c.status));
+        QVERIFY(c.project.show.clips[0].audio->storage->decodes());
+    }
     void manifestsThatReferToOtherFilesAreRejected() {
         // Two identical manifests can name different files, so their bytes cannot identify the audio.
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");

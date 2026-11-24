@@ -177,7 +177,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
     edit->addAction("Delete selected clip / cue", this, &MainWindow::deleteSelection);
     edit->addSeparator();
     edit->addAction("Copy clip", QKeySequence::Copy, this, [this] {
-        if (const auto* clip = selectedClip()) { clipboard_ = *clip; c_.report("Copied clip. Paste places it at the playhead on the selected track."); }
+        // Paste binds audio by asset; holding it here would keep a replaced show's media open.
+        if (const auto* clip = selectedClip()) { clipboard_ = *clip; clipboard_->audio.reset(); c_.report("Copied clip. Paste places it at the playhead on the selected track."); }
     });
     edit->addAction("Paste clip at playhead", QKeySequence::Paste, this, [this] {
         if (!clipboard_ || !c_.canEdit()) return;
@@ -799,7 +800,7 @@ void MainWindow::relinkMedia(bool afterOpening) {
         return result;
     }));
 }
-void MainWindow::reloadAudio() {
+void MainWindow::reloadAudio(AudioPreparation previous) {
     // Undo and redo can bring back assets the show no longer holds; they are prepared too.
     const auto paths = c_.audioSources();
     if (paths.isEmpty()) { c_.report(audioPreparation() == AudioPreparation::Prepared ? "Audio will be prepared when imported." : "Audio will stream from media files."); return; }
@@ -809,9 +810,13 @@ void MainWindow::reloadAudio() {
     progress->setWindowModality(Qt::WindowModal); progress->setMinimumDuration(0); progress->show();
     using Reloaded = std::pair<QMap<QString, std::shared_ptr<const AudioData>>, QStringList>;
     auto* watcher = new QFutureWatcher<Reloaded>(this);
-    connect(watcher, &QFutureWatcher<Reloaded>::finished, this, [this, watcher, progress, preparing] {
+    connect(watcher, &QFutureWatcher<Reloaded>::finished, this, [this, watcher, progress, preparing, previous] {
         const auto [audio, errors] = watcher->result(); c_.busy = false; progress->deleteLater(); watcher->deleteLater();
-        if (!audio.isEmpty() && !c_.replaceAudio(audio)) return;
+        if (!audio.isEmpty() && !c_.replaceAudio(audio)) {
+            // The show could not use the reloaded audio; it keeps its sources, so the preference does too.
+            const auto reason = c_.status; c_.setAudioPreparation(previous);
+            c_.report("Audio sources were not changed: " + reason); return;
+        }
         if (!errors.isEmpty()) QMessageBox::warning(this, "Some audio kept its previous preparation", errors.join("\n\n"));
         else c_.report(QString("Audio sources set to %1; reloaded %2 audio sources.").arg(preparing ? "Prepared cache" : "Stream").arg(audio.size()));
     });
@@ -987,10 +992,15 @@ void MainWindow::outputSettings() {
     });
     connect(late, &QComboBox::activated, &dialog, [&] { c_.setLateAudio(static_cast<LateAudio>(late->currentData().toInt())); });
     connect(sources, &QComboBox::activated, &dialog, [&] {
-        const auto chosen = static_cast<AudioPreparation>(sources->currentData().toInt());
-        if (chosen == audioPreparation()) return;
-        if (!c_.canEdit()) { sources->setCurrentIndex(sources->findData(static_cast<int>(audioPreparation()))); return; }
-        c_.setAudioPreparation(chosen); reloadAudio();
+        const auto chosen = static_cast<AudioPreparation>(sources->currentData().toInt()), previous = audioPreparation();
+        // Choosing the current mode again retries sources still on the other one (after a failed reload).
+        const bool mismatched = std::any_of(c_.project.assets.cbegin(), c_.project.assets.cend(), [chosen](const MediaAsset& a) {
+            const auto* storage = a.audio ? a.audio->storage.get() : nullptr;
+            return storage && (chosen == AudioPreparation::Prepared ? storage->decodes() : !storage->readsSource());
+        });
+        if (chosen == previous && !mismatched) return;
+        if (!c_.canEdit()) { sources->setCurrentIndex(sources->findData(static_cast<int>(previous))); return; }
+        c_.setAudioPreparation(chosen); reloadAudio(previous);
     });
     auto* midiBox = new QGroupBox("MIDI · control lights, instruments or other apps"); auto* midiForm = new QFormLayout(midiBox); layout->addWidget(midiBox);
     auto* midiHint = new QLabel("Only needed for cues that send MIDI. Choose a destination once; selecting it connects immediately and Play reconnects it next time.");

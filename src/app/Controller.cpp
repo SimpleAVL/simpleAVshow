@@ -33,7 +33,7 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
         if (transport.audioReadFailed() && transport.state() != State::Stopped) {
             stopAll(); report("Audio source changed or could not be read. Playback is stopped; restore missing media and press Play to retry, or reopen the project to rebuild changed caches."); playbackProblem = status;
         }
-        if (midiWatch_.hasExpired(1000)) { midiWatch_.restart(); watchMidi(); }
+        if (midiWatch_.hasExpired(1000)) { midiWatch_.restart(); watchMidi(); closeIdleStreams(); }
         emit tick();
     }); timer_.start(); midiWatch_.start(); stall_.start();
     autosave_.setInterval(60000);

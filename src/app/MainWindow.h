@@ -88,8 +88,9 @@ private:
     void jumpToCue(bool forward);
     // Finds offline sources by file name below a chosen folder; after opening, asks first.
     void relinkMedia(bool afterOpening = false);
-    // Reloads the show's audio after the preparation preference changes.
-    void reloadAudio();
+    // Reloads the show's audio after the preparation preference changed from previous; a reload the
+    // show rejects restores it.
+    void reloadAudio(AudioPreparation previous);
     void placeAsset(QString id, int track, Frame time);
     void addText();
     void addMarker();
