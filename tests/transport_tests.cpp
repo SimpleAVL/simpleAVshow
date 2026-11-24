@@ -257,6 +257,17 @@ int main() {
             t.setLateAudio(LateAudio::Freeze); expect(t.lateAudio() == LateAudio::Freeze, "policy switches live");
             expect(!storage->callbackReads.load(), "gaps never read disk on callback");
         }},
+        {"the seek grace ends at its frame, not at the next callback", [] {
+            auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto p = show(false); p->duration = storage->length(); p->clips[0].duration = p->duration; p->clips[0].audio = diskAudio(storage);
+            Transport t; t.setLateAudio(LateAudio::Gap); t.configure(p); play(t);
+            storage->delay.store(300); // The sought block stays late for the whole test.
+            t.command({Action::Seek, frames(30 * 3600)}); std::vector<float> out(2048 * 2);
+            for (int i = 0; i < 5; ++i) checkedRender(t, out.data(), 2048, 2);
+            expect(t.audioGaps() == 0, "gaps inside the grace are not counted");
+            checkedRender(t, out.data(), 2048, 2); // Frames 10240-12287 straddle the 12000-frame grace.
+            expect(t.audioGaps() == 1, "a gap past the grace counts even mid-callback");
+        }},
         {"late sources count as waits or gaps only outside the seek grace", [] {
             for (const auto policy : {LateAudio::Freeze, LateAudio::Gap}) {
                 auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));

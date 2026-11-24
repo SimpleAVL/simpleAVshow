@@ -291,7 +291,8 @@ private:
     // Reading forward this far decodes through instead of seeking.
     static constexpr Frame continueWithin = 2 * sampleRate;
     struct Reader {
-        Reader(const QString& path, AudioDecoder::SeekPoints points) : decoder(path, std::move(points)) { ++registry().open; }
+        // Takes over the budget slot makeRoom reserved.
+        Reader(const QString& path, AudioDecoder::SeekPoints points) : decoder(path, std::move(points)) {}
         ~Reader() { --registry().open; }
         Reader(const Reader&) = delete; Reader& operator=(const Reader&) = delete;
         AudioDecoder decoder;
@@ -314,14 +315,19 @@ private:
         if (reader) return;
         if (readers_.size() < maxReaders) {
             makeRoom();
-            readers_.push_back(std::make_unique<Reader>(path_, points_)); reader = readers_.back().get();
+            std::unique_ptr<Reader> fresh;
+            try { fresh = std::make_unique<Reader>(path_, points_); }
+            catch (...) { --registry().open; throw; } // The reserved slot was never taken.
+            readers_.push_back(std::move(fresh)); reader = readers_.back().get();
             if (frame < continueWithin) return; // A fresh decoder starts at the beginning.
         } else reader = std::min_element(readers_.begin(), readers_.end(), [](const auto& a, const auto& b) { return a->used < b->used; })->get();
         reader->samples.clear(); reader->first = 0; reader->decoder.seek(frame);
     }
     // Called holding mutex_: closes least recently used decoders, here or in sources not reading
     // right now (their locks are only tried, so two sources making room cannot deadlock), until a
-    // new one fits the budget. If every other source is busy, the budget is exceeded for now.
+    // new one fits the budget, then reserves its slot before the registry lock is released, so
+    // concurrent opens cannot claim the same one. If every other source is busy, the budget is
+    // exceeded for now.
     void makeRoom() const {
         auto& r = registry();
         const std::lock_guard lock(r.mutex);
@@ -333,13 +339,14 @@ private:
                 for (std::size_t i = 0; i < storage->readers_.size(); ++i)
                     if (!owner || storage->readers_[i]->used < owner->readers_[index]->used) { owner = storage; index = i; }
             }
-            if (!owner) return;
+            if (!owner) break;
             owner->readers_.erase(owner->readers_.begin() + static_cast<std::ptrdiff_t>(index));
         }
+        ++r.open;
     }
 };
 
-std::atomic<AudioPreparation> preparation{AudioPreparation::Stream};
+std::atomic<AudioPreparation> preference{AudioPreparation::Stream};
 void addPeaks(std::vector<float>& peaks, Frame first, const std::vector<float>& samples) {
     const auto count = static_cast<Frame>(samples.size() / 2);
     peaks.resize(static_cast<std::size_t>((first + count + AudioData::peakStride - 1) / AudioData::peakStride), 0.f);
@@ -348,11 +355,11 @@ void addPeaks(std::vector<float>& peaks, Frame first, const std::vector<float>& 
         peak = std::max(peak, std::max(std::abs(samples[i * 2]), std::abs(samples[i * 2 + 1])));
     }
 }
-std::shared_ptr<const AudioData> loadAudio(const QString& path) {
+std::shared_ptr<const AudioData> loadAudio(const QString& path, AudioPreparation preparation) {
     // The source is hashed before the decoder opens it: a replacement in between changes the stamp,
     // which saving the summary or publishing the cache checks, instead of filing the old decode
     // under the replacement's content key.
-    const bool streaming = preparation.load() == AudioPreparation::Stream;
+    const bool streaming = preparation == AudioPreparation::Stream;
     std::optional<detail::StreamSummary> summary; std::optional<detail::AudioCache> prepared;
     if (streaming) summary.emplace(path); else prepared.emplace(path);
     AudioDecoder decoder(path);
@@ -361,7 +368,8 @@ std::shared_ptr<const AudioData> loadAudio(const QString& path) {
     if (streaming) {
         // One decode pass finds the exact length and waveform; playback decodes again on demand.
         auto known = summary->reuse(data->mono);
-        if (!known) {
+        if (known) summary->verify();
+        else {
             known = detail::AudioSummary{0, data->mono, {}, {}};
             decoder.record();
             while (decoder.next(first, samples)) { addPeaks(known->peaks, first, samples); known->length = first + static_cast<Frame>(samples.size() / 2); }
@@ -374,7 +382,7 @@ std::shared_ptr<const AudioData> loadAudio(const QString& path) {
             std::make_shared<const std::vector<detail::SeekPoint>>(std::move(known->seekPoints)), summary->version());
         return data;
     }
-    if (auto reused = prepared->reuse(data->mono)) return reused;
+    if (auto reused = prepared->reuse(data->mono)) { prepared->verify(); return reused; }
     QTemporaryFile cache(prepared->temporaryTemplate());
     if (!cache.open()) throw std::runtime_error("Cannot create audio cache: " + cache.errorString().toStdString());
     Frame total = 0;
@@ -398,10 +406,11 @@ std::shared_ptr<const AudioData> loadAudio(const QString& path) {
 }
 }
 
-void setAudioPreparation(AudioPreparation value) noexcept { preparation.store(value); }
-AudioPreparation audioPreparation() noexcept { return preparation.load(); }
+void setAudioPreparation(AudioPreparation value) noexcept { preference.store(value); }
+AudioPreparation audioPreparation() noexcept { return preference.load(); }
 
-MediaAsset loadMedia(const QString& path) {
+MediaAsset loadMedia(const QString& path) { return loadMedia(path, audioPreparation()); }
+MediaAsset loadMedia(const QString& path, AudioPreparation preparation) {
     if (!QFileInfo(path).isFile()) throw std::runtime_error("Media file is missing: " + path.toStdString());
     MediaAsset asset;
     asset.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -434,7 +443,7 @@ MediaAsset loadMedia(const QString& path) {
     if (av_find_best_stream(input.format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0) >= 0) {
         if (asset.video && (!std::isfinite(asset.duration) || asset.duration <= 0 || asset.duration > maxSeconds))
             throw std::runtime_error("Media needs a finite, representable duration");
-        asset.audio = loadAudio(asset.path);
+        asset.audio = loadAudio(asset.path, preparation);
         if (!asset.video) asset.duration = seconds(asset.audio->length());
     }
     if (!asset.video && !asset.audio) throw std::runtime_error("File contains no supported audio, video, or still image");

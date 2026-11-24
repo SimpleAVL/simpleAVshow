@@ -181,13 +181,14 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
     if (!show_) return;
     Command command;
     while (commands_.pop(command)) apply(command);
-    float peak = 0; bool waiting = false, gapped = false;
-    const bool gap = lateAudio_.load(std::memory_order_relaxed) == LateAudio::Gap, counted = sinceSeek_ >= seekGrace;
+    float peak = 0; bool waiting = false, gapCounted = false;
+    const bool gap = lateAudio_.load(std::memory_order_relaxed) == LateAudio::Gap;
     for (unsigned f = 0; f < count; ++f) {
         if (waiting && releasing_.empty()) break; // Remaining device samples stay silent; retry at the same show/source time.
         float* const frame = output ? output + static_cast<std::size_t>(f) * channels : nullptr;
         if (!waiting) {
             const bool advancingAtBoundary = state_ == State::Playing;
+            bool gapped = false; // This frame left a late voice silent.
             if (state_ == State::Playing) {
                 while (nextStart_ < starts_.size() && show_->clips[starts_[nextStart_]].start <= position_) {
                     const auto i = starts_[nextStart_++];
@@ -248,7 +249,10 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 voice.missed = false;
                 voice.at = source; voice.ready = true;
             }
+            // Health counters skip misses within seekGrace device frames of a seek, judged at the missed frame.
+            const bool counted = sinceSeek_ + static_cast<Frame>(f) >= seekGrace;
             if (!ready) { if (counted) bufferWaits_.fetch_add(1, std::memory_order_relaxed); waiting = true; }
+            gapCounted = gapCounted || (gapped && counted);
             // Voices that stop sounding fade out. A miss fades every voice; normal voices fade back in once ready.
             for (const auto i : active_) if (waiting || !voices_[i].ready) cut(i);
             if (!waiting) for (const auto i : active_) {
@@ -295,7 +299,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
         }
         if (!waiting && state_ == State::Playing) ++position_;
     }
-    if (gapped && counted) audioGaps_.fetch_add(1, std::memory_order_relaxed);
+    if (gapCounted) audioGaps_.fetch_add(1, std::memory_order_relaxed);
     sinceSeek_ = std::min(seekGrace, sinceSeek_ + static_cast<Frame>(count));
     publish(peak);
 }

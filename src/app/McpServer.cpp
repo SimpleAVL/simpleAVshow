@@ -243,9 +243,9 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& a) {
             importError_ = prepared.error; imported_ = prepared.assets; importState_ = importError_.isEmpty() ? "ready" : "failed";
             c_.report(importState_ == "ready" ? "Agent media is prepared and waiting to be added to the show." : "Agent media preparation failed: " + importError_);
         });
-        watcher->setFuture(QtConcurrent::run([paths] {
+        watcher->setFuture(QtConcurrent::run([paths, preparation = importPreparation_] {
             Prepared result;
-            try { for (const auto& path : paths) result.assets.push_back(loadMedia(path)); }
+            try { for (const auto& path : paths) result.assets.push_back(loadMedia(path, preparation)); }
             catch (const std::exception& e) { result.error = QString::fromUtf8(e.what()); result.assets.clear(); }
             return result;
         }));

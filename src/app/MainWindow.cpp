@@ -810,11 +810,11 @@ void MainWindow::reloadAudio() {
         else c_.report(preparing ? QString("Prepared %1 audio sources. Playback reads cached samples.").arg(audio.size())
                                  : QString("%1 audio sources now stream from their media files.").arg(audio.size()));
     });
-    watcher->setFuture(QtConcurrent::run([paths]() {
+    watcher->setFuture(QtConcurrent::run([paths, preparation = audioPreparation()]() {
         Reloaded result;
         for (const auto& path : paths) {
             try {
-                auto audio = loadMedia(path).audio;
+                auto audio = loadMedia(path, preparation).audio;
                 if (!audio) throw std::runtime_error("The file no longer contains audio");
                 result.first.insert(path, std::move(audio));
             }
@@ -974,8 +974,9 @@ void MainWindow::outputSettings() {
     clearCache->setToolTip("Removes prepared audio and waveform files the open show is not using. Other shows prepare or measure their audio again when opened.");
     connect(clearCache, &QPushButton::clicked, &dialog, [this, showCacheSize] {
         const auto before = detail::audioCacheBytes(); detail::trimAudioCache(0); const auto after = detail::audioCacheBytes();
+        // What remains is in use (by this show or another running instance) or the small source index.
         c_.report("Freed " + QLocale().formattedDataSize(std::max<qint64>(0, before - after)) + " of audio cache." +
-            (after > 0 ? " " + QLocale().formattedDataSize(after) + " stays in use by the open show." : QString()));
+            (after > 0 ? " " + QLocale().formattedDataSize(after) + " remains in use." : QString()));
         showCacheSize();
     });
     connect(late, &QComboBox::activated, &dialog, [&] { c_.setLateAudio(static_cast<LateAudio>(late->currentData().toInt())); });

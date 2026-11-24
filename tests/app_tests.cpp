@@ -1638,7 +1638,8 @@ private slots:
             transport.render(out.data(), block, 4); position += block;
         };
         // Gaps right after the seek are expected and uncounted; a source still late after seekGrace counts.
-        const unsigned graceBlocks = static_cast<unsigned>((Transport::seekGrace + block - 1) / block);
+        // The block holding frame seekGrace is the first that counts.
+        const unsigned graceBlocks = static_cast<unsigned>(Transport::seekGrace / block);
         for (unsigned i = 0; i < graceBlocks + 6; ++i) {
             render(); QCOMPARE(transport.position(), position); QCOMPARE(transport.audioGaps(), i + 1 > graceBlocks ? i + 1 - graceBlocks : 0u);
             for (unsigned f = 0; f < block; ++f) {
@@ -1741,6 +1742,12 @@ private slots:
         for (int i = 0; i < 200 && transport.position() == show->clips[150].start; ++i) { QTest::qWait(2); transport.render(out.data(), 512, 2); }
         QVERIFY(!transport.audioReadFailed()); QVERIFY(transport.position() > show->clips[150].start);
 #endif
+    }
+    void explicitPreparationOverridesThePreference() {
+        // A batch prepares as it was asked to, even if the operator changes the preference meanwhile.
+        QTemporaryDir dir; const auto path = dir.filePath("batch.wav"); writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 + 13));
+        setAudioPreparation(AudioPreparation::Stream); QVERIFY(!loadMedia(path, AudioPreparation::Prepared).audio->storage->decodes());
+        setAudioPreparation(AudioPreparation::Prepared); QVERIFY(loadMedia(path, AudioPreparation::Stream).audio->storage->decodes());
     }
     void damagedStreamSidecarIsRejected() {
         setAudioPreparation(AudioPreparation::Stream);

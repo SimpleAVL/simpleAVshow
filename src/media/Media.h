@@ -25,7 +25,9 @@ struct MediaAsset {
 enum class AudioPreparation { Stream, Prepared };
 void setAudioPreparation(AudioPreparation preparation) noexcept;
 AudioPreparation audioPreparation() noexcept;
+// Prepares audio for the current preference, or for one captured when a batch began.
 MediaAsset loadMedia(const QString& path);
+MediaAsset loadMedia(const QString& path, AudioPreparation preparation);
 
 // One worker per video clip. No decoding or disk access on the audio thread.
 // Corrupt packets and transient read/seek failures are skipped and counted; only

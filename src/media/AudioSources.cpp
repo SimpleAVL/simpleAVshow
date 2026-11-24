@@ -137,6 +137,13 @@ QByteArray sourceHash(const QString& path) {
     return hash;
 }
 
+// A source whose stamp differs from the one taken before hashing may no longer match its hash.
+void unchangedSince(const QString& source, const QByteArray& before) {
+    const auto after = stamp(source);
+    if (after.key() == before) return;
+    updateIndex(after, {}); // An indexed hash may predate the rewrite.
+    fail("Audio source changed during preparation; import it again");
+}
 QByteArray peaksHash(const std::vector<float>& peaks) {
     QCryptographicHash hash(QCryptographicHash::Sha256);
     hash.addData(QByteArrayView(reinterpret_cast<const char*>(peaks.data()), static_cast<qsizetype>(peaks.size() * sizeof(float))));
@@ -387,12 +394,9 @@ std::optional<AudioSummary> StreamSummary::reuse(bool mono) const {
     touch(path_); // Least-recently-used trimming.
     return summary;
 }
+void StreamSummary::verify() const { unchangedSince(source_, stamp_); }
 void StreamSummary::save(const AudioSummary& summary) const {
-    const auto after = stamp(source_);
-    if (stamp_ != after.key()) {
-        updateIndex(after, {}); // An indexed hash may predate the rewrite.
-        fail("Audio source changed during preparation; import it again");
-    }
+    verify();
     if (!QDir().mkpath(audioCacheDirectory())) return;
     QByteArray bytes(streamMagic, 8); bytes += revisionId();
     char number[8]; qToLittleEndian<qint64>(summary.length, number); bytes.append(number, 8); bytes.append(char(summary.mono));
@@ -408,7 +412,7 @@ void StreamSummary::save(const AudioSummary& summary) const {
     trimAudioCache();
 }
 
-AudioCache::AudioCache(const QString& source) : source_(source), sourceHash_(sourceHash(source)) {
+AudioCache::AudioCache(const QString& source) : source_(source), stamp_(stamp(source).key()), sourceHash_(sourceHash(source)) {
     // Content identity also survives moved media and fresh package extraction paths.
     const auto key = QString::fromLatin1(QCryptographicHash::hash(decoderRevision() + sourceHash_, QCryptographicHash::Sha256).toHex());
     const QDir directory(audioCacheDirectory());
@@ -419,6 +423,7 @@ AudioCache::AudioCache(const QString& source) : source_(source), sourceHash_(sou
     if (!lock_->tryLock(30000)) fail("Audio preparation is already in progress; try opening the project again");
 }
 AudioCache::~AudioCache() = default;
+void AudioCache::verify() const { unchangedSince(source_, stamp_); }
 QString AudioCache::temporaryTemplate() const { return audioCacheDirectory() + "/preparing-XXXXXX"; }
 
 std::shared_ptr<const AudioData> AudioCache::reuse(bool mono) const {

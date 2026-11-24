@@ -49,7 +49,9 @@ public:
     // The source as hashed; streamed reads compare against it.
     const FileVersion& version() const noexcept { return version_; }
     std::optional<AudioSummary> reuse(bool mono) const;
-    // Throws if the source changed while it was decoded; saving itself is best effort.
+    // Throws if the source changed since construction; check before accepting a reused summary.
+    void verify() const;
+    // Verifies, then saves (best effort).
     void save(const AudioSummary& summary) const;
 private:
     QString source_, path_;
@@ -59,14 +61,17 @@ private:
 
 class AudioCache {
 public:
+    // Hashes the source; like StreamSummary, construct it before opening the source to decode.
     explicit AudioCache(const QString& source);
     ~AudioCache();
     std::shared_ptr<const AudioData> reuse(bool mono) const;
+    // Throws if the source changed since construction; check before accepting a reused cache.
+    void verify() const;
     QString temporaryTemplate() const;
     std::shared_ptr<const AudioStorage> publish(QTemporaryFile& file, const AudioData& data, Frame length) const;
 private:
     QString source_, pcm_, metadata_;
-    QByteArray sourceHash_;
+    QByteArray stamp_, sourceHash_; // The stamp is taken before hashing.
     std::unique_ptr<QLockFile> lock_;
 };
 }
