@@ -403,6 +403,29 @@ int main() {
             for (auto shape : {CurveShape::Curve, CurveShape::SCurve}) {
                 Envelope straight{{{0, 0, shape, 0}, {10, 1}}}; near(straight.at(3, 1), .3, "zero bend is linear");
             }
+        }},
+        {"same-batch stop suppresses hold-resume MIDI across domains without dropping valid seeks", [] {
+            auto p = show(false); p->duration = 2000;
+            p->markers.push_back({"hold", "Hold", 100, true, MidiTiming::Resume, {0x90, 60, 100}});
+            Transport t; t.configure(p); play(t);
+            std::vector<float> out(200 * 2);
+            checkedRender(t, out.data(), 150, 2);
+            expect(t.state() == State::Held && t.position() == 100, "reaches hold marker");
+            // Cross-domain: Operator Play followed by valid ChatAgent StopAll in the same batch must not emit resume MIDI.
+            const auto chatEp = t.chatAgentEpoch();
+            t.command({Action::Play, 0, CommandSource::Operator, 0});
+            t.command({Action::StopAll, 0, CommandSource::ChatAgent, chatEp});
+            checkedRender(t, out.data(), 64, 2);
+            MidiEvent ev;
+            expect(t.state() == State::Stopped, "same-batch stop leaves transport stopped");
+            expect(!t.takeMidi(ev), "same-batch stop suppresses hold-resume MIDI");
+            // Operator StopAll after backlogged seeks coalesces to the final valid seek position.
+            t.command({Action::Seek, 200, CommandSource::Operator, 0});
+            t.command({Action::Seek, 500, CommandSource::Operator, 0});
+            t.command({Action::Seek, 900, CommandSource::ChatAgent, chatEp});
+            t.command({Action::StopAll, 0, CommandSource::Operator, 0});
+            checkedRender(t, out.data(), 64, 2);
+            expect(t.state() == State::Stopped && t.position() == 900, "operator stop preserves final valid seek position");
         }}
     };
     for (const auto& [name, test] : tests) {

@@ -142,7 +142,7 @@ void Transport::dispatch(int marker, CommandSource source, std::uint64_t sourceE
         !midi_.push({marker, position_, epoch_.load(), source, sourceEpoch}))
         overflow_.store(true);
 }
-void Transport::apply(Command command) noexcept {
+void Transport::apply(Command command, PendingResumeMidi& pendingResume) noexcept {
     if (!isSourceValid(command.source, command.sourceEpoch)) {
         ++applied_;
         return;
@@ -154,26 +154,18 @@ void Transport::apply(Command command) noexcept {
         const int prevHeldMarker = heldMarker_;
         const bool wasHeld = state_ == State::Held;
         state_ = State::Playing; heldMarker_ = -1;
-        // Re-verify agent authorization after state transition before dispatching resume MIDI
-        // so a Show-mode entry or Disconnect cannot be bypassed by callback preemption.
+        // Re-verify agent authorization after state transition so a Show-mode entry or Disconnect
+        // cannot be bypassed by callback preemption. Defer hold-resume MIDI dispatch until the
+        // command batch settles so any valid StopAll or Seek later in the same batch suppresses it.
         if (command.source != CommandSource::Operator && !isSourceValid(command.source, command.sourceEpoch)) {
             state_ = prevState; heldMarker_ = prevHeldMarker;
             epoch_.fetch_add(1);
             break;
         }
         if (wasHeld) {
-            // Only the consumed group at this hold can send resume messages.
             auto begin = nextMarker_;
             while (begin > 0 && show_->markers[markers_[begin - 1]].time == position_) --begin;
-            for (auto m = begin; m < nextMarker_; ++m) {
-                const auto i = markers_[m]; const auto& marker = show_->markers[i];
-                if (marker.hold && marker.timing == MidiTiming::Resume)
-                    dispatch(static_cast<int>(i), command.source, command.sourceEpoch);
-            }
-        }
-        if (command.source != CommandSource::Operator && !isSourceValid(command.source, command.sourceEpoch)) {
-            state_ = prevState; heldMarker_ = prevHeldMarker;
-            epoch_.fetch_add(1);
+            pendingResume = {true, begin, nextMarker_, command.source, command.sourceEpoch, prevState, prevHeldMarker};
         }
         break;
     }
@@ -181,6 +173,7 @@ void Transport::apply(Command command) noexcept {
         if (state_ == State::Playing) state_ = State::Paused;
         break;
     case Action::Seek: {
+        pendingResume.active = false;
         const Frame next = std::clamp(command.position, Frame{0}, show_->duration);
         for (std::size_t i = 0; i < show_->clips.size(); ++i) {
             if (!show_->clips[i].contains(next)) { cut(i); voices_[i] = {}; }
@@ -192,6 +185,7 @@ void Transport::apply(Command command) noexcept {
         break;
     }
     case Action::StopAll:
+        pendingResume.active = false;
         applyStopAll();
         break;
     }
@@ -256,6 +250,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
         urgentStop_.store(false, std::memory_order_release);
     };
 
+    PendingResumeMidi pendingResume;
     if (urgent) {
         applyUrgentStop(0);
     } else {
@@ -296,6 +291,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
         };
         for (std::size_t i = startIndex; i < countQueued; ++i) {
             if (urgentStop_.load(std::memory_order_acquire)) {
+                pendingResume.active = false;
                 applyUrgentStop(i);
                 break;
             }
@@ -314,7 +310,31 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 ++applied_;
                 continue;
             }
-            apply(c);
+            apply(c, pendingResume);
+        }
+    }
+    if (pendingResume.active) {
+        if (urgentStop_.load(std::memory_order_acquire)) {
+            applyUrgentStop(countQueued);
+        } else if (pendingResume.source != CommandSource::Operator &&
+                   !isSourceValid(pendingResume.source, pendingResume.sourceEpoch)) {
+            state_ = pendingResume.prevState;
+            heldMarker_ = pendingResume.prevHeldMarker;
+            epoch_.fetch_add(1);
+        } else if (state_ == State::Playing || state_ == State::Paused) {
+            // Only the consumed group at this hold can send resume messages, and only after
+            // confirming no StopAll or Seek later in the same batch superseded the resume.
+            for (auto m = pendingResume.begin; m < pendingResume.end; ++m) {
+                const auto i = markers_[m]; const auto& marker = show_->markers[i];
+                if (marker.hold && marker.timing == MidiTiming::Resume)
+                    dispatch(static_cast<int>(i), pendingResume.source, pendingResume.sourceEpoch);
+            }
+            if (pendingResume.source != CommandSource::Operator &&
+                !isSourceValid(pendingResume.source, pendingResume.sourceEpoch)) {
+                state_ = pendingResume.prevState;
+                heldMarker_ = pendingResume.prevHeldMarker;
+                epoch_.fetch_add(1);
+            }
         }
     }
     float peak = 0; bool waiting = false;

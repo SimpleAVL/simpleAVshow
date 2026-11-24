@@ -113,7 +113,15 @@ private:
         if (command.source == CommandSource::ExternalAgent) return command.sourceEpoch == validExt;
         return command.sourceEpoch == validChat;
     }
-    void apply(Command command) noexcept;
+    struct PendingResumeMidi {
+        bool active = false;
+        std::size_t begin = 0, end = 0;
+        CommandSource source = CommandSource::Operator;
+        std::uint64_t sourceEpoch = 0;
+        State prevState = State::Held;
+        int prevHeldMarker = -1;
+    };
+    void apply(Command command, PendingResumeMidi& pendingResume) noexcept;
     void applyStopAll() noexcept;
     void dispatch(int marker, CommandSource source = CommandSource::Operator, std::uint64_t sourceEpoch = 0) noexcept;
     void publish(float peak) noexcept;
