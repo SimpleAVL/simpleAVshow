@@ -21,8 +21,23 @@ QString audioCacheDirectory();
 // 260-character limit when the path needs it.
 std::wstring windowsPath(const QString& path);
 #endif
+// Volume and file number; 0 where unknown. A share may report them only some of the time, and some
+// volumes have no stable identifier (their device number changes on every mount).
 using FileIdentity = std::pair<quint64, quint64>;
 FileIdentity fileIdentity(const QString& path);
+// Whether two identities can belong to the same file: unknown parts match anything.
+inline bool sameIdentity(const FileIdentity& a, const FileIdentity& b) {
+    if (a == FileIdentity{} || b == FileIdentity{}) return true;
+    return a.second == b.second && (!a.first || !b.first || a.first == b.first);
+}
+// Whether one side knows a part the other does not, so a match says less than usual.
+inline bool identityUncertain(const FileIdentity& a, const FileIdentity& b) {
+    return (a == FileIdentity{}) != (b == FileIdentity{}) || !a.first != !b.first;
+}
+#ifndef Q_OS_WIN
+// The stable identifier of the volume holding an open file (macOS: the file system UUID; 0 if none).
+quint64 volumeId(int descriptor);
+#endif
 // Whether a file is at path. A file deleted while another handle has it open keeps its name until that
 // handle closes wherever deletion is not immediate (Windows on FAT/exFAT drives, older Windows, network
 // shares): it is not present. Other open failures (a share briefly unreachable) count as present, so
@@ -38,8 +53,7 @@ struct FileVersion {
     // The same file as other: size and time match, and identity too wherever both sides know it
     // (a share may report it only some of the time).
     bool sameAs(const FileVersion& other) const {
-        return size == other.size && modified == other.modified &&
-            (identity == FileIdentity{} || other.identity == FileIdentity{} || identity == other.identity);
+        return size == other.size && modified == other.modified && sameIdentity(identity, other.identity);
     }
 };
 FileVersion fileVersion(const QString& path);

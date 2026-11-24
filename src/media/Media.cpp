@@ -88,7 +88,7 @@ public:
 #else
         struct stat info{};
         if (::fstat(fd_, &info)) return {};
-        return {detail::FileIdentity{0, static_cast<quint64>(info.st_ino)}, static_cast<qint64>(info.st_size)}; // Inode alone, as detail::probe.
+        return {detail::FileIdentity{detail::volumeId(fd_), static_cast<quint64>(info.st_ino)}, static_cast<qint64>(info.st_size)}; // As detail::probe.
 #endif
     }
 private:
@@ -168,7 +168,7 @@ struct Input {
             if (expected) {
                 const auto now = file->opened();
                 if ((now.size && *now.size != expected->size) ||
-                    (now.identity && *now.identity != detail::FileIdentity{} && expected->identity != detail::FileIdentity{} && *now.identity != expected->identity))
+                    (now.identity && !detail::sameIdentity(*now.identity, expected->identity)))
                     throw AudioSourceChanged("Audio source changed; reopen the project: " + path.toStdString());
             }
             detected = identify(path, file->io());
@@ -467,8 +467,10 @@ public:
             void run() noexcept {
                 try {
                     retired.clear();
-                    std::erase_if(open, [](const Open& entry) { return detail::present(entry.path); });
+                    // Each missing source is released as soon as its check returns, before a slower one
+                    // (a stalled share) is looked at.
                     for (const auto& entry : open) {
+                        if (detail::present(entry.path)) continue;
                         std::vector<std::unique_ptr<Reader>> gone;
                         auto& r = registry(); const std::lock_guard lock(r.mutex);
                         // Only the same registration, not read since: otherwise the file came back.

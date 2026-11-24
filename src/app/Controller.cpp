@@ -293,7 +293,7 @@ QStringList Controller::preflight() {
     // With Prepared chosen, a streaming source is one that could not be prepared: say which, and how to retry.
     if (!streaming.isEmpty())
         problems << (audioPreparation() == AudioPreparation::Prepared
-            ? "Audio streams from the original media files for " + streaming.join(", ") + ": preparing them failed. Fix the files and reopen the project to prepare them again."
+            ? "Audio streams from the original media files for " + streaming.join(", ") + ": preparing them failed. Fix the cause, then choose Prepared audio sources in Outputs again to retry; they keep streaming meanwhile."
             : QString("Audio streams from the original media files. For the steadiest playback, choose Prepared audio sources in Outputs."));
     for (const auto& missing : missingMedia()) problems << "Media is missing: " + missing;
     if (needsMidi() && !midi.connected()) {

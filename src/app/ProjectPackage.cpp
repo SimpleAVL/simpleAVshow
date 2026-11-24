@@ -12,11 +12,15 @@
 #include <QSaveFile>
 #include <QSet>
 #include <QStorageInfo>
+#include <QThreadPool>
 #include <cerrno>
 #include <cstdio>
 #include <limits>
+#include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <stdexcept>
 
 namespace sav {
@@ -133,11 +137,22 @@ struct PackageDirectory : QTemporaryDir {
 };
 }
 
-void retryPackageRemovals() {
-    std::vector<QString> paths;
-    { const std::lock_guard guard(pendingMutex); if (pendingRemovals.empty()) return; paths.swap(pendingRemovals); }
-    std::erase_if(paths, [](const QString& path) { QDir dir(path); return !dir.exists() || dir.removeRecursively(); });
-    const std::lock_guard guard(pendingMutex); pendingRemovals.insert(pendingRemovals.end(), paths.begin(), paths.end());
+void retryPackageRemovals(bool wait) {
+    // Removal can stall (a redirected temporary folder), so it runs on a worker, one retry at a time.
+    static std::atomic<bool> retrying{false};
+    { const std::lock_guard guard(pendingMutex); if (pendingRemovals.empty()) return; }
+    while (retrying.exchange(true)) { if (!wait) return; std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+    auto retry = [] {
+        std::vector<QString> paths;
+        { const std::lock_guard guard(pendingMutex); paths.swap(pendingRemovals); }
+        try {
+            std::erase_if(paths, [](const QString& path) { QDir dir(path); return !dir.exists() || dir.removeRecursively(); });
+            const std::lock_guard guard(pendingMutex); pendingRemovals.insert(pendingRemovals.end(), paths.begin(), paths.end());
+        } catch (...) {} // Out of memory: the startup sweep removes what is left.
+        retrying = false;
+    };
+    if (wait) retry();
+    else if (!QThreadPool::globalInstance()->tryStart(retry)) retrying = false; // Busy: the next tick tries again.
 }
 
 void removeStalePackageDirectories() {

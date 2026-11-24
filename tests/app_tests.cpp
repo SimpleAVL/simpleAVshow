@@ -1932,6 +1932,23 @@ private slots:
             QVERIFY2(!QFileInfo::exists(extraction), qPrintable(extraction));
         }
     }
+    void fileIdentityComparesWhatBothSidesKnow() {
+        // Unknown parts (a share not reporting them this time) match anything; known parts must agree.
+        using detail::FileIdentity;
+        QVERIFY(detail::sameIdentity(FileIdentity{}, FileIdentity{7, 5}));
+        QVERIFY(detail::sameIdentity(FileIdentity{0, 5}, FileIdentity{7, 5}));
+        QVERIFY(!detail::sameIdentity(FileIdentity{7, 5}, FileIdentity{8, 5})); // Another stick, same file number.
+        QVERIFY(!detail::sameIdentity(FileIdentity{7, 5}, FileIdentity{7, 6}));
+        QVERIFY(detail::identityUncertain(FileIdentity{}, FileIdentity{7, 5}));
+        QVERIFY(detail::identityUncertain(FileIdentity{0, 5}, FileIdentity{7, 5}));
+        QVERIFY(!detail::identityUncertain(FileIdentity{7, 5}, FileIdentity{7, 5}));
+        QVERIFY(!detail::identityUncertain(FileIdentity{0, 5}, FileIdentity{0, 5}));
+#ifdef Q_OS_MACOS
+        // Local volumes report a stable identifier, which tells two sticks mounted at one path apart.
+        QTemporaryDir dir; const auto path = dir.filePath("id.wav"); writeBytes(path, "x");
+        QVERIFY(detail::fileIdentity(path).first != 0);
+#endif
+    }
     void extractionStillInUseIsRemovedLater() {
         // A decoder can still be closing an extracted file on the background sweep when its project
         // closes; Windows then cannot remove the folder, so removal is retried once the file is free.
@@ -1942,7 +1959,7 @@ private slots:
         auto opened = readProject(package); const auto extraction = opened.packageDirectory->path();
         QFile held(opened.assets.first().path); QVERIFY(held.open(QIODevice::ReadOnly));
         opened = Project{};
-        held.close(); retryPackageRemovals();
+        held.close(); retryPackageRemovals(true);
         QVERIFY2(!QFileInfo::exists(extraction), qPrintable(extraction));
     }
     void idleStreamDecodersCloseTheirFiles() {

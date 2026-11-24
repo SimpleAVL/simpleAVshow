@@ -39,7 +39,8 @@ void materializeProjectMedia(Project& project, const QString& directory);
 // Removes package extractions abandoned by crashed instances; call once at startup.
 void removeStalePackageDirectories();
 // Retries removing extractions that were still in use when their project closed; call periodically.
-void retryPackageRemovals();
+// The retry runs on a worker unless wait (tests).
+void retryPackageRemovals(bool wait = false);
 QString timecode(Frame position, double fps = 24);
 // Whole seconds remaining, rounded up: M:SS, or H:MM:SS from an hour.
 QString countdown(Frame duration);

@@ -23,6 +23,14 @@
 #include <windows.h>
 #else
 #include <sys/stat.h>
+#ifdef Q_OS_MACOS
+#include <sys/attr.h>
+#include <sys/mount.h>
+#include <unistd.h>
+#include <uuid/uuid.h>
+#else
+#include <sys/vfs.h>
+#endif
 #endif
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -38,6 +46,22 @@ std::wstring windowsPath(const QString& path) {
     if (native.size() >= MAX_PATH && !native.startsWith(QStringLiteral("\\\\?\\")))
         native = native.startsWith(QStringLiteral("\\\\")) ? QStringLiteral("\\\\?\\UNC\\") + native.mid(2) : QStringLiteral("\\\\?\\") + native;
     return native.toStdWString();
+}
+#endif
+#ifndef Q_OS_WIN
+namespace {
+quint64 volumeKey([[maybe_unused]] const struct statfs& volume) {
+#ifdef Q_OS_MACOS
+    // Volume attributes are only reported for the volume's root.
+    attrlist request{}; request.bitmapcount = ATTR_BIT_MAP_COUNT; request.volattr = ATTR_VOL_INFO | ATTR_VOL_UUID;
+    struct __attribute__((aligned(4), packed)) { u_int32_t length; uuid_t uuid; } reply{};
+    if (::getattrlist(volume.f_mntonname, &request, &reply, sizeof reply, 0) || reply.length < sizeof reply) return 0;
+    quint64 high = 0, low = 0; std::memcpy(&high, reply.uuid, 8); std::memcpy(&low, reply.uuid + 8, 8);
+    return high ^ low;
+#else
+    return 0;
+#endif
+}
 }
 #endif
 Probe probe(const QString& path) {
@@ -56,13 +80,19 @@ Probe probe(const QString& path) {
     return {true, ok ? FileIdentity{info.dwVolumeSerialNumber, (quint64{info.nFileIndexHigh} << 32) | info.nFileIndexLow} : FileIdentity{}};
 #else
     // Only definite absence counts; other failures (a mount briefly unreachable) are retried by reads.
+    const auto native = QFile::encodeName(path);
     struct stat info{};
-    if (::stat(QFile::encodeName(path).constData(), &info)) return {errno != ENOENT && errno != ENOTDIR, {}};
-    // The inode alone: st_dev is renumbered when a share remounts or a stick is plugged in again
-    // (macOS), which would make the same file look replaced.
-    return {S_ISREG(info.st_mode), {0, static_cast<quint64>(info.st_ino)}};
+    if (::stat(native.constData(), &info)) return {errno != ENOENT && errno != ENOTDIR, {}};
+    // Not st_dev: it is renumbered when a share remounts or a stick is plugged in again, which would make
+    // the same file look replaced. The volume's own identifier tells two sticks apart (FAT derives file
+    // numbers from cluster positions, which two sticks can share).
+    struct statfs volume{};
+    return {S_ISREG(info.st_mode), {::statfs(native.constData(), &volume) ? 0 : volumeKey(volume), static_cast<quint64>(info.st_ino)}};
 #endif
 }
+#ifndef Q_OS_WIN
+quint64 volumeId(int descriptor) { struct statfs volume{}; return ::fstatfs(descriptor, &volume) ? 0 : volumeKey(volume); }
+#endif
 FileIdentity fileIdentity(const QString& path) { return probe(path).identity; }
 bool present(const QString& path) { return probe(path).present; }
 FileVersion fileVersion(const QString& path) {
@@ -159,9 +189,14 @@ QByteArray sourceHash(const QString& path) {
 }
 
 // A source whose stamp differs from the one taken before hashing may no longer match its hash.
-void unchangedSince(const QString& source, const QByteArray& before) {
+void unchangedSince(const QString& source, const QByteArray& before, const FileVersion& version, const QByteArray& hash) {
     const auto after = stamp(source);
     if (after.key() == before) return;
+    // The same path, size and time, but one lookup could not see the identity the other did (a share
+    // reporting it intermittently): the content decides instead of rejecting an unchanged file.
+    if (before == Stamp{after.path, version.size, version.modified, version.identity}.key() && after.size == version.size &&
+        after.modified == version.modified && sameIdentity(after.identity, version.identity) &&
+        identityUncertain(after.identity, version.identity) && fileHash(source) == hash) return;
     updateIndex(after, {}); // An indexed hash may predate the rewrite.
     fail("Audio source changed during preparation; import it again");
 }
@@ -420,7 +455,7 @@ std::optional<AudioSummary> StreamSummary::reuse(bool mono) const {
     return summary;
 }
 void StreamSummary::verify() const {
-    unchangedSince(source_, stamp_);
+    unchangedSince(source_, stamp_, version_, sourceHash_);
     // A recently modified file can be rewritten within its timestamp step after it was hashed.
     if (recent_) contentUnchanged();
 }
@@ -464,7 +499,7 @@ AudioCache::AudioCache(const QString& source, const QByteArray& format) : source
     if (!lock_->tryLock(30000)) fail("Audio preparation is already in progress; try opening the project again");
 }
 AudioCache::~AudioCache() = default;
-void AudioCache::verify() const { unchangedSince(source_, stamp_); }
+void AudioCache::verify() const { unchangedSince(source_, stamp_, version_, sourceHash_); }
 QString AudioCache::temporaryTemplate() const { return audioCacheDirectory() + "/preparing-XXXXXX"; }
 
 std::shared_ptr<const AudioData> AudioCache::reuse(bool mono) const {
