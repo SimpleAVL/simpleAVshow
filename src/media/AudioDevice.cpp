@@ -53,7 +53,8 @@ bool AudioDevice::open(RtAudio::Api api, unsigned device, unsigned channels, uns
     } catch (const std::exception& e) { error = QString::fromUtf8(e.what()); close(); return false; }
 }
 bool AudioDevice::openByName(RtAudio::Api api, const QString& wantedName, const QString& fallbackRemembered,
-                             unsigned channels, unsigned buffer, QString& resolvedName, QString& error) {
+                             unsigned channels, unsigned buffer, QString& resolvedName, QString& error,
+                             unsigned* resolvedId) {
     close();
     try {
         failed_.store(false); { std::lock_guard lock(errorMutex_); error_.clear(); }
@@ -85,6 +86,7 @@ bool AudioDevice::openByName(RtAudio::Api api, const QString& wantedName, const 
             throw std::runtime_error(audio_->getErrorText());
         if (audio_->startStream() != RTAUDIO_NO_ERROR) throw std::runtime_error(audio_->getErrorText());
         resolvedName = chosen->name;
+        if (resolvedId) *resolvedId = chosen->id;
         return true;
     } catch (const std::exception& e) { error = QString::fromUtf8(e.what()); close(); return false; }
 }

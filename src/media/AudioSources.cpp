@@ -202,6 +202,11 @@ public:
     WaveStorage(QString path, qint64 offset, Frame length, int channels, int bits, bool floating)
         : path_(std::move(path)), offset_(offset), length_(length), channels_(channels), bits_(bits), floating_(floating),
           size_(QFileInfo(path_).size()) {}
+    std::shared_ptr<WaveStorage> cloneWithPath(QString newPath) const {
+        auto copy = std::make_shared<WaveStorage>(std::move(newPath), offset_, length_, channels_, bits_, floating_);
+        copy->blockHashes_ = blockHashes_;
+        return copy;
+    }
     Frame length() const noexcept override { return length_; }
     void prepare(AudioData& data) {
         // A sidecar keyed like the source index skips reading unchanged files on reopen;
@@ -494,5 +499,16 @@ std::shared_ptr<const AudioData> loadPcmWave(const QString& path) {
     auto storage = std::make_shared<WaveStorage>(path, offset, bytes / stride, channels, bits, type == 3);
     storage->prepare(*data); data->storage = std::move(storage);
     return data;
+}
+
+std::shared_ptr<const AudioData> rebindPcmWavePath(const std::shared_ptr<const AudioData>& existing, const QString& newPath) {
+    if (!existing || !existing->storage) return {};
+    const auto* wave = dynamic_cast<const WaveStorage*>(existing->storage.get());
+    if (!wave) return {};
+    auto rebound = std::make_shared<AudioData>();
+    rebound->mono = existing->mono;
+    rebound->peaks = existing->peaks;
+    rebound->storage = wave->cloneWithPath(newPath);
+    return rebound;
 }
 }

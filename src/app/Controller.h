@@ -45,6 +45,9 @@ public:
     bool pause();
     bool seek(Frame position);
     bool stopAll();
+    // Reflects queued transport commands immediately before the next audio callback publishes them.
+    State effectiveState() const;
+    bool playInFlight() const { return lastPlaySeq_ > transport.commandsApplied(); }
     bool configureAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer);
     bool configureAudioByName(RtAudio::Api api, const QString& wantedName, unsigned channels, unsigned buffer);
     bool configureMidi(int port);
@@ -98,6 +101,9 @@ private:
     std::vector<Frame> lastClocks_;
     std::deque<Project> undo_, redo_;
     quint64 busyLease_ = 0, nextBusyLease_ = 1, projectRevision_ = 0;
+    std::uint64_t commandsPosted_ = 0, lastPlaySeq_ = 0;
+    Action lastPostedAction_ = Action::StopAll;
+    bool postTransportCommand(Command cmd);
     void arm(Frame position);
     void startMidiThread();
     void watchMidi();

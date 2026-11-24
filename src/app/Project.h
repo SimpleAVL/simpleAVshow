@@ -44,10 +44,16 @@ struct StagedProjectMedia {
     QMap<QString, QString> assetFileNames; // asset id -> file name inside stagingDirectory
     QMap<QString, bool> extractedAssets;   // asset id -> came from packageDirectory
 };
+struct PublishedMediaRollback {
+    QStringList movedFiles;
+    QString targetDirectory;
+    bool directoryCreated = false;
+    void rollback() const;
+};
 StagedProjectMedia stageProjectMedia(const Project& project, const QString& stagingDirectory,
                                      const std::function<bool()>& isCancelled = {});
-void publishStagedProjectMedia(Project& project, const QString& stagingDirectory,
-                               const QString& targetDirectory, const StagedProjectMedia& staged);
+PublishedMediaRollback publishStagedProjectMedia(Project& project, const QString& stagingDirectory,
+                                                 const QString& targetDirectory, const StagedProjectMedia& staged);
 // Removes package extractions abandoned by crashed instances; call once at startup.
 void removeStalePackageDirectories();
 QString timecode(Frame position, double fps = 24);

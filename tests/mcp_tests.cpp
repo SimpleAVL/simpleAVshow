@@ -201,9 +201,11 @@ private slots:
         McpServer server(c);
         QVERIFY(server.start(0));
 
-        // 1. render_preview works read-only, does not move playhead, and works in Show mode.
+        // 1. render_preview is paused in Show mode to protect live output, and works read-only outside Show mode.
         const Frame beforePos = c.position();
         c.setShowMode(true);
+        QVERIFY(call(server, "render_preview", {{"time", frameJson(6)}, {"width", 320}})["isError"].toBool());
+        c.setShowMode(false);
         const auto preview = call(server, "render_preview", {{"time", frameJson(6)}, {"width", 320}});
         QVERIFY(!preview["isError"].toBool());
         QCOMPARE(c.position(), beforePos);
@@ -221,7 +223,6 @@ private slots:
         QVERIFY(meta["active_clips"].toArray().size() >= 2);
         QVERIFY(call(server, "render_preview", {{"width", 50}})["isError"].toBool());
         QVERIFY(call(server, "render_preview", {{"time", frameJson(999)}})["isError"].toBool());
-        c.setShowMode(false);
 
         // 2. get_preflight reports disconnected tracks with clips, unused assets, next cue, and summary.
         const auto preflight = call(server, "get_preflight");
@@ -506,15 +507,32 @@ private slots:
             QVERIFY(!ctrl.busy);
         }
 
-        // 13. Queued Play + Controller::pause() drain in arrival order (Pause is never dropped when Play is queued).
+        // 13. Queued Play + Controller::pause() drain in arrival order, and idle pause() never fills the queue.
         {
             Controller c;
             c.replace(demoProject());
             c.transport.command({Action::Play});
             QVERIFY(c.pause());
-            std::vector<float> buf(512, 0.f);
-            c.transport.render(buf.data(), 256, 2);
             QCOMPARE(c.transport.state(), State::Paused);
+            // 200 idle pause calls must never overflow the 128-slot transport queue.
+            for (int i = 0; i < 200; ++i) QVERIFY(c.pause());
+            QVERIFY(c.seek(frames(1)));
+            QVERIFY(c.stopAll());
+        }
+
+        // 14. Opening a .savshow.autosave sidecar via MCP strips .autosave and marks dirty.
+        {
+            QTemporaryDir dir;
+            QVERIFY(dir.isValid());
+            const QString baseShow = dir.filePath("rehearsal.savshow");
+            const QString autosaveFile = baseShow + ".autosave";
+            writeProject(newProject(), autosaveFile);
+            const auto openAuto = call(server, "project_action", {
+                {"action", "open_project"}, {"path", autosaveFile}, {"discard_unsaved", true}
+            });
+            QVERIFY(!openAuto["isError"].toBool());
+            QCOMPARE(window.controller().path, baseShow);
+            QVERIFY(window.controller().dirty);
         }
 
         window.controller().dirty = false;

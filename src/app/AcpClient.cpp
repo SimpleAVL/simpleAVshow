@@ -138,6 +138,21 @@ QStringList splitCommandLine(const QString& commandLine) {
     return args;
 }
 
+bool validateBatchWrapperArgs(const QString& executable, const QStringList& args, QString& error) {
+    if (!executable.endsWith(".cmd", Qt::CaseInsensitive) && !executable.endsWith(".bat", Qt::CaseInsensitive))
+        return true;
+    static const QString forbidden = QStringLiteral("&|<>^%!\"\r\n");
+    for (const auto& arg : args) {
+        for (const QChar ch : arg) {
+            if (forbidden.contains(ch)) {
+                error = "Arguments containing Windows cmd.exe metacharacters (& | < > ^ % ! \") cannot be safely passed to a .cmd/.bat wrapper; invoke the underlying executable directly instead.";
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 AcpClient::AcpClient(QObject* parent) : QObject(parent) {
     deadlineTimer_.setSingleShot(true);
     connect(&deadlineTimer_, &QTimer::timeout, this, [this] {
@@ -145,10 +160,63 @@ AcpClient::AcpClient(QObject* parent) : QObject(parent) {
             failConnection(deadlineReason_.isEmpty() ? QString("ACP agent timed out.") : deadlineReason_);
         }
     });
+    cancelTimer_.setSingleShot(true);
+    connect(&cancelTimer_, &QTimer::timeout, this, [this] {
+        if (state_ != AcpState::Disconnected && state_ != AcpState::Error) {
+            failConnection("Timed out waiting for ACP agent to cancel the active turn.");
+        }
+    });
 }
 
 AcpClient::~AcpClient() {
-    disconnectFromAgent();
+    stopping_ = true;
+    deadlineTimer_.stop();
+    cancelTimer_.stop();
+    teardownProcess(true);
+    for (const auto& proc : retiringProcesses_) {
+        if (!proc) continue;
+        if (proc->state() != QProcess::NotRunning) {
+            proc->kill();
+            proc->waitForFinished(400);
+        }
+        delete proc.data();
+    }
+    retiringProcesses_.clear();
+}
+
+void AcpClient::teardownProcess(bool blocking) {
+    if (!process_) return;
+    QProcess* proc = process_;
+    process_ = nullptr;
+    proc->disconnect(this);
+    if (proc->state() == QProcess::NotRunning) {
+        proc->deleteLater();
+        return;
+    }
+    proc->closeWriteChannel();
+    proc->terminate();
+    if (blocking) {
+        if (!proc->waitForFinished(400)) {
+            proc->kill();
+            proc->waitForFinished(400);
+        }
+        proc->deleteLater();
+        return;
+    }
+    // Never block the GUI thread during live performances: escalate to kill asynchronously.
+    proc->setParent(nullptr);
+    retiringProcesses_.erase(
+        std::remove_if(retiringProcesses_.begin(), retiringProcesses_.end(), [](const QPointer<QProcess>& p) { return p.isNull(); }),
+        retiringProcesses_.end());
+    retiringProcesses_.emplace_back(proc);
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), proc, &QObject::deleteLater);
+    QTimer::singleShot(400, proc, [p = QPointer<QProcess>(proc)] {
+        if (!p) return;
+        if (p->state() != QProcess::NotRunning) p->kill();
+    });
+    QTimer::singleShot(2000, proc, [p = QPointer<QProcess>(proc)] {
+        if (p) p->deleteLater();
+    });
 }
 
 void AcpClient::setTimeoutsForTesting(int startupMs, int handshakeMs, int cancelMs) {
@@ -175,6 +243,13 @@ void AcpClient::connectToAgent(const QString& program, const QStringList& args, 
         failConnection(QString("Could not find executable “%1”.").arg(program));
         return;
     }
+#ifdef Q_OS_WIN
+    QString batchErr;
+    if (!validateBatchWrapperArgs(executable, args, batchErr)) {
+        failConnection(batchErr);
+        return;
+    }
+#endif
     stopping_ = false;
     cancelling_ = false;
     cwd_ = cwd.isEmpty() ? QDir::homePath() : cwd;
@@ -228,6 +303,7 @@ void AcpClient::connectToAgent(const QString& program, const QStringList& args, 
         [this](int exitCode, QProcess::ExitStatus exitStatus) {
             if (stopping_) return;
             deadlineTimer_.stop();
+            cancelTimer_.stop();
             const QString reason = exitStatus == QProcess::CrashExit
                 ? QString("ACP agent crashed (exit code %1).").arg(exitCode)
                 : QString("ACP agent exited (code %1).").arg(exitCode);
@@ -281,7 +357,7 @@ void AcpClient::cancelPrompt() {
     cancelAllPendingPermissions(sessionId_);
     if (state_ == AcpState::Prompting) {
         sendNotification("session/cancel", {{"sessionId", sessionId_}});
-        armDeadline(cancelTimeoutMs_, "Timed out waiting for ACP agent to cancel the active turn.");
+        cancelTimer_.start(cancelTimeoutMs_);
     }
 }
 
@@ -297,25 +373,14 @@ void AcpClient::respondPermission(int requestKey, const QString& optionId) {
 void AcpClient::disconnectFromAgent() {
     stopping_ = true;
     deadlineTimer_.stop();
+    cancelTimer_.stop();
     cancelling_ = false;
     cancelAllPendingPermissions();
     pending_.clear();
     pendingPermissions_.clear();
     stdoutBuffer_.clear();
     sessionId_.clear();
-    if (process_) {
-        process_->disconnect(this);
-        if (process_->state() != QProcess::NotRunning) {
-            process_->closeWriteChannel();
-            process_->terminate();
-            if (!process_->waitForFinished(400)) {
-                process_->kill();
-                process_->waitForFinished(400);
-            }
-        }
-        process_->deleteLater();
-        process_ = nullptr;
-    }
+    teardownProcess(false);
     stopping_ = false;
     setState(AcpState::Disconnected);
 }
@@ -348,14 +413,23 @@ void AcpClient::sendErrorResponse(const QJsonValue& id, int code, const QString&
 
 void AcpClient::handleStdout() {
     if (!process_) return;
+    constexpr qsizetype maxStdoutBufferBytes = 4 * 1024 * 1024;
     stdoutBuffer_.append(process_->readAllStandardOutput());
     for (;;) {
         const qsizetype newline = stdoutBuffer_.indexOf('\n');
-        if (newline < 0) break;
+        if (newline < 0) {
+            if (stdoutBuffer_.size() > maxStdoutBufferBytes) {
+                failConnection("ACP agent output exceeded maximum line size (4 MiB).");
+            }
+            break;
+        }
         QByteArray line = stdoutBuffer_.left(newline);
         stdoutBuffer_.remove(0, newline + 1);
         if (!line.isEmpty() && line.endsWith('\r')) line.chop(1);
-        if (!line.trimmed().isEmpty()) handleLine(line);
+        if (!line.trimmed().isEmpty()) {
+            handleLine(line);
+            if (!process_) break;
+        }
     }
 }
 
@@ -368,6 +442,10 @@ void AcpClient::handleLine(const QByteArray& line) {
         return;
     }
     const auto msg = doc.object();
+    if (msg["jsonrpc"] != "2.0") {
+        emit stderrReceived(QString::fromUtf8(line) + "\n");
+        return;
+    }
     const bool hasMethod = msg["method"].isString();
     const bool hasId = msg.contains("id") && !msg["id"].isNull() && !msg["id"].isUndefined();
     if (hasMethod && hasId) {
@@ -383,12 +461,24 @@ void AcpClient::handleResponse(int id, const QJsonObject& msg) {
     if (!pending_.contains(id)) return;
     const PendingRequest req = pending_.take(id);
     const PendingKind kind = req.kind;
+    auto clearCancelTimerIfDone = [this] {
+        const bool anyPromptLeft = std::any_of(pending_.cbegin(), pending_.cend(),
+            [](const PendingRequest& p) { return p.kind == PendingKind::Prompt; });
+        if (!anyPromptLeft) cancelTimer_.stop();
+    };
+    const bool hasError = msg.contains("error") && msg["error"].isObject();
+    const bool hasResult = msg.contains("result") && msg["result"].isObject();
+    if (hasError == hasResult) {
+        failConnection("ACP agent returned a malformed JSON-RPC response.");
+        return;
+    }
+    if (kind == PendingKind::Prompt) clearCancelTimerIfDone();
     if (kind == PendingKind::Prompt && (sessionId_.isEmpty() || req.sessionId != sessionId_)) {
         // Ignore stale prompt completion from a superseded session.
         cancelAllPendingPermissions(req.sessionId);
         return;
     }
-    if (msg.contains("error") && msg["error"].isObject()) {
+    if (hasError) {
         const auto errObj = msg["error"].toObject();
         const int code = errObj["code"].toInt();
         const QString errMessage = errObj["message"].toString("ACP request failed");
@@ -550,24 +640,13 @@ void AcpClient::failConnection(const QString& message) {
     // Tear down any running child process (e.g. after incompatible protocolVersion) while preserving Error state.
     stopping_ = true;
     deadlineTimer_.stop();
+    cancelTimer_.stop();
     cancelling_ = false;
     pending_.clear();
     pendingPermissions_.clear();
     stdoutBuffer_.clear();
     sessionId_.clear();
-    if (process_) {
-        process_->disconnect(this);
-        if (process_->state() != QProcess::NotRunning) {
-            process_->closeWriteChannel();
-            process_->terminate();
-            if (!process_->waitForFinished(400)) {
-                process_->kill();
-                process_->waitForFinished(400);
-            }
-        }
-        process_->deleteLater();
-        process_ = nullptr;
-    }
+    teardownProcess(false);
     stopping_ = false;
     lastError_ = message;
     setState(AcpState::Error);

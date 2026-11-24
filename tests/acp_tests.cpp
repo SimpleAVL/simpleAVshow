@@ -63,6 +63,12 @@ private slots:
         QCOMPARE(splitCommandLine("\"C:\\Unclosed"), QStringList());
         QCOMPARE(splitCommandLine("\"foo\"\""), QStringList());
         QCOMPARE(splitCommandLine("  "), QStringList());
+        // Windows .cmd/.bat wrapper argument guard rejects cmd.exe metacharacters.
+        QString batchErr;
+        QVERIFY(validateBatchWrapperArgs("C:\\npm\\codex-acp.cmd", {"--flag", "safe-value"}, batchErr));
+        QVERIFY(!validateBatchWrapperArgs("C:\\npm\\codex-acp.cmd", {"--msg", "hello & calc"}, batchErr));
+        QVERIFY(!validateBatchWrapperArgs("C:\\npm\\codex-acp.bat", {"%PATH%"}, batchErr));
+        QVERIFY(validateBatchWrapperArgs("/usr/local/bin/codex-acp", {"--msg", "hello & world"}, batchErr));
     }
 
     void acpHttpMcpAndStreaming() {
@@ -337,6 +343,18 @@ private slots:
             QTRY_COMPARE_WITH_TIMEOUT(stuckCancel.state(), AcpState::Error, 3000);
             QVERIFY(stuckCancel.lastError().contains("cancel"));
             stuckCancel.disconnectFromAgent();
+
+            // Starting a new session while an old prompt ignores cancellation must NOT bypass the cancel deadline.
+            AcpClient stuckNewSession;
+            stuckNewSession.setTimeoutsForTesting(1000, 2000, 150);
+            stuckNewSession.connectToAgent(SAV_MOCK_ACP_AGENT, {"--http-mcp", "--hold-prompt", "--ignore-cancel"}, QDir::tempPath(), {});
+            QTRY_COMPARE(stuckNewSession.state(), AcpState::Ready);
+            stuckNewSession.sendPrompt("Old prompt ignoring cancel");
+            QCOMPARE(stuckNewSession.state(), AcpState::Prompting);
+            stuckNewSession.startNewSession(QDir::tempPath(), {});
+            QTRY_COMPARE_WITH_TIMEOUT(stuckNewSession.state(), AcpState::Error, 3000);
+            QVERIFY(stuckNewSession.lastError().contains("cancel"));
+            stuckNewSession.disconnectFromAgent();
         }
     }
 

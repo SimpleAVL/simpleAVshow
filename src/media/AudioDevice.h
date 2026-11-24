@@ -21,7 +21,8 @@ public:
     // Resolves device by name (or default/remembered when wantedName is empty) on the same RtAudio
     // instance that opens the stream, preventing cross-instance ID drift after hot-plug.
     bool openByName(RtAudio::Api api, const QString& wantedName, const QString& fallbackRemembered,
-                    unsigned channels, unsigned buffer, QString& resolvedName, QString& error);
+                    unsigned channels, unsigned buffer, QString& resolvedName, QString& error,
+                    unsigned* resolvedId = nullptr);
     void close();
     // Stops callbacks while keeping the stream open, so re-arming avoids a slow driver reopen (ASIO).
     void pause() { if (audio_ && audio_->isStreamRunning()) audio_->stopStream(); }

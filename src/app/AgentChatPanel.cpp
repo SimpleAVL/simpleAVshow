@@ -282,8 +282,9 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
     root->addLayout(composer);
 
     // Coalesce high-frequency streaming chunks into smooth UI updates.
+    logsView_->setMaximumBlockCount(1000);
     renderTimer_.setSingleShot(true);
-    renderTimer_.setInterval(30);
+    renderTimer_.setInterval(60);
     connect(&renderTimer_, &QTimer::timeout, this, &AgentChatPanel::renderTranscript);
 
     populatePresets();
@@ -339,16 +340,26 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         focusPrompt();
     });
     connect(&acp_, &AcpClient::messageChunk, this, [this](const QString& chunk) {
+        constexpr qsizetype maxEntryChars = 64 * 1024;
         if (entries_.empty() || entries_.back().kind != ChatEntry::Kind::Assistant)
-            entries_.push_back({ChatEntry::Kind::Assistant, {}, acp_.agentName().isEmpty() ? QString("Agent") : acp_.agentName(), {}, {}, {}, {}});
-        entries_.back().text += chunk;
-        scheduleRender();
+            appendEntry({ChatEntry::Kind::Assistant, {}, acp_.agentName().isEmpty() ? QString("Agent") : acp_.agentName(), {}, {}, {}, {}});
+        auto& text = entries_.back().text;
+        if (text.size() < maxEntryChars) {
+            text += chunk;
+            if (text.size() > maxEntryChars) text = text.left(maxEntryChars) + "\n… [truncated]";
+            scheduleRender();
+        }
     });
     connect(&acp_, &AcpClient::thoughtChunk, this, [this](const QString& chunk) {
+        constexpr qsizetype maxEntryChars = 32 * 1024;
         if (entries_.empty() || entries_.back().kind != ChatEntry::Kind::Assistant)
-            entries_.push_back({ChatEntry::Kind::Assistant, {}, acp_.agentName().isEmpty() ? QString("Agent") : acp_.agentName(), {}, {}, {}, {}});
-        entries_.back().thought += chunk;
-        scheduleRender();
+            appendEntry({ChatEntry::Kind::Assistant, {}, acp_.agentName().isEmpty() ? QString("Agent") : acp_.agentName(), {}, {}, {}, {}});
+        auto& thought = entries_.back().thought;
+        if (thought.size() < maxEntryChars) {
+            thought += chunk;
+            if (thought.size() > maxEntryChars) thought = thought.left(maxEntryChars) + "\n… [truncated]";
+            scheduleRender();
+        }
     });
     connect(&acp_, &AcpClient::toolCallUpdated, this, [this](const AcpToolCallUpdate& update) {
         for (auto it = entries_.rbegin(); it != entries_.rend(); ++it) {
@@ -499,7 +510,7 @@ void AgentChatPanel::updateControls() {
     presetCombo_->setEnabled(!active);
     customCommand_->setEnabled(!active);
     connectButton_->setText(active ? "Disconnect" : "Connect");
-    newSessionButton_->setEnabled(ready || prompting);
+    newSessionButton_->setEnabled(ready);
 
     {
         QSignalBlocker block(allowEditing_);
@@ -642,7 +653,12 @@ QString AgentChatPanel::buildFirstTurnPrompt(const QString& userText) const {
 }
 
 void AgentChatPanel::appendEntry(ChatEntry entry) {
+    constexpr std::size_t maxEntries = 200;
+    constexpr qsizetype maxEntryChars = 64 * 1024;
+    if (entry.text.size() > maxEntryChars) entry.text = entry.text.left(maxEntryChars) + "\n… [truncated]";
+    if (entry.thought.size() > maxEntryChars) entry.thought = entry.thought.left(maxEntryChars) + "\n… [truncated]";
     entries_.push_back(std::move(entry));
+    if (entries_.size() > maxEntries) entries_.erase(entries_.begin(), entries_.begin() + static_cast<std::ptrdiff_t>(entries_.size() - maxEntries));
     scheduleRender();
 }
 

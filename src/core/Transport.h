@@ -42,6 +42,7 @@ public:
     unsigned readRetries() const noexcept { return readRetries_.load(); }
     bool audioReadFailed() const noexcept { return audioReadFailed_.load(); }
     std::uint64_t epoch() const noexcept { return epoch_.load(std::memory_order_acquire); }
+    std::uint64_t commandsApplied() const noexcept { return commandsApplied_.load(std::memory_order_acquire); }
 private:
     enum class VoiceState { Dormant, Running, Finished };
     // source is the async cursor; at is this sample's resolved frame and next follows the last mixed one.
@@ -76,6 +77,7 @@ private:
     std::atomic<float> publishedPeak_{0};
     std::atomic<bool> clipped_{false}, overflow_{false};
     std::atomic<std::uint64_t> epoch_{0};
+    std::atomic<std::uint64_t> commandsApplied_{0};
     void apply(Command command) noexcept;
     void dispatch(int marker) noexcept;
     void publish(float peak) noexcept;

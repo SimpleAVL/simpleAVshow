@@ -110,7 +110,7 @@ private:
     void save(bool as = false);
     void exportPackage();
     void writePackage(const QString& path);
-    bool checkDiscard();
+    bool checkDiscard(quint64* confirmedRev = nullptr);
     Clip* selectedClip();
     Marker* selectedMarker();
 };

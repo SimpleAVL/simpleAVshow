@@ -526,16 +526,22 @@ StagedProjectMedia stageProjectMedia(const Project& p, const QString& stagingDir
     return staged;
 }
 
-void publishStagedProjectMedia(Project& p, const QString& stagingDirectory, const QString& targetDirectory, const StagedProjectMedia& staged) {
+void PublishedMediaRollback::rollback() const {
+    for (const auto& file : movedFiles) QFile::remove(file);
+    if (directoryCreated && !targetDirectory.isEmpty()) QDir().rmdir(targetDirectory);
+}
+
+PublishedMediaRollback publishStagedProjectMedia(Project& p, const QString& stagingDirectory, const QString& targetDirectory, const StagedProjectMedia& staged) {
+    PublishedMediaRollback rollback;
     if (staged.assetFileNames.isEmpty()) {
         p.packageDirectory.reset();
         bindAudio(p);
-        return;
+        return rollback;
     }
     QDir stageDir(stagingDirectory);
     QDir targetDir(targetDirectory);
-    const bool existed = targetDir.exists();
-    QStringList movedTargets;
+    rollback.targetDirectory = targetDir.absolutePath();
+    rollback.directoryCreated = !targetDir.exists();
     QMap<QString, QString> publishedNames;
     try {
         if (!QDir().mkpath(targetDir.absolutePath())) throw std::runtime_error("Cannot create media directory");
@@ -545,7 +551,7 @@ void publishStagedProjectMedia(Project& p, const QString& stagingDirectory, cons
                 const QString src = stageDir.filePath(fileName);
                 const QString dst = targetDir.filePath(fileName);
                 if (!QFile::rename(src, dst)) throw std::runtime_error("Cannot publish staged media: " + dst.toStdString());
-                movedTargets.append(dst);
+                rollback.movedFiles.append(dst);
                 publishedNames.insert(fileName, dst);
             }
         }
@@ -553,17 +559,17 @@ void publishStagedProjectMedia(Project& p, const QString& stagingDirectory, cons
             auto assetIt = p.assets.find(it.key());
             if (assetIt == p.assets.end()) continue;
             assetIt->path = publishedNames.value(it.value());
-            // Direct PCM WAV files stream from disk; rebind WaveStorage to the published path (header parse only).
+            // Rebind WaveStorage in O(1) (reusing existing block hashes and peaks without rescanning disk).
             if (staged.extractedAssets.value(it.key()) && assetIt->audio) {
-                if (auto pcm = detail::loadPcmWave(assetIt->path)) assetIt->audio = std::move(pcm);
+                if (auto pcm = detail::rebindPcmWavePath(assetIt->audio, assetIt->path)) assetIt->audio = std::move(pcm);
             }
         }
     } catch (...) {
-        for (const auto& file : movedTargets) QFile::remove(file);
-        if (!existed) QDir().rmdir(targetDir.absolutePath());
+        rollback.rollback();
         throw;
     }
     p.packageDirectory.reset();
     bindAudio(p);
+    return rollback;
 }
 }

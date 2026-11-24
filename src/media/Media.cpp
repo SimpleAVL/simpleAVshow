@@ -350,7 +350,14 @@ QImage videoFrameAt(const QString& path, double time, QSize maximum, QString* er
         input.decoder(index);
         auto* stream = input.format->streams[index];
         const double start = mediaOrigin(input.format);
+        const double firstTime = stream->start_time != AV_NOPTS_VALUE
+            ? stream->start_time * av_q2d(stream->time_base) - start
+            : 0.;
         const double target = std::max(0., time);
+        // Match VideoReader::imageAt: before the video stream's first timestamp, the frame is transparent.
+        if (target < firstTime - .0001) {
+            QImage blank(1, 1, QImage::Format_RGBA8888); blank.fill(Qt::transparent); return blank;
+        }
         const auto timestamp = static_cast<std::int64_t>((target + start) / av_q2d(stream->time_base));
         if (av_seek_frame(input.format, index, timestamp, AVSEEK_FLAG_BACKWARD) < 0)
             av_seek_frame(input.format, index, timestamp, AVSEEK_FLAG_BACKWARD | AVSEEK_FLAG_ANY);
@@ -373,6 +380,11 @@ QImage videoFrameAt(const QString& path, double time, QSize maximum, QString* er
             const auto pts = input.frame->best_effort_timestamp;
             const double frameTime = pts == AV_NOPTS_VALUE ? std::max(0., last + 1. / rate) : pts * av_q2d(stream->time_base) - start;
             last = frameTime;
+            if (frameTime > target + .0001) {
+                av_frame_unref(input.frame);
+                reached = true;
+                break;
+            }
             QSize dimensions(input.frame->width, input.frame->height);
             if (dimensions.width() > maximum.width() || dimensions.height() > maximum.height()) dimensions.scale(maximum, Qt::KeepAspectRatio);
             QImage image(dimensions, QImage::Format_RGBA8888);
@@ -380,10 +392,14 @@ QImage videoFrameAt(const QString& path, double time, QSize maximum, QString* er
                 static_cast<AVPixelFormat>(input.frame->format), image.width(), image.height(), AV_PIX_FMT_RGBA, SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
             unsigned char* dest[] = {image.bits()}; int strides[] = {static_cast<int>(image.bytesPerLine())};
             if (!image.isNull() && input.scaler && sws_scale(input.scaler, input.frame->data, input.frame->linesize, 0, input.frame->height, dest, strides) >= 0) {
-                if (frameTime <= target + .0001 || best.isNull()) best = std::move(image);
+                best = std::move(image);
             }
             av_frame_unref(input.frame);
             if (frameTime >= target - .0001) { reached = true; break; }
+        }
+        if (reached && best.isNull()) {
+            // Target lies before the first decoded video frame: match VideoReader's transparent output.
+            QImage blank(1, 1, QImage::Format_RGBA8888); blank.fill(Qt::transparent); return blank;
         }
         if (!reached || best.isNull()) {
             if (error) *error = decoded >= 240

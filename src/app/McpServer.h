@@ -50,6 +50,8 @@ private:
     quint64 editGeneration_ = 0;
     std::shared_ptr<std::atomic<bool>> editSessionCancelled_ = std::make_shared<std::atomic<bool>>(false);
     int activeAsyncJobs_ = 0;
+    int activePreviewJobs_ = 0;
+    QMap<QString, std::shared_ptr<std::atomic<bool>>> inflightRequests_;
     void invalidateEditSession();
     QString importId_, importState_, importError_;
     std::vector<MediaAsset> imported_;

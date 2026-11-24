@@ -17,6 +17,8 @@ QString audioCacheDirectory();
 constexpr qint64 automaticAudioCacheBudget = -1;
 void trimAudioCache(qint64 maxBytes = automaticAudioCacheBudget);
 std::shared_ptr<const AudioData> loadPcmWave(const QString& path);
+// O(1) path rebind for an identical copied WAV file: reuses verified block hashes and peaks without rescanning disk.
+std::shared_ptr<const AudioData> rebindPcmWavePath(const std::shared_ptr<const AudioData>& existing, const QString& newPath);
 
 class AudioCache {
 public:

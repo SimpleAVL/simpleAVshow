@@ -67,8 +67,26 @@ void Controller::releaseBusy(quint64 lease) {
         busy = false;
     }
 }
+bool Controller::postTransportCommand(Command cmd) {
+    if (!transport.command(cmd)) { report("Transport command queue is full"); return false; }
+    ++commandsPosted_;
+    lastPostedAction_ = cmd.action;
+    if (cmd.action == Action::Play) lastPlaySeq_ = commandsPosted_;
+    return true;
+}
+State Controller::effectiveState() const {
+    const State published = transport.state();
+    if (commandsPosted_ <= transport.commandsApplied()) return published;
+    switch (lastPostedAction_) {
+    case Action::Play: return State::Playing;
+    case Action::Pause: return published == State::Playing || playInFlight() ? State::Paused : published;
+    case Action::StopAll: return State::Stopped;
+    case Action::Seek: return published == State::Playing ? State::Playing : State::Paused;
+    }
+    return published;
+}
 bool Controller::canEdit(bool reportFailure) {
-    const bool allowed = !showMode && !busy && transport.state() != State::Playing && transport.state() != State::Held &&
+    const bool allowed = !showMode && !busy && !playInFlight() && transport.state() != State::Playing && transport.state() != State::Held &&
         transport.asyncVoices() == 0;
     if (!allowed && reportFailure) report(showMode ? "Leave show mode to edit" : "Use Stop All before editing; async audio or video may still be playing");
     return allowed;
@@ -114,10 +132,19 @@ void Controller::arm(Frame position) {
         if (asset != project.assets.cend() && asset->video && !asset->offline) clip.videoLength = frames(asset->duration);
     }
     armed_ = std::move(armed); transport.configure(armed_, position);
+    commandsPosted_ = 0; lastPlaySeq_ = 0;
     if (keep && device.resume()) stall_.restart();
     else if (configured_) {
         QString error;
-        if (!device.open(api_, deviceId_, channels_, buffer_, error)) { configured_ = false; report("Audio output unavailable: " + error); }
+        bool reopened = false;
+        if (!audioName.isEmpty()) {
+            QString resolvedName;
+            reopened = device.openByName(api_, audioName, audioName, channels_, buffer_, resolvedName, error, &deviceId_);
+            if (reopened) audioName = resolvedName;
+        } else {
+            reopened = device.open(api_, deviceId_, channels_, buffer_, error);
+        }
+        if (!reopened) { configured_ = false; report("Audio output unavailable: " + error); }
         stall_.restart();
     }
     startMidiThread();
@@ -171,29 +198,29 @@ bool Controller::play() {
         if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return false; }
     }
     // Always enqueue Action::Play so a Play queued immediately after a Pause is honored in arrival order.
-    if (!transport.command({Action::Play})) { report("Transport command queue is full"); return false; }
-    return true;
+    return postTransportCommand({Action::Play});
 }
 bool Controller::pause() {
     if (busy) return false;
     // Always enqueue Action::Pause (never Play) so a Pause queued behind Play runs in order and
     // a Playing → Held transition can never accidentally resume a hold.
-    if (!transport.command({Action::Pause})) { report("Transport command queue is full"); return false; }
+    if (!postTransportCommand({Action::Pause})) return false;
+    if (!device.running()) transport.render(nullptr, 0, 0);
     return true;
 }
 bool Controller::toggle() {
     if (busy) return false;
-    return transport.state() == State::Playing ? pause() : play();
+    return effectiveState() == State::Playing ? pause() : play();
 }
 bool Controller::seek(Frame time) {
     if (busy || showMode) { report(showMode ? "Leave show mode to jump on the timeline" : "Media is loading"); return false; }
-    if (!transport.command({Action::Seek, time})) { report("Transport command queue is full"); return false; }
+    if (!postTransportCommand({Action::Seek, time})) return false;
     if (!device.running()) transport.render(nullptr, 0, 0);
     lastComposed_ = -1;
     return true;
 }
 bool Controller::stopAll() {
-    if (!transport.command({Action::StopAll})) { report("Transport command queue is full"); return false; }
+    if (!postTransportCommand({Action::StopAll})) return false;
     if (!device.running()) transport.render(nullptr, 0, 0);
     return true;
 }
@@ -209,8 +236,9 @@ bool Controller::configureAudioByName(RtAudio::Api api, const QString& wantedNam
     const unsigned prevChannels = channels_, prevBuffer = buffer_;
     QSettings settings;
     QString resolvedName, error;
-    if (device.openByName(api, wantedName, settings.value("audio/device").toString(), channels, buffer, resolvedName, error)) {
-        api_ = api; channels_ = channels; buffer_ = buffer; audioName = resolvedName; configured_ = true;
+    unsigned resolvedId = deviceId_;
+    if (device.openByName(api, wantedName, settings.value("audio/device").toString(), channels, buffer, resolvedName, error, &resolvedId)) {
+        api_ = api; deviceId_ = resolvedId; channels_ = channels; buffer_ = buffer; audioName = resolvedName; configured_ = true;
         stall_.restart(); playbackProblem.clear();
         settings.setValue("audio/api", static_cast<int>(api)); settings.setValue("audio/device", resolvedName);
         settings.setValue("audio/channels", channels); settings.setValue("audio/buffer", buffer);
@@ -220,7 +248,9 @@ bool Controller::configureAudioByName(RtAudio::Api api, const QString& wantedNam
     configured_ = false;
     if (hadStream && !prevName.isEmpty()) {
         QString restoredName, restoreErr;
-        if (device.openByName(prevApi, prevName, prevName, prevChannels, prevBuffer, restoredName, restoreErr)) {
+        unsigned restoredId = deviceId_;
+        if (device.openByName(prevApi, prevName, prevName, prevChannels, prevBuffer, restoredName, restoreErr, &restoredId)) {
+            deviceId_ = restoredId;
             configured_ = true; stall_.restart();
             report("Audio output unavailable: " + error + " (kept previous connection: " + restoredName + ")");
         } else {
@@ -318,9 +348,20 @@ bool Controller::prepareMidi() {
     if (remembered.isEmpty()) {
         report("Choose a MIDI destination in Outputs once. It will reconnect automatically when you press Play."); return false;
     }
-    const auto ports = midi.ports(); const int port = ports.indexOf(remembered);
-    if (port < 0) { report("MIDI destination “" + remembered + "” is missing. Plug it in, or choose another destination in Outputs."); return false; }
-    return openMidi(port);
+    stopMidiThread();
+    QString error;
+    const bool ok = midi.openByName(remembered, error);
+    startMidiThread();
+    if (ok) {
+        midiName_ = midi.name();
+        playbackProblem.clear();
+        report("MIDI output: " + midi.name());
+        return true;
+    }
+    report(error.contains("not found", Qt::CaseInsensitive)
+        ? ("MIDI destination “" + remembered + "” is missing. Plug it in, or choose another destination in Outputs.")
+        : error);
+    return false;
 }
 bool Controller::prepareAudio() {
     if (device.running()) return true;

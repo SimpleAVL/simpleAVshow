@@ -208,17 +208,31 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
     )");
     auto* file = menuBar()->addMenu("File");
     file->setToolTipsVisible(true);
-    file->addAction("New show", QKeySequence::New, this, [this] { if (c_.canEdit() && checkDiscard()) c_.replace(newProject()); });
+    file->addAction("New show", QKeySequence::New, this, [this] {
+        quint64 confirmedRev = 0;
+        if (!c_.canEdit() || !checkDiscard(&confirmedRev)) return;
+        if (!c_.canEdit() || c_.projectRevision() != confirmedRev) { c_.report("New show cancelled because the show changed."); return; }
+        c_.replace(newProject());
+    });
     file->addAction("Open…", QKeySequence::Open, this, [this] {
-        if (!c_.canEdit() || !checkDiscard()) return;
-        const auto path = QFileDialog::getOpenFileName(this, "Open show", {}, "SimpleAVShow (*.savshow *.savshow.autosave *.savpack);;Show packages (*.savpack)"); if (!path.isEmpty()) openPath(path);
+        quint64 confirmedRev = 0;
+        if (!c_.canEdit() || !checkDiscard(&confirmedRev)) return;
+        const auto path = QFileDialog::getOpenFileName(this, "Open show", {}, "SimpleAVShow (*.savshow *.savshow.autosave *.savpack);;Show packages (*.savpack)");
+        if (path.isEmpty()) return;
+        if (!c_.canEdit() || c_.projectRevision() != confirmedRev) { c_.report("Open cancelled because the show changed while choosing a file."); return; }
+        openPath(path);
     });
     file->addAction("Save", QKeySequence::Save, this, [this] { save(); });
     file->addAction("Save as…", QKeySequence::SaveAs, this, [this] { save(true); });
     exportPackageAction_ = file->addAction("Export package…", this, &MainWindow::exportPackage);
     exportPackageAction_->setObjectName("exportPackageAction");
     exportPackageAction_->setToolTip("Copy this show and all media library items into a portable .savpack file");
-    file->addSeparator(); file->addAction("Open demonstration", this, [this] { if (c_.canEdit() && checkDiscard()) { c_.replace(demoProject()); c_.dirty = true; refresh(); } });
+    file->addSeparator(); file->addAction("Open demonstration", this, [this] {
+        quint64 confirmedRev = 0;
+        if (!c_.canEdit() || !checkDiscard(&confirmedRev)) return;
+        if (!c_.canEdit() || c_.projectRevision() != confirmedRev) { c_.report("Open demonstration cancelled because the show changed."); return; }
+        c_.replace(demoProject()); c_.dirty = true; refresh();
+    });
     file->addSeparator(); file->addAction("Import media…", QKeySequence("Ctrl+I"), this, &MainWindow::importMedia);
     file->addAction("Relink missing media…", this, [this] { relinkMedia(); });
     auto* edit = menuBar()->addMenu("Edit");
@@ -273,11 +287,21 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
     project->addAction("Delete selected track…", this, [this] {
         if (!c_.canEdit()) return;
         const int index = timeline_->selectedTrack;
+        if (index < 0 || static_cast<std::size_t>(index) >= c_.project.show.tracks.size()) return;
+        const std::string trackId = c_.project.show.tracks[index].id;
+        const quint64 rev = c_.projectRevision();
         const auto clips = std::count_if(c_.project.show.clips.begin(), c_.project.show.clips.end(), [=](const Clip& clip) { return clip.track == index; });
         if (QMessageBox::question(this, "Delete track", QString("Delete the track “%1” and its %2 clip%3?").arg(QString::fromStdString(c_.project.show.tracks[index].name))
                 .arg(clips).arg(clips == 1 ? "" : "s"), QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
-        c_.edit([=](Project& p) { std::erase_if(p.show.clips, [=](const Clip& clip) { return clip.track == index; });
-            p.show.tracks.erase(p.show.tracks.begin() + index); for (auto& clip : p.show.clips) if (clip.track > index) --clip.track; });
+        if (!c_.canEdit() || c_.projectRevision() != rev) { c_.report("Track deletion cancelled because the show changed."); return; }
+        c_.edit([=](Project& p) {
+            int currentIndex = -1;
+            for (std::size_t i = 0; i < p.show.tracks.size(); ++i) if (p.show.tracks[i].id == trackId) { currentIndex = static_cast<int>(i); break; }
+            if (currentIndex < 0) return;
+            std::erase_if(p.show.clips, [=](const Clip& clip) { return clip.track == currentIndex; });
+            p.show.tracks.erase(p.show.tracks.begin() + currentIndex);
+            for (auto& clip : p.show.clips) if (clip.track > currentIndex) --clip.track;
+        });
     });
     auto* help = menuBar()->addMenu("Help");
     help->addAction("About SimpleAVShow", this, [this] {
@@ -803,7 +827,10 @@ void MainWindow::dropEvent(QDropEvent* event) {
     if (paths.isEmpty()) return;
     event->acceptProposedAction();
     // A dropped show opens; anything else imports into the media library.
-    if (paths.size() == 1 && (paths[0].endsWith(".savshow", Qt::CaseInsensitive) || isProjectPackage(paths[0]))) { if (c_.canEdit() && checkDiscard()) openPath(paths[0]); }
+    if (paths.size() == 1 && (paths[0].endsWith(".savshow", Qt::CaseInsensitive) || isProjectPackage(paths[0]))) {
+        quint64 confirmedRev = 0;
+        if (c_.canEdit() && checkDiscard(&confirmedRev) && c_.canEdit() && c_.projectRevision() == confirmedRev) openPath(paths[0]);
+    }
     else importPaths(paths);
 }
 void MainWindow::relinkMedia(bool afterOpening) {
@@ -1103,6 +1130,7 @@ void MainWindow::requestShowMode(bool enabled) {
 }
 void MainWindow::openPath(const QString& path) {
     if (!c_.canEdit()) return;
+    const quint64 initialRev = c_.projectRevision();
     // A sidecar opens as unsaved edits to its show, so Save replaces the show rather than writing "x.savshow.autosave.savshow".
     QString source = path, target = isProjectPackage(path) ? QString() : path;
     bool recovered = path.endsWith(".savshow.autosave", Qt::CaseInsensitive);
@@ -1116,10 +1144,10 @@ void MainWindow::openPath(const QString& path) {
         box.addButton("Open saved show", QMessageBox::RejectRole); box.setDefaultButton(recover); box.exec();
         if (box.clickedButton() == recover) { source = sidecar.filePath(); recovered = true; }
     }
-    if (!c_.canEdit()) return;
+    if (!c_.canEdit() || c_.projectRevision() != initialRev) { c_.report("Open cancelled because the show changed."); return; }
     const quint64 lease = c_.acquireBusy();
     if (!lease) { c_.report("Wait for the current file operation to finish"); return; }
-    const quint64 expectedRev = c_.projectRevision();
+    const quint64 expectedRev = initialRev;
     auto* progress = new QProgressDialog("Opening project and preparing media…", QString(), 0, 0, this); progress->setWindowModality(Qt::WindowModal); progress->setMinimumDuration(0); progress->show();
     auto* watcher = new QFutureWatcher<ProjectResult>(this);
     connect(watcher, &QFutureWatcher<ProjectResult>::finished, this, [this, watcher, progress, path, target, recovered, lease, expectedRev] {
@@ -1219,11 +1247,27 @@ void MainWindow::offerUntitledRecovery() {
     if (answer == QMessageBox::Yes) openPath(sidecar.filePath());
     else QFile::remove(sidecar.filePath());
 }
-bool MainWindow::checkDiscard() {
-    if (!c_.dirty) return true;
+bool MainWindow::checkDiscard(quint64* confirmedRev) {
+    if (!c_.dirty) {
+        if (confirmedRev) *confirmedRev = c_.projectRevision();
+        return true;
+    }
+    const quint64 before = c_.projectRevision();
     const auto result = QMessageBox::question(this, "Unsaved show", "Save changes to this show?", QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
-    if (result == QMessageBox::Cancel) return false; if (result == QMessageBox::Save) { save(); return !c_.dirty; }
-    c_.discardAutosave(); return true;
+    if (result == QMessageBox::Cancel) return false;
+    if (result == QMessageBox::Save) {
+        save();
+        if (c_.dirty) return false;
+        if (confirmedRev) *confirmedRev = c_.projectRevision();
+        return true;
+    }
+    if (c_.projectRevision() != before) {
+        c_.report("Discard cancelled because the show changed while the prompt was open.");
+        return false;
+    }
+    c_.discardAutosave();
+    if (confirmedRev) *confirmedRev = before;
+    return true;
 }
 void MainWindow::closeEvent(QCloseEvent* event) {
     if (c_.busy) { c_.report("Wait for media preparation to finish before closing"); event->ignore(); return; }
@@ -1236,8 +1280,14 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         auto* quit = box.addButton("Stop and quit", QMessageBox::DestructiveRole);
         box.setDefaultButton(QMessageBox::Cancel); box.exec();
         if (box.clickedButton() != quit) { event->ignore(); return; }
+        if (c_.busy) { c_.report("Wait for media preparation to finish before closing"); event->ignore(); return; }
     }
-    if (!checkDiscard()) { event->ignore(); return; }
+    quint64 confirmedRev = 0;
+    if (!checkDiscard(&confirmedRev) || c_.busy || c_.projectRevision() != confirmedRev) {
+        if (c_.projectRevision() != confirmedRev) c_.report("Quit cancelled because the show changed.");
+        event->ignore();
+        return;
+    }
     if (agentChat_) agentChat_->shutdown();
     c_.stopAll(); event->accept();
 }

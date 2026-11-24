@@ -79,7 +79,7 @@ The top-bar button always tells you what the agent can do right now: **Agent · 
 | --- | --- |
 | `get_show` | Returns the full project snapshot, library metadata, operator state, and current `revision`. *(Also available as MCP resource `simpleavshow://show`.)* |
 | `get_preflight` | Runs Show-mode readiness checks and reports missing media, disconnected audio tracks containing clips, unused assets, next cue, and show summary. Safe during playback and Show mode. |
-| `render_preview` | Renders the composed program picture at any timeline frame (`time`, defaulting to the current playhead) as a PNG image plus active clip/marker metadata, without moving the playhead or disturbing playback. |
+| `render_preview` | Renders the composed program picture at any timeline frame (`time`, defaulting to the current playhead) as a PNG image plus active clip/marker metadata, without moving the playhead (paused during Show mode to protect live program output). |
 | `get_environment` | Reports app version, OS, audio/MIDI settings and available devices (probed only while stopped), health counters, connected displays, phone remote status, undo/redo depth, and selection. *(Also exposed as `simpleavshow://environment`.)* |
 | `get_app_guide` | Reads any chapter of SimpleAVShow's built-in user manual (`topic`) or searches across all chapters (`query`) for rules, settings, shortcuts, and troubleshooting. *(Chapters are also exposed as `simpleavshow://docs/<topic>` resources.)* |
 | `encode_midi` | Converts musical MIDI parameters (Note On/Off, CC, Program Change, Pressure, Pitch Bend, or hex/SysEx) into validated byte arrays for cues. |

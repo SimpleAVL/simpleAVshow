@@ -4,6 +4,7 @@
 #include <QJsonValue>
 #include <QMap>
 #include <QObject>
+#include <QPointer>
 #include <QProcess>
 #include <QString>
 #include <QStringList>
@@ -63,6 +64,7 @@ enum class AcpState {
 std::vector<AcpAgentPreset> defaultAcpPresets();
 QString findAcpExecutable(const QString& program);
 QStringList splitCommandLine(const QString& commandLine);
+bool validateBatchWrapperArgs(const QString& executable, const QStringList& args, QString& error);
 
 // A native Qt6 Agent Client Protocol (ACP) client communicating via newline-delimited
 // JSON-RPC 2.0 over QProcess stdin/stdout.
@@ -125,7 +127,9 @@ private:
     int nextPermissionKey_ = 1;
     QMap<int, PendingRequest> pending_;
     QMap<int, PendingPermission> pendingPermissions_;
+    std::vector<QPointer<QProcess>> retiringProcesses_;
     QTimer deadlineTimer_;
+    QTimer cancelTimer_;
     QString deadlineReason_;
     int startupTimeoutMs_ = 5000;
     int handshakeTimeoutMs_ = 15000;
@@ -133,6 +137,7 @@ private:
 
     void setState(AcpState next);
     void armDeadline(int ms, const QString& reason);
+    void teardownProcess(bool blocking);
     void sendJson(const QJsonObject& payload);
     int sendRequest(const QString& method, const QJsonObject& params, PendingKind kind, const QString& sessionId = {});
     void sendNotification(const QString& method, const QJsonObject& params);

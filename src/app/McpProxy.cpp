@@ -2,11 +2,13 @@
 #include <QCoreApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMap>
 #include <QMetaObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPointer>
+#include <QSet>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -24,6 +26,16 @@ void writeError(const QJsonValue& id, int code, const QString& message) {
         {"error", QJsonObject{{"code", code}, {"message", message}}}};
     writeLine(QJsonDocument(payload).toJson(QJsonDocument::Compact));
 }
+QString requestIdKey(const QJsonValue& id) {
+    if (id.isString()) return "s:" + id.toString();
+    if (id.isDouble()) return "n:" + QString::number(id.toDouble(), 'f', 0);
+    return {};
+}
+bool isLongFileToolCall(const QJsonObject& obj) {
+    if (obj["method"].toString() != "tools/call") return false;
+    const QString name = obj["params"].toObject()["name"].toString();
+    return name == "project_action" || name == "relink_media" || name == "import_media";
+}
 }
 
 int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
@@ -37,6 +49,8 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
     QNetworkAccessManager network;
     int inFlight = 0;
     bool eof = false;
+    QMap<QString, QPointer<QNetworkReply>> inflightReplies;
+    QSet<QString> locallyCancelled;
 
     auto maybeQuit = [&] {
         if (eof && inFlight == 0) app.quit();
@@ -47,11 +61,27 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
         if (trimmed.isEmpty()) return;
         QJsonParseError parseError;
         const auto doc = QJsonDocument::fromJson(trimmed, &parseError);
-        const QJsonValue requestId = (parseError.error == QJsonParseError::NoError && doc.isObject())
-            ? doc.object().value("id") : QJsonValue(QJsonValue::Undefined);
+        const QJsonObject msgObj = (parseError.error == QJsonParseError::NoError && doc.isObject())
+            ? doc.object() : QJsonObject{};
+        const QJsonValue requestId = msgObj.contains("id") ? msgObj.value("id") : QJsonValue(QJsonValue::Undefined);
+        const QString idKey = requestIdKey(requestId);
+
+        // Honor MCP notifications/cancelled locally as well as forwarding it to the server so
+        // the original HTTP socket closes immediately and in-flight workers abort before publishing.
+        if (msgObj["method"].toString() == "notifications/cancelled") {
+            const QString targetKey = requestIdKey(msgObj["params"].toObject().value("requestId"));
+            if (!targetKey.isEmpty()) {
+                locallyCancelled.insert(targetKey);
+                if (auto it = inflightReplies.find(targetKey); it != inflightReplies.end()) {
+                    auto reply = it.value();
+                    inflightReplies.erase(it);
+                    if (reply) reply->abort();
+                }
+            }
+        }
 
         QNetworkRequest request(url);
-        request.setTransferTimeout(30000);
+        request.setTransferTimeout(isLongFileToolCall(msgObj) ? (30 * 60 * 1000) : 60000);
         request.setRawHeader("Content-Type", "application/json");
         request.setRawHeader("Accept", "application/json, text/event-stream");
         request.setRawHeader("MCP-Protocol-Version", "2025-11-25");
@@ -59,13 +89,20 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
 
         ++inFlight;
         auto* reply = network.post(request, trimmed);
-        QObject::connect(reply, &QNetworkReply::finished, &app, [&, reply, requestId] {
+        if (!idKey.isEmpty()) inflightReplies.insert(idKey, reply);
+        QObject::connect(reply, &QNetworkReply::finished, &app, [&, reply, requestId, idKey] {
+            if (!idKey.isEmpty() && inflightReplies.value(idKey) == reply) inflightReplies.remove(idKey);
             const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             const QByteArray body = reply->readAll().trimmed();
             const auto netError = reply->error();
             const QString errorText = reply->errorString();
             reply->deleteLater();
             --inFlight;
+
+            if (!idKey.isEmpty() && locallyCancelled.remove(idKey)) {
+                maybeQuit();
+                return;
+            }
 
             const bool isRequest = !requestId.isUndefined();
             if (status == 202) {

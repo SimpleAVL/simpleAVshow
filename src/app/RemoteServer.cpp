@@ -117,7 +117,7 @@ QJsonObject RemoteServer::state() const {
     return result;
 }
 bool RemoteServer::command(const QString& action, const QString& from) {
-    const State state = c_.transport.state();
+    const State state = c_.effectiveState();
     const QString by = from.isEmpty() ? QString("Phone remote") : "Phone remote " + from;
     if (c_.busy) return false;
     if (action == "go" && state != State::Playing) {

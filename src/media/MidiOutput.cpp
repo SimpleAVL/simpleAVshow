@@ -1,5 +1,6 @@
 #include "media/MidiOutput.h"
 #include <cstddef>
+#include <mutex>
 #ifdef Q_OS_MACOS
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreMIDI/CoreMIDI.h>
@@ -7,26 +8,88 @@
 
 namespace sav {
 #ifdef Q_OS_MACOS
+namespace {
+// Apple documents that disposing an app's last CoreMIDI client can cause the MIDI server to
+// shut down and subsequent MIDIClientCreate calls in the same process to fail. Keep one shared
+// client for the process lifetime (matching RtMidi's design) and only dispose individual ports.
+MIDIClientRef sharedCoreMidiClient(QString& error) {
+    static std::mutex mutex;
+    static MIDIClientRef client = 0;
+    std::lock_guard lock(mutex);
+    if (!client) {
+        const OSStatus status = MIDIClientCreate(CFSTR("SimpleAVShow"), nullptr, nullptr, &client);
+        if (status != noErr || !client) {
+            client = 0;
+            error = QString("Cannot create CoreMIDI client (OSStatus %1)").arg(static_cast<int>(status));
+            return 0;
+        }
+    }
+    return client;
+}
+
+QString cfStringProperty(MIDIObjectRef obj, CFStringRef prop) {
+    if (!obj) return {};
+    CFStringRef cf = nullptr;
+    if (MIDIObjectGetStringProperty(obj, prop, &cf) != noErr || !cf) return {};
+    const QString result = QString::fromCFString(cf);
+    CFRelease(cf);
+    return result;
+}
+
+QString coreMidiEndpointName(MIDIEndpointRef ep) {
+    if (!ep) return {};
+    QString name = cfStringProperty(ep, kMIDIPropertyDisplayName);
+    if (name.isEmpty()) name = cfStringProperty(ep, kMIDIPropertyName);
+    return name;
+}
+
+// Legacy RtMidi-style candidate names (e.g. "DeviceName EndpointName" or raw kMIDIPropertyName)
+// so saved preferences created by older RtMidi-based releases continue to resolve.
+QStringList coreMidiEndpointAliases(MIDIEndpointRef ep) {
+    QStringList names;
+    auto add = [&](const QString& s) { if (!s.isEmpty() && !names.contains(s)) names << s; };
+    const QString display = cfStringProperty(ep, kMIDIPropertyDisplayName);
+    const QString raw = cfStringProperty(ep, kMIDIPropertyName);
+    add(display);
+    add(raw);
+    MIDIEntityRef entity = 0;
+    if (MIDIEndpointGetEntity(ep, &entity) == noErr && entity) {
+        MIDIDeviceRef device = 0;
+        if (MIDIEntityGetDevice(entity, &device) == noErr && device) {
+            const QString devName = cfStringProperty(device, kMIDIPropertyName);
+            const QString entName = cfStringProperty(entity, kMIDIPropertyName);
+            if (!devName.isEmpty() && !raw.isEmpty()) add(devName + " " + raw);
+            if (!devName.isEmpty() && !entName.isEmpty()) add(devName + " " + entName);
+        }
+    }
+    return names;
+}
+
+bool coreMidiEndpointExists(MIDIEndpointRef target) {
+    if (!target) return false;
+    const ItemCount count = MIDIGetNumberOfDestinations();
+    for (ItemCount i = 0; i < count; ++i) {
+        if (MIDIGetDestination(i) == target) return true;
+    }
+    return false;
+}
+}
+
 struct MidiOutput::CoreMidiState {
-    MIDIClientRef client = 0;
     MIDIPortRef outPort = 0;
     MIDIEndpointRef endpoint = 0;
     ~CoreMidiState() {
         if (outPort) MIDIPortDispose(outPort);
-        if (client) MIDIClientDispose(client);
     }
     static std::unique_ptr<CoreMidiState> open(MIDIEndpointRef target, QString& error) {
         if (!target) {
             error = "MIDI port is no longer available";
             return nullptr;
         }
+        const MIDIClientRef client = sharedCoreMidiClient(error);
+        if (!client) return nullptr;
         auto state = std::make_unique<CoreMidiState>();
-        OSStatus status = MIDIClientCreate(CFSTR("SimpleAVShow"), nullptr, nullptr, &state->client);
-        if (status != noErr || !state->client) {
-            error = QString("Cannot create CoreMIDI client (OSStatus %1)").arg(static_cast<int>(status));
-            return nullptr;
-        }
-        status = MIDIOutputPortCreate(state->client, CFSTR("SimpleAVShow Output"), &state->outPort);
+        const OSStatus status = MIDIOutputPortCreate(client, CFSTR("SimpleAVShow Output"), &state->outPort);
         if (status != noErr || !state->outPort) {
             error = QString("Cannot create CoreMIDI output port (OSStatus %1)").arg(static_cast<int>(status));
             return nullptr;
@@ -35,22 +98,6 @@ struct MidiOutput::CoreMidiState {
         return state;
     }
 };
-
-namespace {
-QString coreMidiEndpointName(MIDIEndpointRef ep) {
-    if (!ep) return {};
-    CFStringRef cfName = nullptr;
-    if (MIDIObjectGetStringProperty(ep, kMIDIPropertyDisplayName, &cfName) != noErr || !cfName) {
-        MIDIObjectGetStringProperty(ep, kMIDIPropertyName, &cfName);
-    }
-    QString result;
-    if (cfName) {
-        result = QString::fromCFString(cfName);
-        CFRelease(cfName);
-    }
-    return result;
-}
-}
 #else
 struct MidiOutput::CoreMidiState {};
 #endif
@@ -119,16 +166,31 @@ bool MidiOutput::open(int port, QString& error) {
 
 bool MidiOutput::openByName(const QString& wanted, QString& error) {
 #ifdef Q_OS_MACOS
-    // Resolve directly to a stable CoreMIDI MIDIEndpointRef and open a candidate client
+    // If already connected to this exact live endpoint, keep the open port without re-opening.
+    if (connected() && coreMidiEndpointExists(coreMidi_->endpoint)) {
+        const auto aliases = coreMidiEndpointAliases(coreMidi_->endpoint);
+        for (const auto& alias : aliases) {
+            if (alias.compare(wanted, Qt::CaseInsensitive) == 0) {
+                name_ = coreMidiEndpointName(coreMidi_->endpoint);
+                return true;
+            }
+        }
+    }
+    // Resolve directly to a stable CoreMIDI MIDIEndpointRef and open a candidate output port
     // before touching the existing connection so hot-plug index shifts cannot redirect cues.
     const ItemCount count = MIDIGetNumberOfDestinations();
     MIDIEndpointRef matchedEp = 0;
     QString matchedName;
     for (ItemCount i = 0; i < count; ++i) {
         const MIDIEndpointRef ep = MIDIGetDestination(i);
-        const QString epName = coreMidiEndpointName(ep);
-        if (epName == wanted) { matchedEp = ep; matchedName = epName; break; }
-        if (!matchedEp && epName.compare(wanted, Qt::CaseInsensitive) == 0) { matchedEp = ep; matchedName = epName; }
+        const auto aliases = coreMidiEndpointAliases(ep);
+        bool exact = false, ci = false;
+        for (const auto& alias : aliases) {
+            if (alias == wanted) { exact = true; break; }
+            if (alias.compare(wanted, Qt::CaseInsensitive) == 0) ci = true;
+        }
+        if (exact) { matchedEp = ep; matchedName = coreMidiEndpointName(ep); break; }
+        if (!matchedEp && ci) { matchedEp = ep; matchedName = coreMidiEndpointName(ep); }
     }
     if (!matchedEp) { error = "MIDI port not found: " + wanted; return false; }
     // Verify the endpoint's own display name directly on the MIDIEndpointRef before binding.
@@ -144,6 +206,14 @@ bool MidiOutput::openByName(const QString& wanted, QString& error) {
     lost_.store(false);
     return true;
 #else
+    // On single-client drivers (such as WinMM on Windows), opening a second handle to the
+    // already-connected port fails with MMSYSERR_ALLOCATED. Reuse the live connection if present.
+    if (connected() && name_.compare(wanted, Qt::CaseInsensitive) == 0) {
+        const auto available = ports();
+        for (const auto& p : available) {
+            if (p == name_) return true;
+        }
+    }
     // Open the replacement client before touching the existing connection so a failure preserves it.
     std::string candidateError;
     try {
