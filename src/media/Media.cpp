@@ -444,6 +444,7 @@ private:
         std::mutex mutex;
         std::vector<const StreamStorage*> storages;
         std::atomic<std::size_t> open{0};
+        std::atomic<std::size_t> closing{0}; // Evicted, still counted in open until their files close.
         std::atomic<std::uint64_t> clock{0};
     };
     // Never destroyed: a background sweep may still hold it while the process exits.
@@ -562,7 +563,9 @@ private:
         {
             auto& r = registry();
             const std::lock_guard lock(r.mutex);
-            while (r.open.load() >= openBudget + evicted->size()) {
+            // Decoders an earlier eviction is still closing already make room; evicting more for them
+            // would empty the pool during a burst of opens.
+            while (r.open.load() >= openBudget + evicted->size() + r.closing.load()) {
                 const StreamStorage* owner = nullptr; std::size_t index = 0;
                 std::vector<std::unique_lock<std::mutex>> held;
                 for (const auto* storage : r.storages) {
@@ -578,7 +581,9 @@ private:
             ++r.open;
         }
         if (evicted->empty()) return;
-        try { std::thread([evicted] { evicted->clear(); }).detach(); } catch (...) {} // Otherwise they close here.
+        const auto count = evicted->size(); registry().closing += count;
+        try { std::thread([evicted, count] { evicted->clear(); registry().closing -= count; }).detach(); }
+        catch (...) { evicted->clear(); registry().closing -= count; } // Closed here instead.
     }
 };
 
