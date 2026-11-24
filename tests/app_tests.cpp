@@ -1796,6 +1796,40 @@ private slots:
             float sample[2]; second->storage->read(second->length() - 1, sample, 1);
         }
     }
+    void deletedStreamedSourceIsMissingMedia() {
+        // Streamed audio needs its original: Play and preflight must say so before cues start.
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; const auto path = dir.filePath("cue.wav"); writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 + 211));
+        auto asset = loadMedia(path); QVERIFY(asset.audio->storage->readsSource());
+        Controller c; auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}}; project.assets.insert(asset.id, asset);
+        Clip clip; clip.id = "a"; clip.assetId = asset.id.toStdString(); clip.audio = asset.audio; clip.duration = asset.audio->length(); project.show.clips.push_back(clip);
+        c.replace(project); QVERIFY(c.missingMedia().isEmpty());
+        QVERIFY(QFile::remove(path));
+        QCOMPARE(c.missingMedia(), QStringList{asset.path}); QVERIFY(!c.preflight().filter(asset.path).isEmpty());
+        c.toggle(); QCOMPARE(c.transport.state(), State::Stopped);
+        // A prepared cache does not need the original.
+        writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 + 211)); const auto prepared = loadMedia(path, AudioPreparation::Prepared).audio;
+        QVERIFY(!prepared->storage->readsSource()); QVERIFY(c.replaceAudio({{asset.path, prepared}})); QVERIFY(QFile::remove(path));
+        QVERIFY(c.missingMedia().isEmpty());
+    }
+    void saveKeepsUndoStepsThatSavedMediaWouldInvalidate() {
+        // Opened package; remove a clip that starts 0.8 s into its source; the extracted file then
+        // shrinks to 0.3 s and is reloaded; Save; Undo must restore a valid clip on its old audio.
+        QTemporaryDir dir; const auto source = dir.filePath("cue.wav"); writeBytes(source, waveBytes(16, 1, 2, sampleRate, false, 48000 + 37));
+        auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}};
+        auto asset = loadMedia(source); project.assets.insert(asset.id, asset);
+        Clip clip; clip.id = "a"; clip.assetId = asset.id.toStdString(); clip.audio = asset.audio; clip.offset = frames(.8); clip.duration = frames(.2); project.show.clips.push_back(clip);
+        const auto package = dir.filePath("show.savpack"); writeProjectPackage(project, package);
+        Controller c; c.replace(readProject(package)); const auto extracted = c.project.assets[asset.id].path; const auto before = c.project.show.clips[0].audio;
+        QVERIFY(c.edit([](Project& p) { p.show.clips.clear(); }));
+        writeBytes(extracted, waveBytes(16, 1, 2, sampleRate, false, frames(.3)));
+        QVERIFY(c.replaceAudio({{extracted, loadMedia(extracted).audio}}));
+        c.save(dir.filePath("show.savshow")); QVERIFY2(!c.dirty, qPrintable(c.status));
+        c.undo(); QCOMPARE(c.project.show.clips.size(), std::size_t{1}); QCOMPARE(c.project.show.clips[0].audio, before);
+        validate(c.project);
+    }
     void manifestsThatReferToOtherFilesAreRejected() {
         // Two identical manifests can name different files, so their bytes cannot identify the audio.
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");

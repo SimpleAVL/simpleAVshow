@@ -265,6 +265,7 @@ public:
     ~StreamStorage() override { const std::lock_guard lock(registry().mutex); std::erase(registry().storages, this); }
     Frame length() const noexcept override { return length_; }
     bool decodes() const noexcept override { return true; }
+    bool readsSource() const noexcept override { return true; }
     void read(Frame first, float* stereo, std::size_t count) const override {
         if (first < 0 || first > length_ || count > static_cast<std::size_t>(length_ - first)) throw std::runtime_error("Invalid audio source range");
         std::fill(stereo, stereo + count * 2, 0.f);

@@ -65,6 +65,8 @@ public:
     virtual void read(Frame first, float* stereo, std::size_t count) const = 0;
     // Reads decode compressed media rather than copying prepared samples.
     virtual bool decodes() const noexcept { return false; }
+    // Reads need the original media file (direct WAV or streamed), not a prepared cache.
+    virtual bool readsSource() const noexcept { return false; }
 };
 struct AudioData {
     // Generated/test sources may stay resident. Imported sources use direct

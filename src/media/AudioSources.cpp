@@ -235,6 +235,7 @@ private:
 
 class WaveStorage final : public AudioStorage {
 public:
+    bool readsSource() const noexcept override { return true; }
     WaveStorage(QString path, qint64 offset, Frame length, int channels, int bits, bool floating)
         : path_(std::move(path)), offset_(offset), length_(length), channels_(channels), bits_(bits), floating_(floating),
           size_(QFileInfo(path_).size()) {}

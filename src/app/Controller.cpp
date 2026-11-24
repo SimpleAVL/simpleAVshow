@@ -267,7 +267,9 @@ QStringList Controller::missingMedia() const {
     for (const auto& clip : project.show.clips) {
         const auto asset = project.assets.constFind(QString::fromStdString(clip.assetId));
         if (asset == project.assets.cend() || missing.contains(asset->path)) continue;
-        if (asset->offline || (asset->video && !QFileInfo::exists(asset->path))) missing << asset->path;
+        // Videos, and audio that plays from its original file rather than a prepared cache, need the file now.
+        const bool readsSource = !project.show.tracks[clip.track].visual && asset->audio && asset->audio->storage && asset->audio->storage->readsSource();
+        if (asset->offline || ((asset->video || readsSource) && !QFileInfo::exists(asset->path))) missing << asset->path;
     }
     return missing;
 }
@@ -467,16 +469,19 @@ void Controller::commitSave(Project candidate, QString target) {
         // saved copy: other snapshots keep their own media, such as an asset before a relink, or audio a
         // preparation reload left valid for that snapshot alone.
         for (auto* history : {&undo_, &redo_}) for (auto& snapshot : *history) {
-            bool extracted = false;
-            for (auto it = snapshot.assets.begin(); it != snapshot.assets.end(); ++it) {
+            Project candidate = snapshot; bool extracted = false;
+            for (auto it = candidate.assets.begin(); it != candidate.assets.end(); ++it) {
                 if (const auto from = moved.constFind(it.key()); from != moved.cend() && *from == it->path) {
                     const auto& saved = project.assets[it.key()]; it->path = saved.path; it->audio = saved.audio;
                 }
                 // Each snapshot keeps its own extraction alive while any of its media still lives there.
-                else extracted |= snapshot.packageDirectory && it->path.startsWith(snapshot.packageDirectory->path() + "/");
+                else extracted |= candidate.packageDirectory && it->path.startsWith(candidate.packageDirectory->path() + "/");
             }
-            if (!extracted) snapshot.packageDirectory.reset();
-            bindAudio(snapshot);
+            if (!extracted) candidate.packageDirectory.reset();
+            bindAudio(candidate);
+            // A snapshot the saved media would invalidate (audio reloaded shorter since) keeps its own media
+            // and extraction instead of becoming a state undo cannot arm.
+            try { validate(candidate); snapshot = std::move(candidate); } catch (const std::exception&) {}
         }
         if (sourceDirectory) arm(position());
         // The edits now live in target; a sidecar left next to the previous file would offer them again.
