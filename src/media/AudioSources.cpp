@@ -53,6 +53,16 @@ FileIdentity fileIdentity(const QString& path) {
     return {static_cast<quint64>(info.st_dev), static_cast<quint64>(info.st_ino)};
 #endif
 }
+bool openable(const QString& path) {
+#ifdef Q_OS_WIN
+    const HANDLE file = CreateFileW(windowsPath(path).c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, 0, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    CloseHandle(file); return true;
+#else
+    return QFileInfo(path).isFile();
+#endif
+}
 FileVersion fileVersion(const QString& path) {
     const QFileInfo info(path);
     return {info.size(), info.lastModified().toMSecsSinceEpoch(), fileIdentity(path)};

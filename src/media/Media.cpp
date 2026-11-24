@@ -443,6 +443,9 @@ public:
         for (const auto* storage : r.storages) {
             const std::unique_lock other(storage->mutex_, std::try_to_lock); if (!other) continue;
             std::erase_if(storage->readers_, [&](const auto& reader) { return now - reader->usedAt >= idleAfter; });
+            // A source deleted while open (FAT/exFAT on Windows) keeps its name until its handles close:
+            // release them so the file can be restored or replaced under that name.
+            if (!storage->readers_.empty() && !detail::openable(storage->path_)) storage->readers_.clear();
         }
     }
 private:

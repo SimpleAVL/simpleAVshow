@@ -1411,7 +1411,7 @@ private slots:
         auto stale = loadMedia(source); QCOMPARE(caches.entryList({"*.pcm"}, QDir::Files).size(), count);
         QCOMPARE(sampleAt(*stale.audio, 2000), value); stale.audio.reset();
         // Any timestamp (or size) change hashes the whole file again.
-        setModified(source, original.addSecs(1));
+        setModified(source, original.addSecs(4)); // More than FAT's 2 s step.
         auto fresh = loadMedia(source); QCOMPARE(caches.entryList({"*.pcm"}, QDir::Files).size(), count + 1);
         QVERIFY(sampleAt(*fresh.audio, 2000) != value);
         // Files modified within the timestamp granularity are never indexed, so they are always rehashed.
@@ -1536,13 +1536,16 @@ private slots:
         setAudioPreparation(AudioPreparation::Stream);
         QTemporaryDir dir; const auto path = dir.filePath("rewritten.wav");
         auto bytes = waveBytes(16, 1, 2, 44100, false, 44100); bytes.replace(bytes.size() - 4, 4, QUuid::createUuid().toRfc4122().first(4));
-        writeBytes(path, bytes); const auto time = QDateTime::currentDateTime().addSecs(-3600); setModified(path, time);
+        // Whole even seconds: FAT keeps modification times in 2 s steps.
+        auto time = QDateTime::currentDateTime().addSecs(-3600); time = time.addMSecs(-(time.toMSecsSinceEpoch() % 2000));
+        writeBytes(path, bytes); setModified(path, time);
         QVERIFY(loadMedia(path).audio);
         detail::trimAudioCache(0); // The summary goes; the source index stays.
         {
             QFile file(path); QVERIFY(file.open(QIODevice::ReadWrite)); QVERIFY(file.seek(bytes.size() - 4000));
-            QCOMPARE(file.write(QByteArray(4000, '\x40')), 4000); QVERIFY(file.flush()); QVERIFY(file.setFileTime(time, QFileDevice::FileModificationTime));
+            QCOMPARE(file.write(QByteArray(4000, '\x40')), 4000);
         }
+        setModified(path, time); // After closing: exFAT updates the time when a written file closes.
         QCOMPARE(QFileInfo(path).size(), bytes.size()); QCOMPARE(QFileInfo(path).lastModified(), time);
         QVERIFY_THROWS_EXCEPTION(std::runtime_error, loadMedia(path));
         QVERIFY(QDir(detail::audioCacheDirectory()).entryList({"*.stream"}, QDir::Files).isEmpty());
@@ -1830,7 +1833,9 @@ private slots:
         QCOMPARE(c.missingMedia(), QStringList{asset.path}); QVERIFY(!c.preflight().filter(asset.path).isEmpty());
         QVERIFY(Controller::needsRelink(c.project.assets[asset.id])); // Relink offers it, though it was online when opened.
         c.toggle(); QCOMPARE(c.transport.state(), State::Stopped);
-        // A prepared cache does not need the original.
+        // A prepared cache does not need the original. Restoring the file under its name needs the
+        // streamed reader released, which happens for unopenable sources (FAT/exFAT keep the name until then).
+        closeIdleStreams();
         writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 + 211)); const auto prepared = loadMedia(path, AudioPreparation::Prepared).audio;
         QVERIFY(!prepared->storage->readsSource()); QCOMPARE(c.replaceAudio({{asset.path, prepared}}), Controller::AudioSwap::Applied); QVERIFY(QFile::remove(path));
         QVERIFY(c.missingMedia().isEmpty()); QVERIFY(!Controller::needsRelink(c.project.assets[asset.id]));
@@ -1993,7 +1998,12 @@ private slots:
         const auto time = QDateTime::currentDateTimeUtc().addDays(-1); setModified(path, time);
         const auto asset = loadMedia(path); float sample[2]; asset.audio->storage->read(100, sample, 1);
         bytes[bytes.size() - 2] ^= 0x40; const auto replacement = dir.filePath("replacement.wav"); writeBytes(replacement, bytes);
-        setModified(replacement, time); QVERIFY(QFile::remove(path)); QVERIFY(QFile::rename(replacement, path));
+        setModified(replacement, time); QVERIFY(QFile::remove(path));
+        // Where deleting an open file only marks it (FAT/exFAT), its name frees once the open reader is
+        // released, which a read of the missing source does; that read is retryable, not "changed".
+        try { asset.audio->storage->read(100, sample, 1); QFAIL("missing source read"); }
+        catch (const AudioSourceChanged&) { QFAIL("a missing source can come back"); } catch (const std::runtime_error&) {}
+        QVERIFY(QFile::rename(replacement, path));
         QCOMPARE(QFileInfo(path).size(), static_cast<qint64>(bytes.size())); QCOMPARE(QFileInfo(path).lastModified(), time.toLocalTime());
         QVERIFY_THROWS_EXCEPTION(AudioSourceChanged, asset.audio->storage->read(100, sample, 1));
         // Reopening, as the error asks, must measure the replacement rather than reuse the old summary.
