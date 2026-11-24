@@ -228,19 +228,29 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
     const std::uint64_t validChat = chatAgentEpoch_.load(std::memory_order_acquire);
 
     auto applyUrgentStop = [&](std::size_t fromIndex) noexcept {
+        // Coalesce any backlogged valid Seeks to the final seek target so emergency Stop All
+        // runs in O(1) audio work rather than cutting/repriming every intermediate seek.
+        bool hasFinalSeek = false;
+        Frame finalSeekPos = 0;
         for (std::size_t i = fromIndex; i < countQueued; ++i) {
             const auto& c = batch[i];
-            if (c.action == Action::Seek && isSourceValid(c.source, c.sourceEpoch))
-                apply(c);
-            else
-                ++applied_;
+            if (c.action == Action::Seek && isSourceValid(c.source, c.sourceEpoch)) {
+                hasFinalSeek = true;
+                finalSeekPos = c.position;
+            }
+            ++applied_;
         }
         Command residual;
         while (commands_.pop(residual)) {
-            if (residual.action == Action::Seek && isSourceValid(residual.source, residual.sourceEpoch))
-                apply(residual);
-            else
-                ++applied_;
+            if (residual.action == Action::Seek && isSourceValid(residual.source, residual.sourceEpoch)) {
+                hasFinalSeek = true;
+                finalSeekPos = residual.position;
+            }
+            ++applied_;
+        }
+        if (hasFinalSeek) {
+            position_ = std::clamp(finalSeekPos, Frame{0}, show_->duration);
+            locate(position_);
         }
         applyStopAll();
         urgentStop_.store(false, std::memory_order_release);

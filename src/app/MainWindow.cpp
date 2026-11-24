@@ -1136,9 +1136,8 @@ void MainWindow::openOutput(int index, bool confirmEditorCover) {
     openingOutput_ = true;
     output_->setPicture(c_.compose()); outputWindow_->hide(); outputWindow_->winId();
     if (auto* handle = outputWindow_->windowHandle()) {
-        connect(handle, &QWindow::screenChanged, this, [this](QScreen*) {
-            if (!openingOutput_) screensChanged();
-        }, Qt::UniqueConnection);
+        disconnect(outputScreenConn_);
+        outputScreenConn_ = connect(handle, &QWindow::screenChanged, this, &MainWindow::onOutputWindowScreenChanged);
         handle->setScreen(target);
     }
     outputWindow_->setGeometry(target->geometry()); outputWindow_->showFullScreen();
@@ -1152,6 +1151,9 @@ void MainWindow::openOutput(int index, bool confirmEditorCover) {
 #endif
     openingOutput_ = false;
     activateWindow();
+}
+void MainWindow::onOutputWindowScreenChanged(QScreen*) {
+    if (!openingOutput_) screensChanged();
 }
 void MainWindow::screensChanged() {
     // A display that drops out must not leave a frameless fullscreen window over the editor; it returns with the display.

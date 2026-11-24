@@ -75,6 +75,7 @@ private:
     std::string inspectedClip_, inspectedMarker_;
     int inspectedTrack_ = -1;
     QPointer<QScreen> outputTargetScreen_;
+    QMetaObject::Connection outputScreenConn_;
     QString outputScreen_, outputScreenManufacturer_, outputScreenModel_, outputScreenSerial_;
     void buildInspector();
     void refresh();
@@ -108,6 +109,7 @@ private:
     void remoteSettings();
     void outputSettings();
     void openOutput(int screen, bool confirmEditorCover = true);
+    void onOutputWindowScreenChanged(QScreen* screen);
     void screensChanged();
     void requestShowMode(bool enabled);
     void save(bool as = false);

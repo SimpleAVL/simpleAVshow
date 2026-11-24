@@ -438,8 +438,10 @@ bool MidiOutput::openByName(const QString& wanted, QString& error) {
 #endif
 }
 
-bool MidiOutput::send(const std::vector<unsigned char>& message, QString& error) {
+bool MidiOutput::send(const std::vector<unsigned char>& message, QString& error,
+                      const std::function<bool()>& allowSubmit) {
     if (message.empty()) return true;
+    if (allowSubmit && !allowSubmit()) return true;
     if (!connected()) { error = "MIDI cue not sent: no output port is connected"; return false; }
     if (!validMidi(message)) { error = "Invalid MIDI message"; return false; }
 #ifdef Q_OS_MACOS
@@ -452,6 +454,7 @@ bool MidiOutput::send(const std::vector<unsigned char>& message, QString& error)
         error = "MIDI message exceeds CoreMIDI packet buffer";
         return false;
     }
+    if (allowSubmit && !allowSubmit()) return true;
     const OSStatus status = MIDISend(coreMidi_->outPort, coreMidi_->endpoint, packetList);
     if (status == noErr) return true;
     error = QString("MIDI cue not sent to %1 (OSStatus %2)").arg(name_).arg(static_cast<int>(status));
@@ -462,6 +465,7 @@ bool MidiOutput::send(const std::vector<unsigned char>& message, QString& error)
         DWORD packet = 0;
         for (std::size_t i = 0; i < message.size(); ++i)
             packet |= static_cast<DWORD>(message[i]) << (8 * i);
+        if (allowSubmit && !allowSubmit()) return true;
         const MMRESULT res = midiOutShortMsg(winMm_->handle, packet);
         if (res == MMSYSERR_NOERROR) return true;
         error = QString("MIDI cue not sent to %1 (WinMM error %2)").arg(name_).arg(static_cast<unsigned>(res));
@@ -480,11 +484,16 @@ bool MidiOutput::send(const std::vector<unsigned char>& message, QString& error)
     sysex->hdr.lpData = sysex->data.data();
     sysex->hdr.dwBufferLength = static_cast<DWORD>(sysex->data.size());
     sysex->hdr.dwBytesRecorded = sysex->hdr.dwBufferLength;
+    if (allowSubmit && !allowSubmit()) return true;
     MMRESULT res = midiOutPrepareHeader(winMm_->handle, &sysex->hdr, sizeof(MIDIHDR));
     if (res != MMSYSERR_NOERROR) {
         error = QString("MIDI SysEx prepare failed on %1 (WinMM error %2)").arg(name_).arg(static_cast<unsigned>(res));
         lost_.store(true);
         return false;
+    }
+    if (allowSubmit && !allowSubmit()) {
+        midiOutUnprepareHeader(winMm_->handle, &sysex->hdr, sizeof(MIDIHDR));
+        return true;
     }
     res = midiOutLongMsg(winMm_->handle, &sysex->hdr, sizeof(MIDIHDR));
     if (res != MMSYSERR_NOERROR) {
@@ -495,7 +504,7 @@ bool MidiOutput::send(const std::vector<unsigned char>& message, QString& error)
         return false;
     }
     // Scale the SysEx deadline for 31.25 kbps DIN MIDI (~3.125 bytes/ms, so 4096 bytes needs >1.31 s)
-    // plus margin, while still honoring abortSend_ within ~1 ms on shutdown/revocation/Play.
+    // plus margin, while still honoring abortSend_ within ~1 ms on shutdown/close.
     const auto timeoutMs = std::max<std::int64_t>(1500, static_cast<std::int64_t>(message.size()) + 1500);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     while ((res = midiOutUnprepareHeader(winMm_->handle, &sysex->hdr, sizeof(MIDIHDR))) == MIDIERR_STILLPLAYING) {
@@ -521,6 +530,7 @@ bool MidiOutput::send(const std::vector<unsigned char>& message, QString& error)
     lost_.store(true);
     return false;
 #else
+    if (allowSubmit && !allowSubmit()) return true;
     try {
         error_.clear(); output_->sendMessage(&message);
         if (error_.empty()) return true;

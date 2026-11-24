@@ -687,7 +687,19 @@ void AgentChatPanel::startNewSession() {
     if (!chatMcpToken_.isEmpty()) mcp_.revokeChatToken(chatMcpToken_);
     chatMcpToken_ = mcp_.issueChatToken();
     AcpMcpConfig mcpConfig{"simpleavshow", mcp_.endpoint(), chatMcpToken_, QCoreApplication::applicationFilePath()};
+    connecting_ = true;
     acp_.startNewSession(currentWorkingDirectory(), mcpConfig);
+    connecting_ = false;
+    if (acp_.state() == AcpState::Disconnected || acp_.state() == AcpState::Error) {
+        if (!chatMcpToken_.isEmpty()) {
+            mcp_.revokeChatToken(chatMcpToken_);
+            chatMcpToken_.clear();
+        }
+        if (autoStartedMcp_ && mcp_.running()) {
+            autoStartedMcp_ = false;
+            if (!mcp_.externallyShared()) mcp_.stop();
+        }
+    }
     renderTranscript();
     updateControls();
 }

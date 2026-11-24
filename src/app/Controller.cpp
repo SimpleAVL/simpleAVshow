@@ -215,22 +215,45 @@ void Controller::startMidiThread() {
             for (;;) {
                 if (midiStop_.load()) break;
                 PendingTestMidi item;
+                std::shared_ptr<std::atomic<bool>> preSubmitCancel;
                 bool authorized = false;
                 {
                     std::lock_guard lock(testMidiMutex_);
                     if (testMidiQueue_.empty()) break;
                     item = std::move(testMidiQueue_.front());
                     testMidiQueue_.pop_front();
-                    authorized = !midiStop_.load() &&
+                    authorized = !midiStop_.load(std::memory_order_acquire) &&
                         !showModeAtomic_.load(std::memory_order_acquire) &&
                         !(item.ownerCancelled && item.ownerCancelled->load(std::memory_order_acquire)) &&
                         item.epoch == transport.epoch() &&
                         item.gen == testMidiGen_.load(std::memory_order_acquire) &&
                         transport.state() != State::Playing && transport.state() != State::Held;
+                    if (authorized) {
+                        preSubmitCancel = std::make_shared<std::atomic<bool>>(false);
+                        inFlightTestCancel_ = preSubmitCancel;
+                        inFlightTestOwner_ = item.owner;
+                    }
                 }
                 if (!authorized) continue;
+                auto allowSubmit = [&]() -> bool {
+                    return !midiStop_.load(std::memory_order_acquire) &&
+                        !showModeAtomic_.load(std::memory_order_acquire) &&
+                        !(item.ownerCancelled && item.ownerCancelled->load(std::memory_order_acquire)) &&
+                        !(preSubmitCancel && preSubmitCancel->load(std::memory_order_acquire)) &&
+                        item.epoch == transport.epoch() &&
+                        item.gen == testMidiGen_.load(std::memory_order_acquire) &&
+                        transport.state() != State::Playing && transport.state() != State::Held;
+                };
                 QString error;
-                if (!midi.send(item.bytes, error) && !midiStop_.load()) {
+                const bool sent = midi.send(item.bytes, error, allowSubmit);
+                {
+                    std::lock_guard lock(testMidiMutex_);
+                    if (inFlightTestCancel_ == preSubmitCancel) {
+                        inFlightTestCancel_.reset();
+                        inFlightTestOwner_.clear();
+                    }
+                }
+                if (!sent && !midiStop_.load()) {
                     QMetaObject::invokeMethod(this, [this, error] { report(error); }, Qt::QueuedConnection);
                 }
             }
@@ -481,14 +504,18 @@ bool Controller::prepareAudio() {
     } catch (const std::exception& error) { report("Cannot prepare audio. Open Outputs to choose a device. " + QString::fromUtf8(error.what())); return false; }
 }
 void Controller::cancelPendingTestMidi(const QString& owner) {
-    // Non-blocking: discard queued test messages before driver submission, and let an already
-    // submitted <=4 KiB message finish naturally instead of calling midiOutReset on the shared show port.
+    // Non-blocking: discard queued test messages and flag any dequeued pre-driver submission
+    // so it cancels before entering the driver, while letting an already submitted <=4 KiB
+    // message finish naturally instead of calling midiOutReset on the shared show port.
     std::lock_guard lock(testMidiMutex_);
     if (owner.isEmpty()) {
         testMidiGen_.fetch_add(1, std::memory_order_release);
         testMidiQueue_.clear();
+        if (inFlightTestCancel_) inFlightTestCancel_->store(true, std::memory_order_release);
     } else {
         std::erase_if(testMidiQueue_, [&](const PendingTestMidi& item) { return item.owner == owner; });
+        if (inFlightTestCancel_ && inFlightTestOwner_ == owner)
+            inFlightTestCancel_->store(true, std::memory_order_release);
     }
 }
 bool Controller::testMidi(const std::vector<unsigned char>& bytes, const QString& owner,
@@ -692,7 +719,10 @@ bool Controller::commitSave(Project candidate, QString target) {
         writeProject(candidate, target); project.assets = std::move(candidate.assets); bindAudio(project); project.packageDirectory.reset(); path = target; dirty = false; ++projectRevision_;
         // Rebase Undo/Redo history ONLY for assets actually materialized by this save whose
         // historical source identity still matches the pre-save asset (never overwrite relink history).
+        // Check each snapshot against its OWN packageDirectory so a second save never deletes
+        // an extraction directory still referenced by an Undo snapshot.
         for (auto* history : {&undo_, &redo_}) for (auto& snapshot : *history) {
+            const auto snapshotDir = snapshot.packageDirectory;
             bool extracted = false;
             for (auto it = snapshot.assets.begin(); it != snapshot.assets.end(); ++it) {
                 const auto before = preSaveAssets.constFind(it.key());
@@ -703,9 +733,9 @@ bool Controller::commitSave(Project candidate, QString target) {
                 if (materialized) {
                     it->path = saved->path;
                     it->audio = saved->audio;
-                } else {
-                    extracted |= sourceDirectory && it->path.startsWith(sourceDirectory->path() + "/");
                 }
+                if (snapshotDir && it->path.startsWith(snapshotDir->path() + "/"))
+                    extracted = true;
             }
             if (!extracted) snapshot.packageDirectory.reset();
             bindAudio(snapshot);

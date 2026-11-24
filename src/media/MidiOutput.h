@@ -2,6 +2,7 @@
 #include <RtMidi.h>
 #include <QStringList>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -17,7 +18,8 @@ public:
     bool open(int port, QString& error);
     // Resolves and opens a port by name (binding directly to the endpoint identity on CoreMIDI).
     bool openByName(const QString& name, QString& error);
-    bool send(const std::vector<unsigned char>& message, QString& error);
+    bool send(const std::vector<unsigned char>& message, QString& error,
+              const std::function<bool()>& allowSubmit = {});
     void close();
     // Interrupts any bounded WinMM SysEx wait immediately when stopping the MIDI worker thread.
     void requestAbortSend() noexcept { abortSend_.store(true, std::memory_order_release); }

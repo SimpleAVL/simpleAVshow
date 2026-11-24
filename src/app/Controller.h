@@ -109,6 +109,8 @@ private:
         std::shared_ptr<std::atomic<bool>> ownerCancelled;
     };
     std::mutex testMidiMutex_;
+    std::shared_ptr<std::atomic<bool>> inFlightTestCancel_;
+    QString inFlightTestOwner_;
     std::deque<PendingTestMidi> testMidiQueue_;
     QElapsedTimer midiWatch_, stall_;
     std::uint64_t heartbeat_ = 0;

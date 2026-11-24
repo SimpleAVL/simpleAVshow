@@ -448,25 +448,41 @@ void AcpClient::setState(AcpState next) {
 }
 
 void AcpClient::connectToAgent(const QString& program, const QStringList& args, const QString& cwd, const AcpMcpConfig& mcp) {
-    disconnectFromAgent();
-    const QString executable = findAcpExecutable(program);
+    program_ = program;
+    args_ = args;
+    cwd_ = cwd.isEmpty() ? QDir::homePath() : cwd;
+    mcp_ = mcp;
+    launchProcess(true);
+}
+
+void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
+    if (emitDisconnectedOnReset) {
+        disconnectFromAgent();
+    } else {
+        stopping_ = true;
+        deadlineTimer_.stop();
+        cancelTimer_.stop();
+        cancelAllPendingPermissions();
+        pending_.clear();
+        sessionId_.clear();
+        teardownProcess(false);
+    }
+    const QString executable = findAcpExecutable(program_);
     if (executable.isEmpty()) {
-        failConnection(QString("Could not find executable “%1”.").arg(program));
+        failConnection(QString("Could not find executable “%1”.").arg(program_));
         return;
     }
 #ifdef Q_OS_WIN
     QString batchErr;
-    if (!validateBatchWrapperArgs(executable, args, batchErr)) {
+    if (!validateBatchWrapperArgs(executable, args_, batchErr)) {
         failConnection(batchErr);
         return;
     }
 #endif
     stopping_ = false;
     cancelling_ = false;
-    cwd_ = cwd.isEmpty() ? QDir::homePath() : cwd;
-    mcp_ = mcp;
     agentName_.clear(); agentVersion_.clear(); sessionId_.clear(); lastError_.clear();
-    agentSupportsHttpMcp_ = false; usedHttpMcp_ = false;
+    agentSupportsHttpMcp_ = false; agentSupportsSessionClose_ = false; usedHttpMcp_ = false;
     stdoutBuffer_.clear(); pending_.clear(); pendingPermissions_.clear();
     nextId_ = 1;
 
@@ -572,19 +588,30 @@ void AcpClient::connectToAgent(const QString& program, const QStringList& args, 
     armDeadline(startupTimeoutMs_, "Timed out starting ACP agent process.");
     // Do not call waitForStarted() or dereference process_ after start(): on Windows
     // QProcess::start() can emit FailedToStart synchronously and clear process_.
-    process_->start(executable, args);
+    process_->start(executable, args_);
 }
 
 void AcpClient::startNewSession(const QString& cwd, const AcpMcpConfig& mcp) {
     if (!process_ || process_->state() != QProcess::Running) return;
+    const QString prevSession = sessionId_;
+    cwd_ = cwd.isEmpty() ? cwd_ : cwd;
+    mcp_ = mcp;
+    // Agents that lack ACP session/close keep old sessions and their MCP/stdio helpers alive
+    // indefinitely if we only send session/new; restart the agent process cleanly instead.
+    if (!agentSupportsSessionClose_ && !prevSession.isEmpty() && !program_.isEmpty()) {
+        launchProcess(false);
+        return;
+    }
     if (state_ == AcpState::Prompting) cancelPrompt();
     else cancelAllPendingPermissions();
     cancelling_ = false;
-    cwd_ = cwd.isEmpty() ? cwd_ : cwd;
-    mcp_ = mcp;
     sessionId_.clear();
     setState(AcpState::Connecting);
     armDeadline(handshakeTimeoutMs_, "Timed out waiting for ACP session creation.");
+    if (agentSupportsSessionClose_ && !prevSession.isEmpty()) {
+        sendRequest("session/close", {{"sessionId", prevSession}}, PendingKind::SessionClose, prevSession);
+        return;
+    }
     QJsonObject params{
         {"cwd", cwd_},
         {"mcpServers", buildMcpServers()}
@@ -752,6 +779,12 @@ void AcpClient::handleResponse(int id, const QJsonObject& msg) {
             emit promptFinished("error");
             return;
         }
+        if (kind == PendingKind::SessionClose) {
+            // Closing the previous session failed: restart the agent process so no orphaned session lingers.
+            if (!program_.isEmpty()) launchProcess(false);
+            else failConnection(errMessage);
+            return;
+        }
         if (code == -32000 || errMessage.contains("auth", Qt::CaseInsensitive)) {
             failConnection("Authentication required by the ACP agent: " + errMessage + ". Sign in via its CLI first, then reconnect.");
         } else {
@@ -774,6 +807,15 @@ void AcpClient::handleResponse(int id, const QJsonObject& msg) {
         const auto caps = result["agentCapabilities"].toObject();
         const auto mcpCaps = caps.contains("mcpCapabilities") ? caps["mcpCapabilities"].toObject() : result["mcpCapabilities"].toObject();
         agentSupportsHttpMcp_ = mcpCaps["http"].toBool(false);
+        const auto sessionCaps = caps["sessionCapabilities"].toObject();
+        agentSupportsSessionClose_ = sessionCaps.contains("close") &&
+            (sessionCaps["close"].isObject() || sessionCaps["close"].toBool(false));
+        QJsonObject params{
+            {"cwd", cwd_},
+            {"mcpServers", buildMcpServers()}
+        };
+        sendRequest("session/new", params, PendingKind::SessionNew);
+    } else if (kind == PendingKind::SessionClose) {
         QJsonObject params{
             {"cwd", cwd_},
             {"mcpServers", buildMcpServers()}

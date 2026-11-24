@@ -104,7 +104,7 @@ signals:
     void errorOccurred(const QString& message);
 
 private:
-    enum class PendingKind { Initialize, SessionNew, Prompt };
+    enum class PendingKind { Initialize, SessionClose, SessionNew, Prompt };
     struct PendingRequest {
         PendingKind kind = PendingKind::Initialize;
         QString sessionId;
@@ -124,9 +124,12 @@ private:
     std::shared_ptr<ProcessTreeHandle> processTree_;
     AcpState state_ = AcpState::Disconnected;
     QString agentName_, agentVersion_, sessionId_, lastError_;
+    QString program_;
+    QStringList args_;
     QString cwd_;
     AcpMcpConfig mcp_;
     bool agentSupportsHttpMcp_ = false;
+    bool agentSupportsSessionClose_ = false;
     bool usedHttpMcp_ = false;
     bool stopping_ = false;
     bool cancelling_ = false;
@@ -146,6 +149,7 @@ private:
 
     void setState(AcpState next);
     void armDeadline(int ms, const QString& reason);
+    void launchProcess(bool emitDisconnectedOnReset);
     void teardownProcess(bool blocking);
     void scheduleTreeCleanup(std::shared_ptr<ProcessTreeHandle> tree);
     void sendJson(const QJsonObject& payload);

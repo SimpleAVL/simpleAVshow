@@ -28,9 +28,11 @@ int main(int argc, char** argv) {
     const bool silentHandshake = args.contains("--silent-handshake");
     const bool ignoreCancel = args.contains("--ignore-cancel");
     const bool exitCleanAfterPermission = args.contains("--exit-clean-after-permission");
+    const bool noSessionClose = args.contains("--no-session-close");
 
     int sessionCounter = 0;
     QString sessionId = "mock-session-1";
+    QString lastClosedSession;
     QJsonArray lastMcpServers;
     bool waitingPermission = false;
     bool waitingCancel = false;
@@ -77,7 +79,7 @@ int main(int argc, char** argv) {
             {"sessionId", sessionId},
             {"update", QJsonObject{
                 {"sessionUpdate", "agent_message_chunk"},
-                {"content", QJsonObject{{"type", "text"}, {"text", note + " | mcp=" + mcpSummary}}}
+                {"content", QJsonObject{{"type", "text"}, {"text", note + " | pid=" + QString::number(QCoreApplication::applicationPid()) + " | closed=" + lastClosedSession + " | mcp=" + mcpSummary}}}
             }}
         }}});
         send({{"jsonrpc", "2.0"}, {"id", pendingPromptId}, {"result", QJsonObject{{"stopReason", "end_turn"}}}});
@@ -109,15 +111,21 @@ int main(int argc, char** argv) {
         if (method == "initialize") {
             std::cerr << "mock-acp-agent initialized\n" << std::flush;
             if (silentHandshake) continue;
+            QJsonObject agentCaps{
+                {"mcpCapabilities", QJsonObject{{"http", httpMcp}, {"sse", false}}}
+            };
+            if (!noSessionClose)
+                agentCaps.insert("sessionCapabilities", QJsonObject{{"close", QJsonObject{}}});
             QJsonObject initResult{
                 {"agentInfo", QJsonObject{{"name", "MockACP"}, {"version", "1.0"}}},
-                {"agentCapabilities", QJsonObject{
-                    {"mcpCapabilities", QJsonObject{{"http", httpMcp}, {"sse", false}}}
-                }}
+                {"agentCapabilities", agentCaps}
             };
             if (badProtocol) initResult.insert("protocolVersion", 99);
             else if (!missingProtocol) initResult.insert("protocolVersion", 1);
             send({{"jsonrpc", "2.0"}, {"id", id}, {"result", initResult}});
+        } else if (method == "session/close") {
+            lastClosedSession = params["sessionId"].toString();
+            send({{"jsonrpc", "2.0"}, {"id", id}, {"result", QJsonObject{}}});
         } else if (method == "session/new") {
             lastMcpServers = params["mcpServers"].toArray();
             const QString previousSession = pendingPromptSession;

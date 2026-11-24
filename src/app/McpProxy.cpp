@@ -47,6 +47,11 @@ bool isMutatingToolCall(const QJsonObject& obj) {
         name == "configure_outputs" || name == "configure_remote" ||
         name == "project_action" || name == "transport_control";
 }
+bool isOrderedControlCall(const QJsonObject& obj) {
+    if (obj["method"].toString() != "tools/call") return false;
+    const QString name = obj["params"].toObject()["name"].toString();
+    return name == "transport_control" || name == "seek_and_select";
+}
 }
 
 int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
@@ -81,13 +86,34 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
         bool isRetry = false;
     };
     std::deque<PendingRequest> deferredQueue;
+    std::deque<PendingRequest> controlQueue;
+    bool controlInFlight = false;
 
     auto maybeQuit = [&] {
-        if (eof && inFlight == 0 && !reinitializing && deferredQueue.empty()) app.quit();
+        if (eof && inFlight == 0 && !reinitializing && deferredQueue.empty() && controlQueue.empty()) app.quit();
     };
 
     std::function<void(const QByteArray&, const QJsonObject&, const QJsonValue&, const QString&, bool)> sendRequest;
     std::function<void()> startReinit;
+    std::function<void()> pumpControlQueue;
+
+    pumpControlQueue = [&] {
+        if (controlInFlight || reinitializing) return;
+        while (!controlQueue.empty()) {
+            PendingRequest item = std::move(controlQueue.front());
+            controlQueue.pop_front();
+            if (!item.idKey.isEmpty() && locallyCancelled.remove(item.idKey)) continue;
+            if (eof && isMutatingToolCall(item.msgObj)) continue;
+            if (sessionInvalid) {
+                writeError(item.requestId, -32001, "MCP session expired and reinitialization failed; reinitialize before sending further requests");
+                continue;
+            }
+            controlInFlight = true;
+            sendRequest(item.trimmed, item.msgObj, item.requestId, item.idKey, item.isRetry);
+            return;
+        }
+        maybeQuit();
+    };
 
     auto finishReinit = [&](quint64 reinitStartGen, bool ok, const QByteArray& establishedSid = {}, const QByteArray& establishedProto = {}) {
         reinitializing = false;
@@ -113,6 +139,7 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
             if (usable) sendRequest(item.trimmed, item.msgObj, item.requestId, item.idKey, item.isRetry);
             else writeError(item.requestId, -32001, "MCP session expired and reinitialization failed");
         }
+        pumpControlQueue();
         maybeQuit();
     };
 
@@ -175,9 +202,10 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
         if (!token.isEmpty()) request.setRawHeader("Authorization", "Bearer " + token);
 
         ++inFlight;
+        const bool orderedControl = isOrderedControlCall(msgObj);
         auto* reply = network.post(request, trimmed);
         if (!idKey.isEmpty()) inflightReplies.insert(idKey, {reply, isMutatingToolCall(msgObj)});
-        QObject::connect(reply, &QNetworkReply::finished, &app, [&, reply, trimmed, msgObj, requestId, idKey, sentSession, sentGeneration, isRetry] {
+        QObject::connect(reply, &QNetworkReply::finished, &app, [&, reply, trimmed, msgObj, requestId, idKey, sentSession, sentGeneration, isRetry, orderedControl] {
             if (!idKey.isEmpty() && inflightReplies.value(idKey).reply == reply) inflightReplies.remove(idKey);
             const QByteArray serverSession = reply->rawHeader("Mcp-Session-Id").trimmed();
             const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -186,6 +214,12 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
             const QString errorText = reply->errorString();
             reply->deleteLater();
             --inFlight;
+            auto finishControlTurn = [&] {
+                if (orderedControl) {
+                    controlInFlight = false;
+                    pumpControlQueue();
+                }
+            };
             const bool isInit = msgObj["method"].toString() == "initialize";
             if (netError == QNetworkReply::NoError && status >= 200 && status < 300 && !serverSession.isEmpty() &&
                 (isInit || sentGeneration == sessionGeneration)) {
@@ -196,6 +230,7 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
             }
 
             if (!idKey.isEmpty() && locallyCancelled.remove(idKey)) {
+                finishControlTurn();
                 maybeQuit();
                 return;
             }
@@ -212,14 +247,17 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
                     if (!isRetry && !mutating) {
                         if (reinitializing) {
                             deferredQueue.push_back({trimmed, msgObj, requestId, idKey, true});
+                            finishControlTurn();
                             return;
                         }
                         if (!sessionInvalid && !sessionId.isEmpty()) {
                             sendRequest(trimmed, msgObj, requestId, idKey, true);
+                            finishControlTurn();
                             return;
                         }
                     }
                     writeError(requestId, -32001, "MCP session expired; retry after checking current state");
+                    finishControlTurn();
                     maybeQuit();
                     return;
                 }
@@ -229,11 +267,13 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
                         if (!eof) startReinit();
                         else { sessionInvalid = true; ++sessionGeneration; }
                         writeError(requestId, -32001, "MCP session expired; reinitializing session — retry after checking current state");
+                        finishControlTurn();
                         maybeQuit();
                         return;
                     }
                     deferredQueue.push_back({trimmed, msgObj, requestId, idKey, true});
                     startReinit();
+                    finishControlTurn();
                     return;
                 }
                 sessionInvalid = true;
@@ -243,6 +283,7 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
             const bool isRequest = !requestId.isUndefined();
             if (status == 202) {
                 if (isRequest) writeError(requestId, -32000, "MCP server returned HTTP 202 without a response for request");
+                finishControlTurn();
                 maybeQuit();
                 return;
             }
@@ -255,16 +296,19 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
                         (obj.contains("result") != obj.contains("error")) &&
                         (!isRequest || obj["id"] == requestId);
                     if (validEnvelope) {
-                        if (msgObj["method"].toString() == "initialize" && obj.contains("result")) {
+                        if (isInit && obj.contains("result")) {
                             const QString negotiated = obj["result"].toObject()["protocolVersion"].toString().trimmed();
                             if (!negotiated.isEmpty()) protocolVersion = negotiated.toUtf8();
                             sessionInvalid = false;
+                            pumpControlQueue();
                         }
                         writeLine(responseDoc.toJson(QJsonDocument::Compact));
+                        finishControlTurn();
                         maybeQuit();
                         return;
                     }
                     writeError(requestId, -32000, "MCP server returned an invalid or mismatched JSON-RPC response");
+                    finishControlTurn();
                     maybeQuit();
                     return;
                 }
@@ -278,6 +322,8 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
                     ? QString("MCP server returned an empty response (HTTP %1)").arg(status)
                     : QString("MCP server returned invalid JSON (HTTP %1)").arg(status));
             }
+            finishControlTurn();
+            if (sessionInvalid) pumpControlQueue();
             maybeQuit();
         });
     };
@@ -287,11 +333,29 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
         if (trimmed.isEmpty()) return;
         QJsonParseError parseError;
         const auto doc = QJsonDocument::fromJson(trimmed, &parseError);
-        const QJsonObject msgObj = (parseError.error == QJsonParseError::NoError && doc.isObject())
-            ? doc.object() : QJsonObject{};
-        const QJsonValue requestId = msgObj.contains("id") ? msgObj.value("id") : QJsonValue(QJsonValue::Undefined);
+        if (parseError.error != QJsonParseError::NoError) {
+            writeError(QJsonValue(QJsonValue::Null), -32700, "Parse error");
+            maybeQuit();
+            return;
+        }
+        if (!doc.isObject()) {
+            writeError(QJsonValue(QJsonValue::Null), -32600, "Invalid Request");
+            maybeQuit();
+            return;
+        }
+        const QJsonObject msgObj = doc.object();
+        const bool hasId = msgObj.contains("id");
+        const QJsonValue requestId = hasId ? msgObj.value("id") : QJsonValue(QJsonValue::Undefined);
+        const bool validId = !hasId || requestId.isString() || requestId.isDouble() || requestId.isNull();
+        const QJsonValue methodVal = msgObj.value("method");
+        if (msgObj["jsonrpc"].toString() != "2.0" || !methodVal.isString() || methodVal.toString().isEmpty() || !validId) {
+            writeError(validId && hasId ? requestId : QJsonValue(QJsonValue::Null), -32600, "Invalid Request");
+            maybeQuit();
+            return;
+        }
         const QString idKey = requestIdKey(requestId);
-        if (msgObj["method"].toString() == "initialize") {
+        const QString method = methodVal.toString();
+        if (method == "initialize") {
             initPayload = trimmed;
         } else if (sessionInvalid) {
             writeError(requestId, -32001, "MCP session expired and reinitialization failed; reinitialize before sending further requests");
@@ -301,7 +365,7 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
 
         // Honor MCP notifications/cancelled locally as well as forwarding it to the server so
         // the original HTTP socket closes immediately and in-flight workers abort before publishing.
-        if (msgObj["method"].toString() == "notifications/cancelled") {
+        if (method == "notifications/cancelled") {
             const QString targetKey = requestIdKey(msgObj["params"].toObject().value("requestId"));
             if (!targetKey.isEmpty()) {
                 if (auto it = inflightReplies.find(targetKey); it != inflightReplies.end()) {
@@ -310,13 +374,23 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
                     inflightReplies.erase(it);
                     if (reply) reply->abort();
                 }
-                const auto beforeSize = deferredQueue.size();
+                const auto beforeDeferred = deferredQueue.size();
                 std::erase_if(deferredQueue, [&](const PendingRequest& item) { return item.idKey == targetKey; });
-                if (deferredQueue.size() != beforeSize) { maybeQuit(); return; }
+                const auto beforeControl = controlQueue.size();
+                std::erase_if(controlQueue, [&](const PendingRequest& item) { return item.idKey == targetKey; });
+                if (deferredQueue.size() != beforeDeferred || controlQueue.size() != beforeControl) { maybeQuit(); return; }
             }
         }
 
-        if (reinitializing && msgObj["method"].toString() != "initialize") {
+        // Serialize transport/seek control calls in strict FIFO order so Play and Stop All can
+        // never overtake each other across separate HTTP connections, while reads and cancels stay independent.
+        if (isOrderedControlCall(msgObj)) {
+            controlQueue.push_back({trimmed, msgObj, requestId, idKey, false});
+            pumpControlQueue();
+            return;
+        }
+
+        if (reinitializing && method != "initialize") {
             deferredQueue.push_back({trimmed, msgObj, requestId, idKey, false});
             return;
         }
@@ -344,6 +418,7 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
                 }
             }
             std::erase_if(deferredQueue, [](const PendingRequest& item) { return isMutatingToolCall(item.msgObj); });
+            std::erase_if(controlQueue, [](const PendingRequest& item) { return isMutatingToolCall(item.msgObj); });
             maybeQuit();
         }, Qt::QueuedConnection);
     });

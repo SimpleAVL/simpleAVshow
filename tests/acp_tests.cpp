@@ -392,6 +392,66 @@ private slots:
         QCOMPARE(err3["id"].toInt(), 3);
         QCOMPARE(err3["error"].toObject()["code"].toInt(), -32001);
         QVERIFY(!sawPostFailureCall);
+
+        // 8. Verify --mcp-proxy emits JSON-RPC -32700 / -32600 with id: null on malformed stdio input,
+        //    and serializes transport_control calls in strict FIFO order.
+        QStringList controlOrder;
+        QTcpServer orderServer;
+        QVERIFY(orderServer.listen(QHostAddress::LocalHost, 0));
+        connect(&orderServer, &QTcpServer::newConnection, &orderServer, [&orderServer, &controlOrder] {
+            auto* s = orderServer.nextPendingConnection();
+            connect(s, &QTcpSocket::readyRead, s, [s, &controlOrder] {
+                const QByteArray raw = s->readAll();
+                if (raw.contains("\"play\"")) {
+                    controlOrder << "play-start";
+                    QTimer::singleShot(120, s, [s, &controlOrder] {
+                        if (s->state() != QAbstractSocket::ConnectedState) return;
+                        controlOrder << "play-done";
+                        const QByteArray body = "{\"jsonrpc\":\"2.0\",\"id\":10,\"result\":{}}";
+                        s->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                        s->disconnectFromHost();
+                    });
+                } else if (raw.contains("\"stop_all\"")) {
+                    controlOrder << "stop_all";
+                    const QByteArray body = "{\"jsonrpc\":\"2.0\",\"id\":11,\"result\":{}}";
+                    s->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                    s->disconnectFromHost();
+                } else {
+                    const QByteArray body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"t\",\"version\":\"1\"}}}";
+                    s->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: sid-ord\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                    s->disconnectFromHost();
+                }
+            });
+        });
+        QProcess orderProxy;
+        orderProxy.start(SAV_APP_EXECUTABLE, {"--mcp-proxy", QString("http://127.0.0.1:%1/mcp").arg(orderServer.serverPort())});
+        QVERIFY(orderProxy.waitForStarted(5000));
+        orderProxy.write("not valid json\n");
+        orderProxy.write("{\"jsonrpc\":\"2.0\"}\n");
+        orderProxy.write("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}\n");
+        QByteArray ordBuf;
+        auto readOrderOutput = [&] {
+            ordBuf.append(orderProxy.readAllStandardOutput());
+            return ordBuf;
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(readOrderOutput().contains("\"id\":1"), 5000);
+        orderProxy.write("{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\",\"params\":{\"name\":\"transport_control\",\"arguments\":{\"action\":\"play\"}}}\n");
+        orderProxy.write("{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"transport_control\",\"arguments\":{\"action\":\"stop_all\"}}}\n");
+        QTRY_VERIFY_WITH_TIMEOUT(readOrderOutput().contains("\"id\":11"), 5000);
+        orderProxy.closeWriteChannel();
+        QTRY_VERIFY_WITH_TIMEOUT(orderProxy.state() == QProcess::NotRunning, 8000);
+        ordBuf.append(orderProxy.readAllStandardOutput());
+        const auto ordLines = ordBuf.split('\n');
+        bool sawParseErr = false, sawInvalidReq = false;
+        for (const auto& l : ordLines) {
+            if (l.trimmed().isEmpty()) continue;
+            const auto o = QJsonDocument::fromJson(l).object();
+            if (o["id"].isNull() && o["error"].toObject()["code"].toInt() == -32700) sawParseErr = true;
+            if (o["id"].isNull() && o["error"].toObject()["code"].toInt() == -32600) sawInvalidReq = true;
+        }
+        QVERIFY(sawParseErr);
+        QVERIFY(sawInvalidReq);
+        QCOMPARE(controlOrder, QStringList({"play-start", "play-done", "stop_all"}));
     }
 
     void acpPermissionAndCancel() {
@@ -447,8 +507,35 @@ private slots:
             client2.sendPrompt("Fresh prompt");
             QTRY_COMPARE(finished2, QString("end_turn"));
             QVERIFY(msg2.contains("Mock reply: ok"));
+            QVERIFY(msg2.contains("closed=mock-session-1"));
             QVERIFY(!msg2.contains("STALE_SESSION_OUTPUT"));
             client2.disconnectFromAgent();
+
+            // Agents that do NOT advertise sessionCapabilities.close must restart cleanly on startNewSession.
+            AcpClient noClose;
+            QString msgA, msgB, fin;
+            int phase = 0;
+            connect(&noClose, &AcpClient::messageChunk, [&](const QString& m) { (phase == 0 ? msgA : msgB) += m; });
+            connect(&noClose, &AcpClient::promptFinished, [&](const QString& r) { fin = r; });
+            noClose.connectToAgent(SAV_MOCK_ACP_AGENT, {"--http-mcp", "--no-session-close"}, QDir::tempPath(), {});
+            QTRY_COMPARE(noClose.state(), AcpState::Ready);
+            noClose.sendPrompt("First");
+            QTRY_COMPARE(fin, QString("end_turn"));
+            phase = 1;
+            fin.clear();
+            noClose.startNewSession(QDir::tempPath(), {});
+            QTRY_COMPARE(noClose.state(), AcpState::Ready);
+            noClose.sendPrompt("Second");
+            QTRY_COMPARE(fin, QString("end_turn"));
+            auto extractPid = [](const QString& s) {
+                const int p = s.indexOf("pid=");
+                const int end = p >= 0 ? s.indexOf(' ', p) : -1;
+                return p >= 0 ? s.mid(p + 4, end > p ? end - (p + 4) : -1) : QString();
+            };
+            QVERIFY(!extractPid(msgA).isEmpty());
+            QVERIFY(!extractPid(msgB).isEmpty());
+            QVERIFY(extractPid(msgA) != extractPid(msgB));
+            noClose.disconnectFromAgent();
         }
 
         // Cancellation test
@@ -758,6 +845,36 @@ private slots:
         QVERIFY(c.project.assets[offlineAsset.id].offline);
         QCOMPARE(c.project.assets[offlineAsset.id].path, offlineAsset.path);
         QVERIFY(!c.project.assets[offlineAsset.id].audio);
+
+        // Saving TWICE after deleting a package-extracted asset must preserve the Undo snapshot's packageDirectory.
+        Project pkgSrc = newProject();
+        MediaAsset pkgAsset = loadMedia(replacementPath);
+        pkgAsset.id = "pkg-asset-1";
+        pkgSrc.assets.insert(pkgAsset.id, pkgAsset);
+        Clip pkgClip;
+        pkgClip.id = "pkg-clip-1";
+        pkgClip.track = 2;
+        pkgClip.assetId = pkgAsset.id.toStdString();
+        pkgClip.start = 0;
+        pkgClip.duration = frames(1.0);
+        pkgSrc.show.clips.push_back(pkgClip);
+        bindAudio(pkgSrc);
+        const QString pkgPath = dir.filePath("double_save.savpack");
+        writeProjectPackage(pkgSrc, pkgPath);
+
+        Controller c2;
+        c2.replace(readProject(pkgPath));
+        QVERIFY(c2.project.packageDirectory != nullptr);
+        QVERIFY(c2.edit([&](Project& p) {
+            p.show.clips.clear();
+            p.assets.remove(pkgAsset.id);
+        }));
+        const QString savedShow = dir.filePath("double_save.savshow");
+        QVERIFY(c2.save(savedShow));
+        QVERIFY(c2.save(savedShow)); // Second save must not delete the Undo snapshot's extraction dir.
+        c2.undo();
+        QVERIFY(c2.project.assets.contains(pkgAsset.id));
+        QVERIFY(QFileInfo::exists(c2.project.assets[pkgAsset.id].path));
     }
 };
 
