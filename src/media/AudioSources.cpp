@@ -153,12 +153,10 @@ void updateIndex(const Stamp& source, const QByteArray& hash) {
     for (const auto& entry : entries) stream << entry.source.path << entry.source.size << entry.source.modified << entry.source.identity.first << entry.source.identity.second << entry.hash;
     if (stream.status() == QDataStream::Ok) file.commit();
 }
-// indexed: set when the hash came from the index rather than from reading the file now.
-QByteArray sourceHash(const QString& path, bool* indexed = nullptr) {
+QByteArray sourceHash(const QString& path) {
     const auto before = stamp(path);
-    if (indexed) *indexed = false;
     if (!before.path.isEmpty())
-        for (const auto& entry : readIndex()) if (entry.source == before) { if (indexed) *indexed = true; return entry.hash; }
+        for (const auto& entry : readIndex()) if (entry.source == before) return entry.hash;
     const auto started = QDateTime::currentMSecsSinceEpoch();
     auto hash = fileHash(path);
     if (settled(before, stamp(path), started)) updateIndex(before, hash);
@@ -389,7 +387,7 @@ StreamSummary::StreamSummary(const QString& source, const QByteArray& format) : 
     const auto before = stamp(source);
     // Modified within the timestamp granularity: a rewrite during import could keep the same stamp.
     recent_ = QDateTime::currentMSecsSinceEpoch() - before.modified <= racyWindow;
-    stamp_ = before.key(); version_ = {before.size, before.modified, before.identity}; sourceHash_ = sourceHash(source, &indexed_);
+    stamp_ = before.key(); version_ = {before.size, before.modified, before.identity}; sourceHash_ = sourceHash(source);
     const auto key = QString::fromLatin1(QCryptographicHash::hash(decoderRevision() + format + '\0' + sourceHash_, QCryptographicHash::Sha256).toHex());
     path_ = audioCacheDirectory() + '/' + key + ".stream";
 }
@@ -438,9 +436,10 @@ void StreamSummary::contentUnchanged() const {
 }
 void StreamSummary::save(const AudioSummary& summary) const {
     verify();
-    // An indexed hash can predate a rewrite that kept size, time and identity; the summary is filed under
-    // content that other copies share, so it is checked against the file (verify did for recent files).
-    if (indexed_ && !recent_) contentUnchanged();
+    // The summary is filed under content that other copies share, and a rewrite during import can keep
+    // the stamp (an indexed hash predating it, a share whose clock differs), so a new summary is always
+    // checked against the file, as the PCM cache is (verify already did for recent files).
+    if (!recent_) contentUnchanged();
     if (!QDir().mkpath(audioCacheDirectory())) return;
     QByteArray bytes(streamMagic, 8); bytes += revisionId();
     char number[8]; qToLittleEndian<qint64>(summary.length, number); bytes.append(number, 8); bytes.append(char(summary.mono));
