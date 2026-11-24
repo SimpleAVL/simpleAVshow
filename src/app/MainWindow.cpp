@@ -751,7 +751,8 @@ void MainWindow::dropEvent(QDropEvent* event) {
 }
 void MainWindow::relinkMedia(bool afterOpening) {
     QStringList missing;
-    for (const auto& a : c_.project.assets) if (a.offline) missing << a.name + "  —  " + a.problem;
+    // Files can vanish after opening too: anything playback needs and cannot find is offered.
+    for (const auto& a : c_.project.assets) if (Controller::needsRelink(a)) missing << a.name + "  —  " + (a.offline ? a.problem : "The file is no longer at " + a.path);
     if (missing.isEmpty()) { if (!afterOpening) c_.report("All media is online."); return; }
     if (!c_.canEdit()) return;
     if (afterOpening) {
@@ -765,14 +766,14 @@ void MainWindow::relinkMedia(bool afterOpening) {
     if (folder.isEmpty()) return;
     // Search by file name below the chosen folder, then load matches off the GUI thread.
     QMap<QString, QString> wanted; // Lower-case file name → asset id.
-    for (const auto& a : c_.project.assets) if (a.offline) wanted.insert(QFileInfo(a.path).fileName().toLower(), a.id);
+    for (const auto& a : c_.project.assets) if (Controller::needsRelink(a)) wanted.insert(QFileInfo(a.path).fileName().toLower(), a.id);
     c_.busy = true;
     auto* progress = new QProgressDialog("Searching for missing media…", QString(), 0, 0, this); progress->setWindowModality(Qt::WindowModal); progress->setMinimumDuration(0); progress->show();
     auto* watcher = new QFutureWatcher<MediaResult>(this);
     connect(watcher, &QFutureWatcher<MediaResult>::finished, this, [this, watcher, progress] {
         const auto result = watcher->result(); c_.busy = false; progress->deleteLater(); watcher->deleteLater();
         if (!result.assets.empty()) c_.edit([&](Project& p) { for (const auto& a : result.assets) p.assets.insert(a.id, a); });
-        int remaining = 0; for (const auto& a : c_.project.assets) remaining += a.offline;
+        int remaining = 0; for (const auto& a : c_.project.assets) remaining += Controller::needsRelink(a);
         const QString summary = QString("Relinked %1 media file%2.").arg(result.assets.size()).arg(result.assets.size() == 1 ? "" : "s") +
             (remaining ? QString(" %1 still missing.").arg(remaining) : "");
         if (!result.errors.isEmpty()) QMessageBox::warning(this, "Some media could not be relinked", summary + "\n\n" + result.errors.join("\n\n"));

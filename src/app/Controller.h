@@ -43,6 +43,9 @@ public:
     bool needsMidi() const;
     // Offline sources and vanished videos used on the timeline.
     QStringList missingMedia() const;
+    // Whether an asset needs relinking: offline since opening, or its file is gone though playback
+    // needs it (a video, or audio read from its original rather than a prepared cache).
+    static bool needsRelink(const MediaAsset& asset);
     // Problems worth fixing before a performance; empty when the show is ready.
     QStringList preflight();
     // Playback preferences for this machine, remembered across sessions.

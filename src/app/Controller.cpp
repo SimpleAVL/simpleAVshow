@@ -262,6 +262,10 @@ QStringList Controller::preflight() {
     } else if (device.running() && !routesValid()) problems << "A track is routed to more outputs than the audio interface provides.";
     return problems;
 }
+bool Controller::needsRelink(const MediaAsset& a) {
+    const bool readsSource = a.audio && a.audio->storage && a.audio->storage->readsSource();
+    return a.offline || ((a.video || readsSource) && !a.path.isEmpty() && !QFileInfo::exists(a.path));
+}
 QStringList Controller::missingMedia() const {
     QStringList missing;
     for (const auto& clip : project.show.clips) {
