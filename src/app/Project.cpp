@@ -402,16 +402,21 @@ Project parseProject(const QByteArray& json, const QString& directory) {
     }
     return p;
 }
-void loadProjectMedia(Project& p) {
-    for (auto& a : p.assets) a = loadAsset(a);
+void loadProjectMedia(Project& p, const std::function<bool()>& isCancelled) {
+    for (auto& a : p.assets) {
+        if (isCancelled && isCancelled()) throw std::runtime_error("Project load cancelled");
+        a = loadAsset(a);
+    }
+    if (isCancelled && isCancelled()) throw std::runtime_error("Project load cancelled");
     bindAudio(p); validate(p);
 }
-Project readProject(const QString& path) {
-    if (isProjectPackage(path)) return readProjectPackage(path);
+Project readProject(const QString& path, const std::function<bool()>& isCancelled) {
+    if (isCancelled && isCancelled()) throw std::runtime_error("Project load cancelled");
+    if (isProjectPackage(path)) return readProjectPackage(path, isCancelled);
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) throw std::runtime_error(file.errorString().toStdString());
     Project p = parseProject(file.readAll(), QFileInfo(path).absolutePath());
-    loadProjectMedia(p); return p;
+    loadProjectMedia(p, isCancelled); return p;
 }
 namespace {
 void copyFileCancellable(const QString& source, const QString& target, const std::function<bool()>& isCancelled) {
@@ -497,11 +502,15 @@ void materializeProjectMedia(Project& p, const QString& directory, const std::fu
     bindAudio(p);
 }
 
-StagedProjectMedia stageProjectMedia(const Project& p, const QString& stagingDirectory, const std::function<bool()>& isCancelled) {
+StagedProjectMedia stageProjectMedia(const Project& p, const QString& stagingDirectory,
+                                     const QString& finalTargetDirectory,
+                                     const std::function<bool()>& isCancelled) {
     QDir dir(stagingDirectory);
+    QDir finalDir(finalTargetDirectory);
     if (!QDir().mkpath(dir.absolutePath())) throw std::runtime_error("Cannot create media staging directory");
     StagedProjectMedia staged;
     QMap<QString, QString> copiedNames;
+    QMap<QString, qint64> stagedSizes;
     for (auto it = p.assets.cbegin(); it != p.assets.cend(); ++it) {
         if (isCancelled && isCancelled()) throw std::runtime_error("Save cancelled");
         const auto& a = it.value();
@@ -511,16 +520,22 @@ StagedProjectMedia stageProjectMedia(const Project& p, const QString& stagingDir
         if (extracted) {
             if (!copiedNames.contains(a.path)) {
                 const QString fileName = newId() + "." + QFileInfo(a.path).suffix();
-                copyFileCancellable(a.path, dir.filePath(fileName), isCancelled);
+                const QString stagedPath = dir.filePath(fileName);
+                copyFileCancellable(a.path, stagedPath, isCancelled);
                 copiedNames.insert(a.path, fileName);
+                stagedSizes.insert(fileName, QFileInfo(stagedPath).size());
             }
-            staged.assetFileNames.insert(it.key(), copiedNames.value(a.path));
-            staged.extractedAssets.insert(it.key(), true);
+            const QString fileName = copiedNames.value(a.path);
+            staged.assetFileNames.insert(it.key(), fileName);
+            // Pre-build rebound WaveStorage + peaks on the worker thread so GUI publish is pointer-swap only.
+            if (a.audio) {
+                if (auto rebound = detail::rebindPcmWavePath(a.audio, finalDir.filePath(fileName), stagedSizes.value(fileName, -1)))
+                    staged.reboundAudio.insert(it.key(), std::move(rebound));
+            }
         } else {
             const QString fileName = newId() + (a.image ? ".png" : ".wav");
             writeGeneratedAsset(a, dir.filePath(fileName), isCancelled);
             staged.assetFileNames.insert(it.key(), fileName);
-            staged.extractedAssets.insert(it.key(), false);
         }
     }
     return staged;
@@ -559,9 +574,8 @@ PublishedMediaRollback publishStagedProjectMedia(Project& p, const QString& stag
             auto assetIt = p.assets.find(it.key());
             if (assetIt == p.assets.end()) continue;
             assetIt->path = publishedNames.value(it.value());
-            // Rebind WaveStorage in O(1) (reusing existing block hashes and peaks without rescanning disk).
-            if (staged.extractedAssets.value(it.key()) && assetIt->audio) {
-                if (auto pcm = detail::rebindPcmWavePath(assetIt->audio, assetIt->path)) assetIt->audio = std::move(pcm);
+            if (const auto rebound = staged.reboundAudio.constFind(it.key()); rebound != staged.reboundAudio.cend()) {
+                assetIt->audio = rebound.value();
             }
         }
     } catch (...) {

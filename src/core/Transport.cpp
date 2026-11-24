@@ -87,7 +87,7 @@ void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
     if (show_) for (std::size_t i = 0; i < buffers_.size(); ++i) if (buffers_[i] && !buffers_[i]->failed()) previous.emplace(show_->clips[i].id, i);
     const auto retired = std::move(show_); auto reusable = std::move(buffers_);
     show_ = std::move(show);
-    commands_.clear(); commandsApplied_.store(0, std::memory_order_release); midi_.reset(std::max(std::size_t{1024}, show_->markers.size()));
+    commands_.clear(); applied_ = 0; commandsApplied_.store(0, std::memory_order_release); midi_.reset(std::max(std::size_t{1024}, show_->markers.size()));
     voices_.assign(show_->clips.size(), {}); releases_.assign(show_->clips.size(), {});
     releasing_.clear(); releasing_.reserve(show_->clips.size());
     starts_.clear(); pictures_.clear(); active_.clear(); active_.reserve(show_->clips.size());
@@ -174,7 +174,7 @@ void Transport::apply(Command command) noexcept {
         epoch_.fetch_add(1); clipped_.store(false); prime();
         break;
     }
-    commandsApplied_.fetch_add(1, std::memory_order_release);
+    ++applied_;
 }
 
 void Transport::render(float* output, unsigned count, unsigned channels) noexcept {
@@ -301,6 +301,10 @@ void Transport::publish(float peak) noexcept {
     }
     publishedPosition_.store(position_, std::memory_order_release);
     publishedState_.store(state_, std::memory_order_release);
-    publishedMarker_.store(heldMarker_); publishedVoices_.store(active); publishedPeak_.store(peak);
+    publishedMarker_.store(heldMarker_, std::memory_order_release);
+    publishedVoices_.store(active, std::memory_order_release);
+    publishedPeak_.store(peak, std::memory_order_relaxed);
+    // Publish applied command count last (release) so readers acquiring it see the updated state and voices.
+    commandsApplied_.store(applied_, std::memory_order_release);
 }
 }

@@ -395,9 +395,12 @@ private slots:
         QVERIFY(call(server, "project_action", {{"action", "save_as"}, {"path", dir.filePath("no-such-subdir/fail.savshow")}})["isError"].toBool());
         QVERIFY(!call(server, "project_action", {{"action", "export_package"}, {"path", packPath}})["isError"].toBool());
         QVERIFY(QFileInfo::exists(packPath));
-        QVERIFY(!call(server, "project_action", {{"action", "new_show"}})["isError"].toBool());
+        // Show-replacing actions require expected_revision and reject stale revisions even with discard_unsaved: true.
+        QVERIFY(call(server, "project_action", {{"action", "new_show"}, {"discard_unsaved", true}})["isError"].toBool());
+        QVERIFY(call(server, "project_action", {{"action", "new_show"}, {"expected_revision", revision(server) - 1}, {"discard_unsaved", true}})["isError"].toBool());
+        QVERIFY(!call(server, "project_action", {{"action", "new_show"}, {"expected_revision", revision(server)}})["isError"].toBool());
         QVERIFY(window.controller().project.show.clips.empty());
-        QVERIFY(!call(server, "project_action", {{"action", "open_project"}, {"path", showPath}})["isError"].toBool());
+        QVERIFY(!call(server, "project_action", {{"action", "open_project"}, {"path", showPath}, {"expected_revision", revision(server)}})["isError"].toBool());
         QCOMPARE(window.controller().project.title, QString("The opening scene"));
 
         // Simulate colliding basenames: unique relative suffix relinks, ambiguous stays offline and is reported.
@@ -413,7 +416,7 @@ private slots:
             p.assets.insert(off2.id, off2);
             p.assets.insert(off3.id, off3);
         }));
-        QVERIFY(call(server, "project_action", {{"action", "new_show"}})["isError"].toBool()); // Dirty without discard_unsaved
+        QVERIFY(call(server, "project_action", {{"action", "new_show"}, {"expected_revision", revision(server)}})["isError"].toBool()); // Dirty without discard_unsaved
         const auto relinked = call(server, "relink_media", {{"expected_revision", revision(server)}, {"directory", dir.path()}});
         QVERIFY(!relinked["isError"].toBool());
         const auto relinkInfo = relinked["structuredContent"].toObject()["relink"].toObject();
@@ -528,11 +531,21 @@ private slots:
             const QString autosaveFile = baseShow + ".autosave";
             writeProject(newProject(), autosaveFile);
             const auto openAuto = call(server, "project_action", {
-                {"action", "open_project"}, {"path", autosaveFile}, {"discard_unsaved", true}
+                {"action", "open_project"}, {"path", autosaveFile}, {"discard_unsaved", true},
+                {"expected_revision", revision(server)}
             });
             QVERIFY(!openAuto["isError"].toBool());
             QCOMPARE(window.controller().path, baseShow);
             QVERIFY(window.controller().dirty);
+            QVERIFY(window.windowTitle().contains("*"));
+        }
+
+        // 15. get_preflight skips synchronous hardware probing during Show mode.
+        {
+            window.controller().setShowMode(true);
+            const auto pfShow = call(server, "get_preflight")["structuredContent"].toObject();
+            QCOMPARE(pfShow["hardware_probed"].toBool(), false);
+            window.controller().setShowMode(false);
         }
 
         window.controller().dirty = false;

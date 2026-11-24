@@ -33,6 +33,9 @@ signals:
     void mcpSettingsRequested();
     void aboutToEdit();
 
+protected:
+    void showEvent(QShowEvent* event) override;
+
 private:
     struct ChatEntry {
         enum class Kind { User, Assistant, ToolCall, System, Error };
@@ -56,6 +59,7 @@ private:
     bool hasAgentEdit_ = false;
     bool lastCanEdit_ = true;
     bool shuttingDown_ = false;
+    bool renderPending_ = false;
 
     QLabel* statusLabel_ = nullptr;
     QComboBox* presetCombo_ = nullptr;

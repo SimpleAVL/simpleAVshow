@@ -9,6 +9,7 @@
 #include <QNetworkRequest>
 #include <QPointer>
 #include <QSet>
+#include <QUuid>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -36,6 +37,14 @@ bool isLongFileToolCall(const QJsonObject& obj) {
     const QString name = obj["params"].toObject()["name"].toString();
     return name == "project_action" || name == "relink_media" || name == "import_media";
 }
+bool isMutatingToolCall(const QJsonObject& obj) {
+    if (obj["method"].toString() != "tools/call") return false;
+    const QString name = obj["params"].toObject()["name"].toString();
+    return name == "apply_edits" || name == "history" || name == "seek_and_select" ||
+        name == "import_media" || name == "commit_import" || name == "relink_media" ||
+        name == "configure_outputs" || name == "configure_remote" ||
+        name == "project_action" || name == "transport_control";
+}
 }
 
 int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
@@ -46,10 +55,16 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
         return 2;
     }
     const QByteArray token = qgetenv("SAV_MCP_TOKEN");
+    // Per-proxy-process client ID scopes server-side cancellation so one client cannot cancel another.
+    const QByteArray clientId = QUuid::createUuid().toString(QUuid::WithoutBraces).toUtf8();
     QNetworkAccessManager network;
     int inFlight = 0;
     bool eof = false;
-    QMap<QString, QPointer<QNetworkReply>> inflightReplies;
+    struct InflightEntry {
+        QPointer<QNetworkReply> reply;
+        bool mutating = false;
+    };
+    QMap<QString, InflightEntry> inflightReplies;
     QSet<QString> locallyCancelled;
 
     auto maybeQuit = [&] {
@@ -71,9 +86,9 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
         if (msgObj["method"].toString() == "notifications/cancelled") {
             const QString targetKey = requestIdKey(msgObj["params"].toObject().value("requestId"));
             if (!targetKey.isEmpty()) {
-                locallyCancelled.insert(targetKey);
                 if (auto it = inflightReplies.find(targetKey); it != inflightReplies.end()) {
-                    auto reply = it.value();
+                    locallyCancelled.insert(targetKey);
+                    auto reply = it.value().reply;
                     inflightReplies.erase(it);
                     if (reply) reply->abort();
                 }
@@ -85,13 +100,14 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
         request.setRawHeader("Content-Type", "application/json");
         request.setRawHeader("Accept", "application/json, text/event-stream");
         request.setRawHeader("MCP-Protocol-Version", "2025-11-25");
+        request.setRawHeader("X-SAV-Client-Id", clientId);
         if (!token.isEmpty()) request.setRawHeader("Authorization", "Bearer " + token);
 
         ++inFlight;
         auto* reply = network.post(request, trimmed);
-        if (!idKey.isEmpty()) inflightReplies.insert(idKey, reply);
+        if (!idKey.isEmpty()) inflightReplies.insert(idKey, {reply, isMutatingToolCall(msgObj)});
         QObject::connect(reply, &QNetworkReply::finished, &app, [&, reply, requestId, idKey] {
-            if (!idKey.isEmpty() && inflightReplies.value(idKey) == reply) inflightReplies.remove(idKey);
+            if (!idKey.isEmpty() && inflightReplies.value(idKey).reply == reply) inflightReplies.remove(idKey);
             const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             const QByteArray body = reply->readAll().trimmed();
             const auto netError = reply->error();
@@ -150,6 +166,17 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
         }
         QMetaObject::invokeMethod(&app, [&] {
             eof = true;
+            // On stdin EOF (e.g. chat disconnected), abort any in-flight mutating tool calls so
+            // they cannot publish to disk or modify the show after the agent disconnected.
+            const auto keys = inflightReplies.keys();
+            for (const auto& key : keys) {
+                const auto entry = inflightReplies.value(key);
+                if (entry.mutating && entry.reply) {
+                    locallyCancelled.insert(key);
+                    inflightReplies.remove(key);
+                    entry.reply->abort();
+                }
+            }
             maybeQuit();
         }, Qt::QueuedConnection);
     });

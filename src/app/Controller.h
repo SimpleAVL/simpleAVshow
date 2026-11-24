@@ -39,7 +39,7 @@ public:
     void redo();
     std::size_t undoCount() const { return undo_.size(); }
     std::size_t redoCount() const { return redo_.size(); }
-    void replace(Project next, QString projectPath = {});
+    void replace(Project next, QString projectPath = {}, bool markDirty = false);
     bool toggle();
     bool play();
     bool pause();
@@ -57,7 +57,7 @@ public:
     // Offline sources and vanished videos used on the timeline.
     QStringList missingMedia() const;
     // Problems worth fixing before a performance; empty when the show is ready.
-    QStringList preflight();
+    QStringList preflight(bool probeHardware = true);
     QString midiDestination() const { return midiName_; }
     void setShowMode(bool enabled);
     QImage compose();
@@ -102,7 +102,7 @@ private:
     std::deque<Project> undo_, redo_;
     quint64 busyLease_ = 0, nextBusyLease_ = 1, projectRevision_ = 0;
     std::uint64_t commandsPosted_ = 0, lastPlaySeq_ = 0;
-    Action lastPostedAction_ = Action::StopAll;
+    State predictedState_ = State::Stopped;
     bool postTransportCommand(Command cmd);
     void arm(Frame position);
     void startMidiThread();

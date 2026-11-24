@@ -101,10 +101,11 @@ Reader openPackage(ReadContext& input) {
     checkArchive(reader.get(), archive_read_open(reader.get(), &input, nullptr, readBytes, nullptr));
     return reader;
 }
-template <class Write> void readEntry(archive* reader, const QString& name, qint64 size, Write write) {
+template <class Write> void readEntry(archive* reader, const QString& name, qint64 size, Write write, const std::function<bool()>& isCancelled = {}) {
     qint64 remaining = size;
     QByteArray buffer(static_cast<int>(chunkSize), '\0');
     for (;;) {
+        if (isCancelled && isCancelled()) throw std::runtime_error("Package load cancelled");
         const auto count = archive_read_data(reader, buffer.data(), static_cast<size_t>(buffer.size()));
         if (count < 0) checkArchive(reader, ARCHIVE_FATAL);
         if (count == 0) break;
@@ -192,7 +193,8 @@ void writeProjectPackage(const Project& project, const QString& path,
     if (!output.commit()) throw std::runtime_error(output.errorString().toStdString());
 }
 
-Project readProjectPackage(const QString& path) {
+Project readProjectPackage(const QString& path, const std::function<bool()>& isCancelled) {
+    if (isCancelled && isCancelled()) throw std::runtime_error("Package load cancelled");
     ReadContext input;
     input.file.setFileName(path);
     if (!input.file.open(QIODevice::ReadOnly)) throw std::runtime_error(input.file.errorString().toStdString());
@@ -206,6 +208,7 @@ Project readProjectPackage(const QString& path) {
         auto reader = openPackage(input);
         archive_entry* entry = nullptr;
         for (;;) {
+            if (isCancelled && isCancelled()) throw std::runtime_error("Package load cancelled");
             const auto result = archive_read_next_header(reader.get(), &entry);
             if (result == ARCHIVE_EOF) break;
             checkArchive(reader.get(), result);
@@ -223,7 +226,7 @@ Project readProjectPackage(const QString& path) {
             if (isManifest) {
                 if (size > maxManifestSize) throw std::runtime_error("Package project file is too large");
                 manifest.reserve(static_cast<qsizetype>(size)); hasManifest = true;
-                readEntry(reader.get(), name, size, [&](const char* data, qint64 count) { manifest.append(data, count); });
+                readEntry(reader.get(), name, size, [&](const char* data, qint64 count) { manifest.append(data, count); }, isCancelled);
                 continue;
             }
             if (size > std::numeric_limits<qint64>::max() - required) throw std::runtime_error("Package is too large");
@@ -256,6 +259,7 @@ Project readProjectPackage(const QString& path) {
     auto reader = openPackage(input);
     archive_entry* entry = nullptr;
     for (;;) {
+        if (isCancelled && isCancelled()) throw std::runtime_error("Package load cancelled");
         const auto result = archive_read_next_header(reader.get(), &entry);
         if (result == ARCHIVE_EOF) break;
         checkArchive(reader.get(), result);
@@ -266,11 +270,11 @@ Project readProjectPackage(const QString& path) {
         if (!output.open(QIODevice::WriteOnly | QIODevice::NewOnly)) throw std::runtime_error(output.errorString().toStdString());
         readEntry(reader.get(), name, media.value(name), [&](const char* data, qint64 count) {
             if (output.write(data, count) != count) throw std::runtime_error(output.errorString().toStdString());
-        });
+        }, isCancelled);
         if (!output.flush()) throw std::runtime_error("Incomplete package entry: " + name.toStdString());
     }
     checkArchive(reader.get(), archive_read_close(reader.get()));
-    loadProjectMedia(project);
+    loadProjectMedia(project, isCancelled);
     project.packageDirectory = std::move(directory);
     return project;
 }

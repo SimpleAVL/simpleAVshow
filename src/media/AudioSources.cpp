@@ -199,11 +199,11 @@ private:
 
 class WaveStorage final : public AudioStorage {
 public:
-    WaveStorage(QString path, qint64 offset, Frame length, int channels, int bits, bool floating)
+    WaveStorage(QString path, qint64 offset, Frame length, int channels, int bits, bool floating, qint64 knownSize = -1)
         : path_(std::move(path)), offset_(offset), length_(length), channels_(channels), bits_(bits), floating_(floating),
-          size_(QFileInfo(path_).size()) {}
-    std::shared_ptr<WaveStorage> cloneWithPath(QString newPath) const {
-        auto copy = std::make_shared<WaveStorage>(std::move(newPath), offset_, length_, channels_, bits_, floating_);
+          size_(knownSize >= 0 ? knownSize : QFileInfo(path_).size()) {}
+    std::shared_ptr<WaveStorage> cloneWithPath(QString newPath, qint64 knownSize) const {
+        auto copy = std::make_shared<WaveStorage>(std::move(newPath), offset_, length_, channels_, bits_, floating_, knownSize);
         copy->blockHashes_ = blockHashes_;
         return copy;
     }
@@ -218,16 +218,18 @@ public:
         const auto started = QDateTime::currentMSecsSinceEpoch();
         data.peaks.resize(static_cast<std::size_t>((length_ + AudioData::peakStride - 1) / AudioData::peakStride));
         std::array<float, AudioBuffer::blockFrames * 2> scratch{};
+        auto hashes = std::make_shared<std::vector<QByteArray>>();
         for (Frame first = 0; first < length_; first += AudioBuffer::blockFrames) {
             const auto count = std::min(AudioBuffer::blockFrames, length_ - first);
             const auto bytes = readBytes(first, static_cast<std::size_t>(count));
-            blockHashes_.push_back(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256));
+            hashes->push_back(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256));
             decode(reinterpret_cast<const uchar*>(bytes.constData()), scratch.data(), static_cast<std::size_t>(count));
             for (Frame i = 0; i < count; ++i) {
                 auto& peak = data.peaks[static_cast<std::size_t>((first + i) / AudioData::peakStride)];
                 peak = std::max(peak, std::max(std::abs(scratch[i * 2]), std::abs(scratch[i * 2 + 1])));
             }
         }
+        blockHashes_ = std::move(hashes);
         if (settled(source, stamp(path_), started)) saveSidecar(source, data);
     }
     void read(Frame first, float* stereo, std::size_t count) const override {
@@ -240,7 +242,7 @@ public:
         for (Frame frame = blockFirst; frame < end; frame += AudioBuffer::blockFrames) {
             const auto size = std::min(AudioBuffer::blockFrames, end - frame) * stride;
             const QByteArrayView block(bytes.constData() + (frame - blockFirst) * stride, static_cast<qsizetype>(size));
-            if (QCryptographicHash::hash(block, QCryptographicHash::Sha256) != blockHashes_[static_cast<std::size_t>(frame / AudioBuffer::blockFrames)]) {
+            if (!blockHashes_ || QCryptographicHash::hash(block, QCryptographicHash::Sha256) != (*blockHashes_)[static_cast<std::size_t>(frame / AudioBuffer::blockFrames)]) {
                 if (!sidecar_.isEmpty()) QFile::remove(sidecar_); // Its hashes may predate a same-stamp rewrite.
                 changed("PCM audio source changed; reopen the project: " + path_);
             }
@@ -264,15 +266,18 @@ private:
         if (body != header.size() + blocks * 32 + peaks * static_cast<qint64>(sizeof(float)) || !bytes.startsWith(header) ||
             QCryptographicHash::hash(QByteArrayView(bytes).first(body), QCryptographicHash::Sha256) != bytes.last(32)) return false;
         const char* at = bytes.constData() + header.size();
-        for (qint64 i = 0; i < blocks; ++i, at += 32) blockHashes_.emplace_back(at, 32);
+        auto hashes = std::make_shared<std::vector<QByteArray>>();
+        hashes->reserve(static_cast<std::size_t>(blocks));
+        for (qint64 i = 0; i < blocks; ++i, at += 32) hashes->emplace_back(at, 32);
+        blockHashes_ = std::move(hashes);
         data.peaks.resize(static_cast<std::size_t>(peaks)); std::memcpy(data.peaks.data(), at, static_cast<std::size_t>(peaks) * sizeof(float));
         touch(sidecar_);
         return true;
     }
     void saveSidecar(const Stamp& source, const AudioData& data) const {
-        if (sidecar_.isEmpty() || !QDir().mkpath(audioCacheDirectory())) return;
+        if (sidecar_.isEmpty() || !blockHashes_ || !QDir().mkpath(audioCacheDirectory())) return;
         auto bytes = sidecarHeader(source);
-        for (const auto& hash : blockHashes_) bytes += hash;
+        for (const auto& hash : *blockHashes_) bytes += hash;
         bytes.append(reinterpret_cast<const char*>(data.peaks.data()), static_cast<qsizetype>(data.peaks.size() * sizeof(float)));
         bytes += QCryptographicHash::hash(bytes, QCryptographicHash::Sha256);
         // Concurrent writers for the same stamp produce identical files; the last one wins.
@@ -316,7 +321,7 @@ private:
     bool floating_;
     qint64 size_;
     QString sidecar_;
-    std::vector<QByteArray> blockHashes_;
+    std::shared_ptr<const std::vector<QByteArray>> blockHashes_;
 };
 }
 
@@ -501,14 +506,14 @@ std::shared_ptr<const AudioData> loadPcmWave(const QString& path) {
     return data;
 }
 
-std::shared_ptr<const AudioData> rebindPcmWavePath(const std::shared_ptr<const AudioData>& existing, const QString& newPath) {
+std::shared_ptr<const AudioData> rebindPcmWavePath(const std::shared_ptr<const AudioData>& existing, const QString& newPath, qint64 knownSize) {
     if (!existing || !existing->storage) return {};
     const auto* wave = dynamic_cast<const WaveStorage*>(existing->storage.get());
     if (!wave) return {};
     auto rebound = std::make_shared<AudioData>();
     rebound->mono = existing->mono;
     rebound->peaks = existing->peaks;
-    rebound->storage = wave->cloneWithPath(newPath);
+    rebound->storage = wave->cloneWithPath(newPath, knownSize);
     return rebound;
 }
 }

@@ -21,7 +21,7 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
             const QString reason = stalled ? QString("stopped responding") : device.lastError().isEmpty() ? QString("stopped") : "failed: " + device.lastError();
             configured_ = false; device.close();
             // Once the device is closed, it is safe to render a zero-sized control block.
-            transport.command({Action::StopAll}); transport.render(nullptr, 0, 0);
+            postTransportCommand({Action::StopAll}); transport.render(nullptr, 0, 0);
             report("Audio output " + reason + ". Press Play to reconnect, or choose another device in Outputs.");
             playbackProblem = status;
         }
@@ -68,25 +68,35 @@ void Controller::releaseBusy(quint64 lease) {
     }
 }
 bool Controller::postTransportCommand(Command cmd) {
+    const State base = effectiveState();
     if (!transport.command(cmd)) { report("Transport command queue is full"); return false; }
     ++commandsPosted_;
-    lastPostedAction_ = cmd.action;
-    if (cmd.action == Action::Play) lastPlaySeq_ = commandsPosted_;
+    switch (cmd.action) {
+    case Action::Play:
+        predictedState_ = (position() >= project.show.duration && base != State::Held) ? base : State::Playing;
+        lastPlaySeq_ = commandsPosted_;
+        break;
+    case Action::Pause:
+        predictedState_ = (base == State::Playing) ? State::Paused : base;
+        break;
+    case Action::Seek:
+        predictedState_ = (base == State::Playing) ? State::Playing : State::Paused;
+        break;
+    case Action::StopAll:
+        predictedState_ = State::Stopped;
+        break;
+    }
     return true;
 }
 State Controller::effectiveState() const {
-    const State published = transport.state();
-    if (commandsPosted_ <= transport.commandsApplied()) return published;
-    switch (lastPostedAction_) {
-    case Action::Play: return State::Playing;
-    case Action::Pause: return published == State::Playing || playInFlight() ? State::Paused : published;
-    case Action::StopAll: return State::Stopped;
-    case Action::Seek: return published == State::Playing ? State::Playing : State::Paused;
-    }
-    return published;
+    const std::uint64_t applied = transport.commandsApplied();
+    if (commandsPosted_ <= applied) return transport.state();
+    return predictedState_;
 }
 bool Controller::canEdit(bool reportFailure) {
-    const bool allowed = !showMode && !busy && !playInFlight() && transport.state() != State::Playing && transport.state() != State::Held &&
+    // Acquire commandsApplied() first so publishedState_ and publishedVoices_ reflect every applied command.
+    const bool playPending = playInFlight();
+    const bool allowed = !showMode && !busy && !playPending && transport.state() != State::Playing && transport.state() != State::Held &&
         transport.asyncVoices() == 0;
     if (!allowed && reportFailure) report(showMode ? "Leave show mode to edit" : "Use Stop All before editing; async audio or video may still be playing");
     return allowed;
@@ -101,11 +111,11 @@ bool Controller::edit(const std::function<void(Project&)>& mutation) {
         project = std::move(next); dirty = true; ++projectRevision_; arm(time); emit changed(); return true;
     } catch (const std::exception& e) { report(QString::fromUtf8(e.what())); return false; }
 }
-void Controller::replace(Project next, QString projectPath) {
+void Controller::replace(Project next, QString projectPath, bool markDirty) {
     validate(next);
     // Readers hold extracted package files open; Windows cannot remove them while open.
     videos_.clear(); lastPicture_ = {};
-    project = std::move(next); path = std::move(projectPath); dirty = false; playbackProblem.clear();
+    project = std::move(next); path = std::move(projectPath); dirty = markDirty; playbackProblem.clear();
     undo_.clear(); redo_.clear(); ++projectRevision_;
     arm(0); report("Project ready. Space plays or pauses; Stop All stops async audio and video."); emit changed();
 }
@@ -132,7 +142,7 @@ void Controller::arm(Frame position) {
         if (asset != project.assets.cend() && asset->video && !asset->offline) clip.videoLength = frames(asset->duration);
     }
     armed_ = std::move(armed); transport.configure(armed_, position);
-    commandsPosted_ = 0; lastPlaySeq_ = 0;
+    commandsPosted_ = 0; lastPlaySeq_ = 0; predictedState_ = State::Stopped;
     if (keep && device.resume()) stall_.restart();
     else if (configured_) {
         QString error;
@@ -297,17 +307,18 @@ bool Controller::openMidi(int port) {
     if (ok) { midiName_ = midi.name(); QSettings().setValue("midi/port", midiName_); playbackProblem.clear(); }
     report(ok ? (port < 0 ? "MIDI output disconnected" : "MIDI output: " + midi.name()) : error); return ok;
 }
-QStringList Controller::preflight() {
+QStringList Controller::preflight(bool probeHardware) {
     QStringList problems;
     if (dirty) problems << "The show has unsaved changes.";
     for (const auto& missing : missingMedia()) problems << "Media is missing: " + missing;
     if (needsMidi() && !midi.connected()) {
         const QString remembered = QSettings().value("midi/port").toString();
         if (remembered.isEmpty()) problems << "MIDI cues need a destination. Choose one in Outputs.";
+        else if (!probeHardware) problems << "MIDI destination “" + remembered + "” is not connected.";
         else if (!midi.ports().contains(remembered)) problems << "MIDI destination “" + remembered + "” is missing.";
     }
-    // Probe audio drivers only while nothing is playing.
-    if (!device.running() && transport.state() != State::Playing && transport.state() != State::Held && !transport.asyncVoices()) {
+    // Probe audio drivers only while nothing is playing and hardware probing is permitted.
+    if (probeHardware && !device.running() && transport.state() != State::Playing && transport.state() != State::Held && !transport.asyncVoices()) {
         QSettings settings; const QString remembered = settings.value("audio/device").toString();
         const auto api = remembered.isEmpty() ? RtAudio::UNSPECIFIED : static_cast<RtAudio::Api>(settings.value("audio/api", 0).toInt());
         try {

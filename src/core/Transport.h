@@ -77,6 +77,7 @@ private:
     std::atomic<float> publishedPeak_{0};
     std::atomic<bool> clipped_{false}, overflow_{false};
     std::atomic<std::uint64_t> epoch_{0};
+    std::uint64_t applied_ = 0;
     std::atomic<std::uint64_t> commandsApplied_{0};
     void apply(Command command) noexcept;
     void dispatch(int marker) noexcept;

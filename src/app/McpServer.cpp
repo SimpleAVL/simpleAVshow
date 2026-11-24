@@ -208,10 +208,10 @@ QJsonArray tools() {
         }), false);
     add("configure_remote", "Enable or disable the local-network phone remote, choose its port, or rotate its secret link key. Blocked in Show mode.",
         objectSchema({{"enabled", field("boolean")}, {"port", integer(1024, 65535)}, {"change_key", field("boolean")}}, {"enabled"}), false);
-    add("project_action", "Save the show (.savshow), save to a new path, export a portable .savpack package, create a new show, open the built-in demo, or open an existing .savshow/.savpack file. Refuses to discard unsaved edits unless discard_unsaved is true. Blocked during playback and Show mode.",
+    add("project_action", "Save the show (.savshow), save to a new path, export a portable .savpack package, create a new show, open the built-in demo, or open an existing .savshow/.savpack file. Show-replacing actions (new_show, open_demo, open_project) require expected_revision from get_show and refuse to discard unsaved edits unless discard_unsaved is true. Blocked during playback and Show mode.",
         objectSchema({
             {"action", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"save", "save_as", "export_package", "new_show", "open_demo", "open_project"}}}},
-            {"path", field("string")}, {"discard_unsaved", field("boolean")}
+            {"path", field("string")}, {"discard_unsaved", field("boolean")}, {"expected_revision", integer()}
         }, {"action"}), false);
     add("transport_control", "Rehearsal playback control: play, pause, continue (resume a hold), stop_all, or seek to a frame. Strictly blocked while Show mode is active so live performances stay operator-only.",
         objectSchema({
@@ -353,7 +353,10 @@ void applyOperations(Project& p, const QJsonArray& operations) {
 McpServer::McpServer(Controller& controller, QObject* parent) : QObject(parent), c_(controller) {
     connect(&c_, &Controller::changed, this, [this] {
         ++revision_;
-        if (c_.showMode) invalidateEditSession();
+        if (c_.showMode) {
+            invalidateEditSession();
+            invalidatePreviews();
+        }
     });
     connect(&server_, &QTcpServer::newConnection, this, &McpServer::acceptConnection);
 }
@@ -361,21 +364,34 @@ void McpServer::invalidateEditSession() {
     ++editGeneration_;
     if (editSessionCancelled_) editSessionCancelled_->store(true);
     editSessionCancelled_ = std::make_shared<std::atomic<bool>>(false);
+    if (importState_ == "preparing" || importState_ == "ready") {
+        imported_.clear();
+        importState_ = "cancelled";
+        importError_ = "Import cancelled because editing was disabled or locked";
+    }
+}
+void McpServer::invalidatePreviews() {
+    if (previewCancelled_) previewCancelled_->store(true);
+    previewCancelled_ = std::make_shared<std::atomic<bool>>(false);
 }
 bool McpServer::start(quint16 port) {
     if (running()) return true;
     if (!server_.listen(QHostAddress::LocalHost, port)) return false;
     token_ = newId() + newId(); editing_ = false;
     invalidateEditSession();
+    invalidatePreviews();
     c_.report("Agent collaboration enabled (read only). Open Project → Agent collaboration to allow edits.");
     emit stateChanged(); return true;
 }
 void McpServer::stop() {
     ++generation_;
     invalidateEditSession();
-    for (auto it = inflightRequests_.cbegin(); it != inflightRequests_.cend(); ++it)
-        if (it.value()) it.value()->store(true);
+    invalidatePreviews();
+    const auto inflight = inflightRequests_;
     inflightRequests_.clear();
+    for (auto it = inflight.cbegin(); it != inflight.cend(); ++it) {
+        if (it.value().cancelled) it.value().cancelled->store(true);
+    }
     server_.close(); token_.clear(); editing_ = false;
     // Invalidate outstanding connections as well as the credential.
     for (auto* socket : findChildren<QTcpSocket*>()) socket->abort();
@@ -520,7 +536,8 @@ void McpServer::checkWrite(const QJsonObject& arguments, bool requireRevision) {
 }
 
 QJsonObject McpServer::preflightReport() const {
-    auto problems = c_.preflight();
+    const bool safeToProbe = c_.canEdit(false);
+    auto problems = c_.preflight(safeToProbe);
     const bool hasPicture = std::any_of(c_.project.show.clips.begin(), c_.project.show.clips.end(),
         [this](const Clip& clip) { return c_.project.show.tracks[clip.track].visual; });
     if (hasPicture && host_.displayStatus && !host_.displayStatus()["output_open"].toBool(false))
@@ -552,6 +569,7 @@ QJsonObject McpServer::preflightReport() const {
             {"timecode", timecode(cue->time, c_.project.fps)}, {"hold", cue->hold}};
     }
     return {{"revision", static_cast<double>(revision_)}, {"ready", problems.isEmpty()},
+        {"hardware_probed", safeToProbe},
         {"problems", problemList}, {"missing_media", missingList},
         {"disconnected_audio_tracks", disconnectedTracks}, {"unused_assets", unusedAssets},
         {"needs_midi", c_.needsMidi()}, {"next_cue", nextCueValue},
@@ -631,16 +649,18 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::shared_ptr
 
     ++activeAsyncJobs_;
     ++activePreviewJobs_;
+    const auto showCancelled = previewCancelled_;
+    auto previewAborted = [cancelled, showCancelled]() { return cancelled->load() || showCancelled->load(); };
     auto releaseJob = [this]() {
         activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1);
         activePreviewJobs_ = std::max(0, activePreviewJobs_ - 1);
     };
     auto sharedFinish = std::make_shared<std::function<void(QJsonObject)>>(std::move(finish));
     struct Encoded { QString base64Png; QString error; int width = 0, height = 0; };
-    auto finishEncoded = [this, time, projectSnapshot, activeClips, activeMarkers, rev, jobGen, cancelled, sharedFinish, releaseJob](const Encoded& encoded) {
+    auto finishEncoded = [this, time, projectSnapshot, activeClips, activeMarkers, rev, jobGen, cancelled, showCancelled, sharedFinish, releaseJob](const Encoded& encoded) {
         releaseJob();
         if (cancelled->load() || generation_ != jobGen) return;
-        if (c_.showMode) {
+        if (c_.showMode || showCancelled->load()) {
             (*sharedFinish)(toolResult({{"error", "Preview rendering was cancelled because Show mode became active"},
                 {"revision", static_cast<double>(revision_)}}, true));
             return;
@@ -667,11 +687,11 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::shared_ptr
             const auto encoded = watcher->result(); watcher->deleteLater();
             finishEncoded(encoded);
         });
-        watcher->setFuture(QtConcurrent::run([projectSnapshot, time, targetSize, videoRequests = std::move(videoRequests), cancelled] {
+        watcher->setFuture(QtConcurrent::run([projectSnapshot, time, targetSize, videoRequests = std::move(videoRequests), previewAborted] {
             Encoded out;
             QMap<std::string, QImage> frames;
             for (const auto& req : videoRequests) {
-                if (cancelled->load()) return out;
+                if (previewAborted()) return out;
                 QString err;
                 QImage frame = videoFrameAt(req.path, req.sourceTime, targetSize, &err);
                 if (frame.isNull()) {
@@ -680,8 +700,9 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::shared_ptr
                 }
                 frames.insert(req.clipId, std::move(frame));
             }
-            if (cancelled->load()) return out;
+            if (previewAborted()) return out;
             const QImage image = Controller::composeProjectAt(projectSnapshot, time, targetSize, &frames);
+            if (previewAborted()) return out;
             out.width = image.width(); out.height = image.height();
             QByteArray png;
             QBuffer buffer(&png);
@@ -693,9 +714,15 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::shared_ptr
         return;
     }
 
-    auto encodeAndFinish = [this, jobGen, cancelled, releaseJob, finishEncoded](QImage image) {
-        if (cancelled->load() || generation_ != jobGen || c_.showMode) {
+    auto encodeAndFinish = [this, jobGen, cancelled, showCancelled, previewAborted, sharedFinish, releaseJob, finishEncoded](QImage image) {
+        if (cancelled->load() || generation_ != jobGen) {
             releaseJob();
+            return;
+        }
+        if (c_.showMode || showCancelled->load()) {
+            releaseJob();
+            (*sharedFinish)(toolResult({{"error", "Preview rendering was cancelled because Show mode became active"},
+                {"revision", static_cast<double>(revision_)}}, true));
             return;
         }
         auto* watcher = new QFutureWatcher<Encoded>(this);
@@ -703,9 +730,9 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::shared_ptr
             const auto encoded = watcher->result(); watcher->deleteLater();
             finishEncoded(encoded);
         });
-        watcher->setFuture(QtConcurrent::run([image = std::move(image), cancelled] {
+        watcher->setFuture(QtConcurrent::run([image = std::move(image), previewAborted] {
             Encoded out; out.width = image.width(); out.height = image.height();
-            if (cancelled->load()) return out;
+            if (previewAborted()) return out;
             QByteArray png;
             QBuffer buffer(&png);
             buffer.open(QIODevice::WriteOnly);
@@ -724,13 +751,13 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::shared_ptr
     struct DecodedVideos { QMap<std::string, QImage> frames; QString error; };
     auto* watcher = new QFutureWatcher<DecodedVideos>(this);
     connect(watcher, &QFutureWatcher<DecodedVideos>::finished, this,
-        [this, watcher, projectSnapshot, time, targetSize, rev, jobGen, cancelled, sharedFinish, releaseJob, encodeAndFinish = std::move(encodeAndFinish)]() mutable {
+        [this, watcher, projectSnapshot, time, targetSize, rev, jobGen, cancelled, showCancelled, sharedFinish, releaseJob, encodeAndFinish = std::move(encodeAndFinish)]() mutable {
             const auto decoded = watcher->result(); watcher->deleteLater();
             if (cancelled->load() || generation_ != jobGen) {
                 releaseJob();
                 return;
             }
-            if (c_.showMode) {
+            if (c_.showMode || showCancelled->load()) {
                 releaseJob();
                 (*sharedFinish)(toolResult({{"error", "Preview rendering was cancelled because Show mode became active"},
                     {"revision", static_cast<double>(revision_)}}, true));
@@ -743,10 +770,10 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::shared_ptr
             }
             encodeAndFinish(Controller::composeProjectAt(projectSnapshot, time, targetSize, &decoded.frames));
         });
-    watcher->setFuture(QtConcurrent::run([videoRequests = std::move(videoRequests), targetSize, cancelled] {
+    watcher->setFuture(QtConcurrent::run([videoRequests = std::move(videoRequests), targetSize, previewAborted] {
         DecodedVideos result;
         for (const auto& req : videoRequests) {
-            if (cancelled->load()) return result;
+            if (previewAborted()) return result;
             QString err;
             QImage frame = videoFrameAt(req.path, req.sourceTime, targetSize, &err);
             if (frame.isNull()) {
@@ -1366,6 +1393,12 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
     }
     if (a.contains("discard_unsaved") && !a["discard_unsaved"].isBool()) fail("discard_unsaved must be a boolean");
     const bool discard = a["discard_unsaved"].toBool(false);
+    const bool replacesShow = action == "new_show" || action == "open_demo" || action == "open_project";
+    if (replacesShow || a.contains("expected_revision")) {
+        const auto expected = a["expected_revision"];
+        if (!expected.isDouble() || expected.toDouble(-1) != static_cast<double>(revision_))
+            fail("Revision conflict or missing expected_revision. Read get_show and retry with the current revision");
+    }
     const quint64 jobGen = generation_;
     const quint64 jobEditGen = editGeneration_;
     const auto editCancelled = editSessionCancelled_;
@@ -1377,8 +1410,7 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
             c_.replace(newProject());
             emit showModified("Agent created a new show.");
         } else {
-            c_.replace(demoProject());
-            c_.dirty = true;
+            c_.replace(demoProject(), {}, true);
             emit showModified("Agent opened the demonstration show.");
         }
         auto result = snapshot(); result.insert("action", action);
@@ -1438,10 +1470,11 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
                 auto result = snapshot(); result.insert("action", action); result.insert("target_path", target);
                 finish(toolResult(result));
             });
-        watcher->setFuture(QtConcurrent::run([candidate = c_.project, stagePath = stagingDir->path(), isCancelled]() mutable {
+        const QString finalMediaDir = Controller::mediaDirectory(target);
+        watcher->setFuture(QtConcurrent::run([candidate = c_.project, stagePath = stagingDir->path(), finalMediaDir, isCancelled]() mutable {
             SavePrep out;
             try {
-                out.staged = stageProjectMedia(candidate, stagePath, isCancelled);
+                out.staged = stageProjectMedia(candidate, stagePath, finalMediaDir, isCancelled);
                 out.candidate = std::move(candidate);
             } catch (const std::exception& e) {
                 out.error = QString::fromUtf8(e.what());
@@ -1535,15 +1568,14 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
                         {"revision", static_cast<double>(revision_)}}, true));
                     return;
                 }
-                c_.replace(std::move(loaded.project), targetPath);
-                if (pkg || autosave) c_.dirty = true;
+                c_.replace(std::move(loaded.project), targetPath, pkg || autosave);
                 emit showModified("Agent opened " + QFileInfo(path).fileName() + ".");
                 auto result = snapshot(); result.insert("action", action); result.insert("target_path", targetPath);
                 finish(toolResult(result));
             });
-        watcher->setFuture(QtConcurrent::run([path] {
+        watcher->setFuture(QtConcurrent::run([path, isCancelled] {
             LoadResult out;
-            try { out.project = readProject(path); }
+            try { out.project = readProject(path, isCancelled); }
             catch (const std::exception& e) { out.error = QString::fromUtf8(e.what()); }
             return out;
         }));
@@ -1644,18 +1676,35 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, std::shared_
             paths.append(value.toString());
         }
         importId_ = newId(); importState_ = "preparing"; importError_.clear(); imported_.clear();
+        const quint64 jobGen = generation_;
+        const quint64 jobEditGen = editGeneration_;
+        const auto editCancelled = editSessionCancelled_;
         struct Prepared { std::vector<MediaAsset> assets; QString error; };
         auto* watcher = new QFutureWatcher<Prepared>(this); const auto job = importId_;
-        connect(watcher, &QFutureWatcher<Prepared>::finished, this, [this, watcher, job] {
+        connect(watcher, &QFutureWatcher<Prepared>::finished, this, [this, watcher, job, jobGen, jobEditGen] {
             const auto prepared = watcher->result(); watcher->deleteLater();
-            if (job != importId_) return;
+            if (job != importId_ || generation_ != jobGen) return;
+            if (!running() || !editing_ || editGeneration_ != jobEditGen || c_.showMode) {
+                imported_.clear();
+                importState_ = "cancelled";
+                importError_ = "Import cancelled because editing was disabled or locked";
+                return;
+            }
             importError_ = prepared.error; imported_ = prepared.assets; importState_ = importError_.isEmpty() ? "ready" : "failed";
             c_.report(importState_ == "ready" ? "Agent media is prepared and waiting to be added to the show." : "Agent media preparation failed: " + importError_);
         });
-        watcher->setFuture(QtConcurrent::run([paths] {
+        watcher->setFuture(QtConcurrent::run([paths, editCancelled] {
             Prepared result;
-            try { for (const auto& path : paths) result.assets.push_back(loadMedia(path)); }
-            catch (const std::exception& e) { result.error = QString::fromUtf8(e.what()); result.assets.clear(); }
+            try {
+                for (const auto& path : paths) {
+                    if (editCancelled->load()) {
+                        result.error = "Import cancelled because editing was disabled";
+                        result.assets.clear();
+                        return result;
+                    }
+                    result.assets.push_back(loadMedia(path));
+                }
+            } catch (const std::exception& e) { result.error = QString::fromUtf8(e.what()); result.assets.clear(); }
             return result;
         }));
         finish(toolResult(importStatus()));
@@ -1664,7 +1713,10 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, std::shared_
     }
 }
 
-void McpServer::dispatch(const QJsonObject& request, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish) {
+void McpServer::dispatch(const QJsonObject& request, const QString& clientScope,
+                         std::shared_ptr<std::atomic<bool>> cancelled,
+                         std::function<void()> abortConnection,
+                         std::function<void(QJsonObject, QByteArray)> finish) {
     auto idKeyOf = [](const QJsonValue& v) -> QString {
         if (v.isString()) return "s:" + v.toString();
         if (v.isDouble() && std::floor(v.toDouble()) == v.toDouble()) return "n:" + QString::number(v.toDouble(), 'f', 0);
@@ -1672,32 +1724,41 @@ void McpServer::dispatch(const QJsonObject& request, std::shared_ptr<std::atomic
     };
     const auto id = request["id"];
     auto error = [&](int code, const QString& message) {
-        finish(QJsonObject{{"jsonrpc", "2.0"}, {"id", id.isUndefined() ? QJsonValue(QJsonValue::Null) : id}, {"error", QJsonObject{{"code", code}, {"message", message}}}});
+        finish(QJsonObject{{"jsonrpc", "2.0"}, {"id", id.isUndefined() ? QJsonValue(QJsonValue::Null) : id}, {"error", QJsonObject{{"code", code}, {"message", message}}}}, {});
     };
     if (request["jsonrpc"] != "2.0" || !request["method"].isString() ||
         (!id.isUndefined() && !id.isString() && (!id.isDouble() || std::floor(id.toDouble()) != id.toDouble()))) { error(-32600, "Invalid JSON-RPC request"); return; }
     if (request.contains("params") && !request["params"].isObject()) { error(-32602, "Parameters must be an object"); return; }
     const auto method = request["method"].toString(); const auto params = request["params"].toObject();
     if (id.isUndefined()) {
-        if (method == "notifications/cancelled") {
-            const QString targetKey = idKeyOf(params.value("requestId"));
-            if (!targetKey.isEmpty()) {
-                if (auto it = inflightRequests_.find(targetKey); it != inflightRequests_.end() && it.value())
-                    it.value()->store(true);
+        if (method == "notifications/cancelled" && !clientScope.isEmpty()) {
+            const QString idPart = idKeyOf(params.value("requestId"));
+            if (!idPart.isEmpty()) {
+                const QString scopedKey = clientScope + "|" + idPart;
+                if (auto it = inflightRequests_.find(scopedKey); it != inflightRequests_.end()) {
+                    auto entry = it.value();
+                    inflightRequests_.erase(it);
+                    if (entry.cancelled) entry.cancelled->store(true);
+                    if (entry.abortConnection) entry.abortConnection();
+                }
             }
         }
-        finish({});
+        finish({}, {});
         return; // Notifications never produce JSON-RPC responses.
     }
-    const QString reqKey = idKeyOf(id);
-    if (!reqKey.isEmpty() && cancelled) inflightRequests_.insert(reqKey, cancelled);
-    auto wrappedFinish = [this, reqKey, cancelled, finish = std::move(finish)](QJsonObject resp) {
-        if (!reqKey.isEmpty() && inflightRequests_.value(reqKey) == cancelled) inflightRequests_.remove(reqKey);
-        finish(std::move(resp));
+    const QString idPart = idKeyOf(id);
+    const QString scopedKey = (!clientScope.isEmpty() && !idPart.isEmpty()) ? (clientScope + "|" + idPart) : QString();
+    if (!scopedKey.isEmpty() && cancelled) inflightRequests_.insert(scopedKey, {cancelled, std::move(abortConnection)});
+    auto wrappedFinish = [this, scopedKey, cancelled, finish = std::move(finish)](QJsonObject resp, QByteArray extraHeaders = {}) {
+        if (!scopedKey.isEmpty() && inflightRequests_.value(scopedKey).cancelled == cancelled) inflightRequests_.remove(scopedKey);
+        finish(std::move(resp), std::move(extraHeaders));
     };
     QJsonObject result;
+    QByteArray extraHeaders;
     if (method == "initialize") {
         if (!params["protocolVersion"].isString() || !params["capabilities"].isObject() || !params["clientInfo"].isObject()) { wrappedFinish(QJsonObject{{"jsonrpc", "2.0"}, {"id", id}, {"error", QJsonObject{{"code", -32602}, {"message", "Invalid initialization parameters"}}}}); return; }
+        const QString sessionHeader = clientScope.isEmpty() ? newId() : clientScope;
+        extraHeaders = "Mcp-Session-Id: " + sessionHeader.toUtf8() + "\r\n";
         result = {{"protocolVersion", versions.contains(params["protocolVersion"].toString()) ? params["protocolVersion"] : QJsonValue(versions.front())},
             {"capabilities", QJsonObject{{"tools", QJsonObject{}}, {"resources", QJsonObject{}}}},
             {"serverInfo", QJsonObject{{"name", "simpleavshow"}, {"version", "1.1.0"}}},
@@ -1740,7 +1801,7 @@ void McpServer::dispatch(const QJsonObject& request, std::shared_ptr<std::atomic
             if (!matched) { wrappedFinish(QJsonObject{{"jsonrpc", "2.0"}, {"id", id}, {"error", QJsonObject{{"code", -32602}, {"message", "Unknown documentation resource"}}}}); return; }
         } else { wrappedFinish(QJsonObject{{"jsonrpc", "2.0"}, {"id", id}, {"error", QJsonObject{{"code", -32602}, {"message", "Unknown resource"}}}}); return; }
     } else { wrappedFinish(QJsonObject{{"jsonrpc", "2.0"}, {"id", id}, {"error", QJsonObject{{"code", -32601}, {"message", "Method not found"}}}}); return; }
-    wrappedFinish({{"jsonrpc", "2.0"}, {"id", id}, {"result", result}});
+    wrappedFinish({{"jsonrpc", "2.0"}, {"id", id}, {"result", result}}, extraHeaders);
 }
 
 void McpServer::acceptConnection() {
@@ -1753,9 +1814,20 @@ void McpServer::acceptConnection() {
         connect(timeout, &QTimer::timeout, socket, &QTcpSocket::abort);
         auto buffer = std::make_shared<QByteArray>(); auto done = std::make_shared<bool>(false);
         auto cancelled = std::make_shared<std::atomic<bool>>(false);
-        connect(socket, &QTcpSocket::disconnected, socket, [cancelled] { cancelled->store(true); });
-        connect(timeout, &QTimer::timeout, socket, [cancelled] { cancelled->store(true); });
-        connect(socket, &QTcpSocket::readyRead, this, [this, socket, timeout, buffer, done, cancelled] {
+        auto trackedKey = std::make_shared<QString>();
+        auto cleanupTracked = [this, trackedKey, cancelled] {
+            if (!trackedKey->isEmpty() && inflightRequests_.value(*trackedKey).cancelled == cancelled)
+                inflightRequests_.remove(*trackedKey);
+        };
+        connect(socket, &QTcpSocket::disconnected, this, [cancelled, cleanupTracked] {
+            cancelled->store(true);
+            cleanupTracked();
+        });
+        connect(timeout, &QTimer::timeout, this, [cancelled, cleanupTracked] {
+            cancelled->store(true);
+            cleanupTracked();
+        });
+        connect(socket, &QTcpSocket::readyRead, this, [this, socket, timeout, buffer, done, cancelled, trackedKey] {
             if (*done) return;
             auto respond = [socket = QPointer<QTcpSocket>(socket), done](int status, const QByteArray& reason, const QByteArray& body = QByteArray(), const QByteArray& extra = QByteArray()) {
                 *done = true;
@@ -1810,9 +1882,23 @@ void McpServer::acceptConnection() {
             const QString toolName = reqObj["method"].toString() == "tools/call" ? reqObj["params"].toObject()["name"].toString() : QString();
             const bool longFileJob = toolName == "project_action" || toolName == "relink_media";
             timeout->start(longFileJob ? (30 * 60 * 1000) : 60000);
-            dispatch(reqObj, cancelled, [respond](QJsonObject result) {
-                if (result.isEmpty()) respond(202, "Accepted");
-                else respond(200, "OK", QJsonDocument(result).toJson(QJsonDocument::Compact));
+            const QString clientScope = headers.contains("mcp-session-id")
+                ? QString::fromUtf8(headers["mcp-session-id"])
+                : QString::fromUtf8(headers.value("x-sav-client-id"));
+            const auto reqId = reqObj["id"];
+            if (!clientScope.isEmpty() && !reqId.isUndefined()) {
+                const QString idPart = reqId.isString() ? ("s:" + reqId.toString())
+                    : (reqId.isDouble() && std::floor(reqId.toDouble()) == reqId.toDouble() ? ("n:" + QString::number(reqId.toDouble(), 'f', 0)) : QString());
+                if (!idPart.isEmpty()) *trackedKey = clientScope + "|" + idPart;
+            }
+            auto abortConnection = [respond, reqId] {
+                const QJsonObject cancelErr{{"jsonrpc", "2.0"}, {"id", reqId},
+                    {"error", QJsonObject{{"code", -32800}, {"message", "Request cancelled"}}}};
+                respond(200, "OK", QJsonDocument(cancelErr).toJson(QJsonDocument::Compact));
+            };
+            dispatch(reqObj, clientScope, cancelled, std::move(abortConnection), [respond](QJsonObject result, QByteArray extra) {
+                if (result.isEmpty()) respond(202, "Accepted", {}, extra);
+                else respond(200, "OK", QJsonDocument(result).toJson(QJsonDocument::Compact), extra);
             });
         });
     }

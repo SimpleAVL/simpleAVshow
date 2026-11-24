@@ -362,20 +362,26 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         }
     });
     connect(&acp_, &AcpClient::toolCallUpdated, this, [this](const AcpToolCallUpdate& update) {
+        auto clampField = [](const QString& s, qsizetype limit) {
+            return s.size() > limit ? (s.left(limit) + "…") : s;
+        };
+        const QString title = clampField(update.title, 256);
+        const QString meta = clampField(update.kind, 64);
+        const QString status = clampField(update.status, 32);
+        const QString detail = clampField(update.detail, 4096);
         for (auto it = entries_.rbegin(); it != entries_.rend(); ++it) {
             if (it->kind == ChatEntry::Kind::ToolCall && !update.toolCallId.isEmpty() && it->id == update.toolCallId) {
-                if (!update.title.isEmpty()) it->title = update.title;
-                if (!update.kind.isEmpty()) it->meta = update.kind;
-                if (!update.status.isEmpty()) it->status = update.status;
-                if (!update.detail.isEmpty()) it->text = update.detail;
+                if (!title.isEmpty()) it->title = title;
+                if (!meta.isEmpty()) it->meta = meta;
+                if (!status.isEmpty()) it->status = status;
+                if (!detail.isEmpty()) it->text = detail;
                 scheduleRender();
                 return;
             }
         }
-        entries_.push_back({ChatEntry::Kind::ToolCall, update.toolCallId,
-            update.title.isEmpty() ? QString("Tool call") : update.title,
-            update.kind, update.detail, {}, update.status.isEmpty() ? QString("in_progress") : update.status});
-        scheduleRender();
+        appendEntry({ChatEntry::Kind::ToolCall, clampField(update.toolCallId, 128),
+            title.isEmpty() ? QString("Tool call") : title,
+            meta, detail, {}, status.isEmpty() ? QString("in_progress") : status});
     });
     connect(&acp_, &AcpClient::permissionRequested, this, &AgentChatPanel::addPermissionCard);
     connect(&acp_, &AcpClient::promptFinished, this, [this](const QString& reason) {
@@ -385,8 +391,20 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         scheduleRender();
     });
     connect(&acp_, &AcpClient::stderrReceived, this, [this](const QString& text) {
+        constexpr int maxLogChars = 64 * 1024;
+        constexpr qsizetype maxChunkChars = 4096;
+        QString chunk = text.size() > maxChunkChars ? (text.left(maxChunkChars) + "…\n") : text;
+        if (!chunk.contains('\n') && chunk.size() > 512) chunk.append('\n');
+        auto* doc = logsView_->document();
+        if (doc->characterCount() + chunk.size() > maxLogChars) {
+            QTextCursor trim(doc);
+            trim.movePosition(QTextCursor::Start);
+            trim.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor,
+                std::min(doc->characterCount(), (doc->characterCount() + static_cast<int>(chunk.size())) - maxLogChars / 2));
+            trim.removeSelectedText();
+        }
         logsView_->moveCursor(QTextCursor::End);
-        logsView_->insertPlainText(text);
+        logsView_->insertPlainText(chunk);
         logsView_->moveCursor(QTextCursor::End);
     });
     connect(&acp_, &AcpClient::errorOccurred, this, [this](const QString& message) {
@@ -662,11 +680,28 @@ void AgentChatPanel::appendEntry(ChatEntry entry) {
     scheduleRender();
 }
 
+void AgentChatPanel::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    if (renderPending_) {
+        renderPending_ = false;
+        renderTranscript();
+    }
+}
+
 void AgentChatPanel::scheduleRender() {
+    if (!isVisible()) {
+        renderPending_ = true;
+        return;
+    }
     if (!renderTimer_.isActive()) renderTimer_.start();
 }
 
 void AgentChatPanel::renderTranscript() {
+    if (!isVisible()) {
+        renderPending_ = true;
+        return;
+    }
+    renderPending_ = false;
     auto* bar = transcript_->verticalScrollBar();
     const bool stickToBottom = !bar || bar->value() >= bar->maximum() - 24;
 

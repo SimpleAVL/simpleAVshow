@@ -26,23 +26,23 @@ void bindAudio(Project& project);
 // Type-checks a manifest without touching media; asset paths resolve against directory.
 Project parseProject(const QByteArray& json, const QString& directory);
 // Loads each asset source, then binds and validates the complete project.
-void loadProjectMedia(Project& project);
-Project readProject(const QString& path);
+void loadProjectMedia(Project& project, const std::function<bool()>& isCancelled = {});
+Project readProject(const QString& path, const std::function<bool()>& isCancelled = {});
 // Shared manifest representation; an empty directory keeps absolute source paths.
 QJsonObject projectJson(const Project& project, const QString& directory = {});
 void writeProject(const Project& project, const QString& path);
 bool isProjectPackage(const QString& path);
-Project readProjectPackage(const QString& path);
+Project readProjectPackage(const QString& path, const std::function<bool()>& isCancelled = {});
 void writeProjectPackage(const Project& project, const QString& path,
                          const std::function<bool()>& isCancelled = {},
                          const QString& finalTargetPath = {});
 void materializeProjectMedia(Project& project, const QString& directory,
                              const std::function<bool()>& isCancelled = {});
-// Two-phase media materialization: stages copies/exports off the destination directory on a worker,
-// then moves them into targetDirectory only after GUI-thread authorization succeeds.
+// Two-phase media materialization: stages copies/exports and pre-builds rebound audio metadata off the GUI thread,
+// then moves files into targetDirectory in O(1) only after GUI-thread authorization succeeds.
 struct StagedProjectMedia {
     QMap<QString, QString> assetFileNames; // asset id -> file name inside stagingDirectory
-    QMap<QString, bool> extractedAssets;   // asset id -> came from packageDirectory
+    QMap<QString, std::shared_ptr<const AudioData>> reboundAudio; // pre-built on worker thread
 };
 struct PublishedMediaRollback {
     QStringList movedFiles;
@@ -51,6 +51,7 @@ struct PublishedMediaRollback {
     void rollback() const;
 };
 StagedProjectMedia stageProjectMedia(const Project& project, const QString& stagingDirectory,
+                                     const QString& finalTargetDirectory,
                                      const std::function<bool()>& isCancelled = {});
 PublishedMediaRollback publishStagedProjectMedia(Project& project, const QString& stagingDirectory,
                                                  const QString& targetDirectory, const StagedProjectMedia& staged);

@@ -415,12 +415,20 @@ void AcpClient::handleStdout() {
     if (!process_) return;
     constexpr qsizetype maxStdoutBufferBytes = 4 * 1024 * 1024;
     stdoutBuffer_.append(process_->readAllStandardOutput());
+    if (stdoutBuffer_.size() > maxStdoutBufferBytes * 2) {
+        failConnection("ACP agent output exceeded maximum buffer size.");
+        return;
+    }
     for (;;) {
         const qsizetype newline = stdoutBuffer_.indexOf('\n');
         if (newline < 0) {
             if (stdoutBuffer_.size() > maxStdoutBufferBytes) {
                 failConnection("ACP agent output exceeded maximum line size (4 MiB).");
             }
+            break;
+        }
+        if (newline > maxStdoutBufferBytes) {
+            failConnection("ACP agent output exceeded maximum line size (4 MiB).");
             break;
         }
         QByteArray line = stdoutBuffer_.left(newline);
@@ -466,12 +474,13 @@ void AcpClient::handleResponse(int id, const QJsonObject& msg) {
             [](const PendingRequest& p) { return p.kind == PendingKind::Prompt; });
         if (!anyPromptLeft) cancelTimer_.stop();
     };
-    const bool hasError = msg.contains("error") && msg["error"].isObject();
-    const bool hasResult = msg.contains("result") && msg["result"].isObject();
-    if (hasError == hasResult) {
+    const bool hasErrorKey = msg.contains("error");
+    const bool hasResultKey = msg.contains("result");
+    if (hasErrorKey == hasResultKey || (hasErrorKey && !msg["error"].isObject()) || (hasResultKey && !msg["result"].isObject())) {
         failConnection("ACP agent returned a malformed JSON-RPC response.");
         return;
     }
+    const bool hasError = hasErrorKey;
     if (kind == PendingKind::Prompt) clearCancelTimerIfDone();
     if (kind == PendingKind::Prompt && (sessionId_.isEmpty() || req.sessionId != sessionId_)) {
         // Ignore stale prompt completion from a superseded session.

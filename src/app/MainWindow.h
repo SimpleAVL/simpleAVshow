@@ -68,6 +68,7 @@ private:
     // Fields changed since the inspector last showed the model; automatic commits apply only these.
     std::set<QWidget*> touched_;
     std::optional<Clip> clipboard_;
+    bool clipboardVisual_ = false;
     QElapsedTimer escape_;
     bool use(QWidget* field) const { return !automatic_ || touched_.contains(field); }
     std::string inspectedClip_, inspectedMarker_;

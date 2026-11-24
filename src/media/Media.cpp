@@ -364,7 +364,7 @@ QImage videoFrameAt(const QString& path, double time, QSize maximum, QString* er
         avcodec_flush_buffers(input.codec);
         const AVRational frameRate = av_guess_frame_rate(input.format, stream, nullptr);
         const double rate = frameRate.num && frameRate.den ? av_q2d(frameRate) : 24;
-        QImage best; double last = -1; int decoded = 0; bool reached = false;
+        QImage best; double last = -1; int decoded = 0; bool reached = false; bool sawEligibleFrame = false;
         while (decoded < 240) {
             int result = avcodec_receive_frame(input.codec, input.frame);
             if (result == AVERROR_EOF) { reached = !best.isNull(); break; }
@@ -385,19 +385,23 @@ QImage videoFrameAt(const QString& path, double time, QSize maximum, QString* er
                 reached = true;
                 break;
             }
+            sawEligibleFrame = true;
             QSize dimensions(input.frame->width, input.frame->height);
             if (dimensions.width() > maximum.width() || dimensions.height() > maximum.height()) dimensions.scale(maximum, Qt::KeepAspectRatio);
             QImage image(dimensions, QImage::Format_RGBA8888);
             input.scaler = sws_getCachedContext(input.scaler, input.frame->width, input.frame->height,
                 static_cast<AVPixelFormat>(input.frame->format), image.width(), image.height(), AV_PIX_FMT_RGBA, SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
             unsigned char* dest[] = {image.bits()}; int strides[] = {static_cast<int>(image.bytesPerLine())};
-            if (!image.isNull() && input.scaler && sws_scale(input.scaler, input.frame->data, input.frame->linesize, 0, input.frame->height, dest, strides) >= 0) {
-                best = std::move(image);
+            if (image.isNull() || !input.scaler || sws_scale(input.scaler, input.frame->data, input.frame->linesize, 0, input.frame->height, dest, strides) < 0) {
+                av_frame_unref(input.frame);
+                if (error) *error = "Failed to convert video frame";
+                return {};
             }
+            best = std::move(image);
             av_frame_unref(input.frame);
             if (frameTime >= target - .0001) { reached = true; break; }
         }
-        if (reached && best.isNull()) {
+        if (reached && best.isNull() && !sawEligibleFrame) {
             // Target lies before the first decoded video frame: match VideoReader's transparent output.
             QImage blank(1, 1, QImage::Format_RGBA8888); blank.fill(Qt::transparent); return blank;
         }
