@@ -1996,6 +1996,7 @@ private slots:
         QTemporaryDir dir; const auto path = dir.filePath("source.wav");
         auto bytes = waveBytes(16, 1, 2, 44100, false, 44100); writeBytes(path, bytes);
         const auto time = QDateTime::currentDateTimeUtc().addDays(-1); setModified(path, time);
+        const auto stored = QFileInfo(path).lastModified(); // FAT and exFAT round to 2 s.
         const auto asset = loadMedia(path); float sample[2]; asset.audio->storage->read(100, sample, 1);
         bytes[bytes.size() - 2] ^= 0x40; const auto replacement = dir.filePath("replacement.wav"); writeBytes(replacement, bytes);
         setModified(replacement, time); QVERIFY(QFile::remove(path));
@@ -2004,7 +2005,7 @@ private slots:
         try { asset.audio->storage->read(100, sample, 1); QFAIL("missing source read"); }
         catch (const AudioSourceChanged&) { QFAIL("a missing source can come back"); } catch (const std::runtime_error&) {}
         QVERIFY(QFile::rename(replacement, path));
-        QCOMPARE(QFileInfo(path).size(), static_cast<qint64>(bytes.size())); QCOMPARE(QFileInfo(path).lastModified(), time.toLocalTime());
+        QCOMPARE(QFileInfo(path).size(), static_cast<qint64>(bytes.size())); QCOMPARE(QFileInfo(path).lastModified(), stored);
         QVERIFY_THROWS_EXCEPTION(AudioSourceChanged, asset.audio->storage->read(100, sample, 1));
         // Reopening, as the error asks, must measure the replacement rather than reuse the old summary.
         const auto copy = dir.filePath("copy.wav"); QVERIFY(QFile::copy(path, copy));
