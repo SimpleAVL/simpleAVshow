@@ -30,7 +30,8 @@ MediaAsset loadMedia(const QString& path);
 MediaAsset loadMedia(const QString& path, AudioPreparation preparation);
 // Closes streamed-audio decoders unused for a few seconds, wherever their sources are held (an armed
 // show, undo history), so files are not kept open indefinitely; a later read reopens and seeks.
-void closeIdleStreams();
+// Decoders of files that are gone close too, after a check that runs in the background unless wait.
+void closeIdleStreams(bool wait = false);
 
 // One worker per video clip. No decoding or disk access on the audio thread.
 // Corrupt packets and transient read/seek failures are skipped and counted; only

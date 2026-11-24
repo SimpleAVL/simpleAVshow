@@ -61,7 +61,7 @@ bool present(const QString& path) {
     // Delete-pending files fail with access denied (as do unreadable ones, which cannot play either).
     const DWORD error = GetLastError();
     return error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND && error != ERROR_ACCESS_DENIED &&
-        error != ERROR_DELETE_PENDING && error != ERROR_INVALID_NAME && error != ERROR_BAD_NETPATH;
+        error != ERROR_DELETE_PENDING && error != ERROR_INVALID_NAME;
 #else
     return QFileInfo(path).isFile();
 #endif
@@ -383,6 +383,8 @@ QString audioCacheDirectory() {
 
 StreamSummary::StreamSummary(const QString& source, const QByteArray& format) : source_(source) {
     const auto before = stamp(source);
+    // Modified within the timestamp granularity: a rewrite during import could keep the same stamp.
+    recent_ = QDateTime::currentMSecsSinceEpoch() - before.modified <= racyWindow;
     stamp_ = before.key(); version_ = {before.size, before.modified, before.identity}; sourceHash_ = sourceHash(source, &indexed_);
     const auto key = QString::fromLatin1(QCryptographicHash::hash(decoderRevision() + format + '\0' + sourceHash_, QCryptographicHash::Sha256).toHex());
     path_ = audioCacheDirectory() + '/' + key + ".stream";
@@ -423,10 +425,10 @@ std::optional<AudioSummary> StreamSummary::reuse(bool mono) const {
 void StreamSummary::verify() const { unchangedSince(source_, stamp_); }
 void StreamSummary::save(const AudioSummary& summary) const {
     verify();
-    // An indexed hash can predate a rewrite that kept size, time and identity, and the summary is filed
-    // under content that other copies share, so it is checked against the file. A hash read just now is
-    // covered by the stamp check above.
-    if (indexed_ && fileHash(source_) != sourceHash_) {
+    // An indexed hash can predate a rewrite that kept size, time and identity, and a recently modified
+    // file can be rewritten within its timestamp step; the summary is filed under content that other
+    // copies share, so then it is checked against the file. Otherwise the stamp check above covers it.
+    if ((indexed_ || recent_) && fileHash(source_) != sourceHash_) {
         updateIndex(stamp(source_), {});
         fail("Audio source changed during preparation; import it again");
     }

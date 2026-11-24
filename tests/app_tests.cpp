@@ -1551,6 +1551,20 @@ private slots:
         QVERIFY(QDir(detail::audioCacheDirectory()).entryList({"*.stream"}, QDir::Files).isEmpty());
         QVERIFY(loadMedia(path).audio); // The stale index entry is gone, so the next import hashes again.
     }
+    void streamSummaryRechecksRecentSources() {
+        // A file modified just before import can be rewritten during it within one timestamp step (2 s on
+        // FAT) at the same size; its summary must not be filed under the content hashed at the start.
+        QTemporaryDir dir; const auto path = dir.filePath("recent.wav");
+        auto bytes = waveBytes(16, 1, 2, 44100, false, 44100); bytes.replace(bytes.size() - 4, 4, QUuid::createUuid().toRfc4122().first(4));
+        writeBytes(path, bytes); const auto time = QFileInfo(path).lastModified();
+        const detail::StreamSummary summary(path, "wav");
+        {
+            QFile file(path); QVERIFY(file.open(QIODevice::ReadWrite)); QVERIFY(file.seek(bytes.size() - 4000));
+            QCOMPARE(file.write(QByteArray(4000, '\x40')), 4000);
+        }
+        setModified(path, time); QCOMPARE(QFileInfo(path).lastModified(), time);
+        QVERIFY_THROWS_EXCEPTION(std::runtime_error, summary.save(detail::AudioSummary{44100, false, {}, {}}));
+    }
     void streamedAudioCallbackHeadroom() {
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
         QTemporaryDir dir; QVERIFY(dir.isValid()); setAudioPreparation(AudioPreparation::Stream);
@@ -1835,7 +1849,7 @@ private slots:
         c.toggle(); QCOMPARE(c.transport.state(), State::Stopped);
         // A prepared cache does not need the original. Restoring the file under its name needs the
         // streamed reader released, which happens for unopenable sources (FAT/exFAT keep the name until then).
-        closeIdleStreams();
+        closeIdleStreams(true);
         writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 + 211)); const auto prepared = loadMedia(path, AudioPreparation::Prepared).audio;
         QVERIFY(!prepared->storage->readsSource()); QCOMPARE(c.replaceAudio({{asset.path, prepared}}), Controller::AudioSwap::Applied); QVERIFY(QFile::remove(path));
         QVERIFY(c.missingMedia().isEmpty()); QVERIFY(!Controller::needsRelink(c.project.assets[asset.id]));
@@ -1890,12 +1904,12 @@ private slots:
         const auto descriptors = [] { return QDir("/dev/fd").entryList(QDir::AllEntries | QDir::System | QDir::NoDotAndDotDot).size(); };
         const auto before = descriptors(); float sample[2]; audio->storage->read(0, sample, 1);
         QCOMPARE(descriptors(), before + 1);
-        closeIdleStreams(); QCOMPARE(descriptors(), before + 1); // Just read: not idle yet.
-        QTest::qWait(3100); closeIdleStreams(); QCOMPARE(descriptors(), before);
+        closeIdleStreams(true); QCOMPARE(descriptors(), before + 1); // Just read: not idle yet.
+        QTest::qWait(3100); closeIdleStreams(true); QCOMPARE(descriptors(), before);
         audio->storage->read(4000, sample, 1); QCOMPARE(descriptors(), before + 1); // Reopens on demand.
         // A deleted source's decoder closes at the next sweep, idle or not, so its name can be reused at once
         // where deleting an open file only marks it (FAT/exFAT on Windows).
-        QVERIFY(QFile::remove(path)); closeIdleStreams(); QCOMPARE(descriptors(), before);
+        QVERIFY(QFile::remove(path)); closeIdleStreams(true); QCOMPARE(descriptors(), before);
 #endif
     }
     void rejectedSourceSwitchKeepsThePreviousPreference() {

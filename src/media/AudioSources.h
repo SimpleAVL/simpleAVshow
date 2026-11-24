@@ -32,6 +32,12 @@ bool present(const QString& path);
 struct FileVersion {
     qint64 size = -1, modified = 0; FileIdentity identity;
     bool operator==(const FileVersion&) const = default;
+    // The same file as other: size and time match, and identity too wherever both sides know it
+    // (a share may report it only some of the time).
+    bool sameAs(const FileVersion& other) const {
+        return size == other.size && modified == other.modified &&
+            (identity == FileIdentity{} || other.identity == FileIdentity{} || identity == other.identity);
+    }
 };
 FileVersion fileVersion(const QString& path);
 // Least recently used caches are removed until the directory fits the budget;
@@ -72,7 +78,7 @@ public:
 private:
     QString source_, path_;
     QByteArray stamp_, sourceHash_;
-    bool indexed_ = false;
+    bool indexed_ = false, recent_ = false;
     FileVersion version_;
 };
 

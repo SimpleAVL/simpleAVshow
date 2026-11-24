@@ -4,6 +4,7 @@
 #include <QUuid>
 #include <QImageReader>
 #include <QTemporaryFile>
+#include <QThreadPool>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -70,18 +71,22 @@ public:
     SourceFile(const SourceFile&) = delete;
     SourceFile& operator=(const SourceFile&) = delete;
     AVIOContext* io() const noexcept { return io_; }
-    // Identity and size of the file actually open, whatever is at its path by now; none when the handle
-    // cannot be queried (some network servers), in which case the path checks are all there is.
-    std::optional<std::pair<detail::FileIdentity, qint64>> opened() const {
+    // Identity and size of the file actually open, whatever is at its path by now, as far as the handle
+    // can tell (some network servers report no identity).
+    struct Opened { std::optional<detail::FileIdentity> identity; std::optional<qint64> size; };
+    Opened opened() const {
 #ifdef Q_OS_WIN
         BY_HANDLE_FILE_INFORMATION info{};
-        if (!GetFileInformationByHandle(handle_, &info)) return {};
-        return std::pair{detail::FileIdentity{info.dwVolumeSerialNumber, (quint64{info.nFileIndexHigh} << 32) | info.nFileIndexLow},
-            static_cast<qint64>((quint64{info.nFileSizeHigh} << 32) | info.nFileSizeLow)};
+        if (GetFileInformationByHandle(handle_, &info))
+            return {detail::FileIdentity{info.dwVolumeSerialNumber, (quint64{info.nFileIndexHigh} << 32) | info.nFileIndexLow},
+                static_cast<qint64>((quint64{info.nFileSizeHigh} << 32) | info.nFileSizeLow)};
+        LARGE_INTEGER size;
+        if (GetFileSizeEx(handle_, &size)) return {std::nullopt, size.QuadPart};
+        return {};
 #else
         struct stat info{};
         if (::fstat(fd_, &info)) return {};
-        return std::pair{detail::FileIdentity{static_cast<quint64>(info.st_dev), static_cast<quint64>(info.st_ino)}, static_cast<qint64>(info.st_size)};
+        return {detail::FileIdentity{static_cast<quint64>(info.st_dev), static_cast<quint64>(info.st_ino)}, static_cast<qint64>(info.st_size)};
 #endif
     }
 private:
@@ -157,11 +162,13 @@ struct Input {
         const AVInputFormat* detected = nullptr;
         if (sharing == Sharing::AllowReplace) {
             file = std::make_unique<SourceFile>(path);
-            // Identity is compared only where both are known; a file system without IDs still has its size.
-            if (const auto now = expected ? file->opened() : std::nullopt;
-                now && (now->second != expected->size ||
-                    (now->first != detail::FileIdentity{} && expected->identity != detail::FileIdentity{} && now->first != expected->identity)))
-                throw AudioSourceChanged("Audio source changed; reopen the project: " + path.toStdString());
+            // Whatever the handle can tell is compared; identity only where both sides know it.
+            if (expected) {
+                const auto now = file->opened();
+                if ((now.size && *now.size != expected->size) ||
+                    (now.identity && *now.identity != detail::FileIdentity{} && expected->identity != detail::FileIdentity{} && *now.identity != expected->identity))
+                    throw AudioSourceChanged("Audio source changed; reopen the project: " + path.toStdString());
+            }
             detected = identify(path, file->io());
             format = avformat_alloc_context();
             if (!format) throw std::bad_alloc();
@@ -386,7 +393,7 @@ public:
         if (first < 0 || first > length_ || count > static_cast<std::size_t>(length_ - first)) throw std::runtime_error("Invalid audio source range");
         std::fill(stereo, stereo + count * 2, 0.f);
         if (!count) return;
-        const std::lock_guard lock(mutex_);
+        const std::lock_guard lock(mutex_); ++reads_;
         // A missing or changed source releases its open decoders first, so their handles do not keep a
         // deleted file's name reserved (Windows) or pin an old copy while the operator restores it.
         // A file whose identity cannot be read (gone since the check, or deleted while open on Windows,
@@ -398,7 +405,7 @@ public:
         }
         // File identity also catches a replacement saved with the same size and modification time;
         // an in-place rewrite that keeps both is not detected.
-        if (current != version_) { readers_.clear(); throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString()); }
+        if (!current.sameAs(version_)) { readers_.clear(); throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString()); }
         Reader* reader = nullptr;
         try {
             pick(first, reader);
@@ -439,29 +446,42 @@ private:
 public:
     // Sources reading right now are skipped (their locks are only tried), and so is any decoder read
     // within idleAfter: a playing clip reads every block, so only idle decoders close.
-    static void closeIdle() {
+    // wait: check presence before returning (tests); otherwise that runs on a worker, one sweep at a time.
+    static void closeIdle(bool wait) {
         constexpr auto idleAfter = std::chrono::seconds(3);
         const auto now = std::chrono::steady_clock::now();
-        std::vector<std::pair<const StreamStorage*, QString>> open;
+        struct Open { const StreamStorage* storage; QString path; std::uint64_t reads; };
+        std::vector<Open> open;
         {
             auto& r = registry(); const std::lock_guard lock(r.mutex);
             for (const auto* storage : r.storages) {
                 const std::unique_lock other(storage->mutex_, std::try_to_lock); if (!other) continue;
                 std::erase_if(storage->readers_, [&](const auto& reader) { return now - reader->usedAt >= idleAfter; });
-                if (!storage->readers_.empty()) open.emplace_back(storage, storage->path_);
+                if (!storage->readers_.empty()) open.push_back({storage, storage->path_, storage->reads_});
             }
         }
+        if (open.empty()) return;
         // A source deleted while open (FAT/exFAT on Windows) keeps its name until its handles close:
         // release them so the file can be restored or replaced under that name. Checking a file can
-        // stall (network shares), so it happens without holding locks that reads need.
-        std::erase_if(open, [](const auto& entry) { return detail::present(entry.second); });
-        if (open.empty()) return;
-        auto& r = registry(); const std::lock_guard lock(r.mutex);
-        for (const auto& [storage, path] : open) {
-            // The storage may have gone meanwhile; one at the same address is only released if it reads the same file.
-            if (std::find(r.storages.begin(), r.storages.end(), storage) == r.storages.end() || storage->path_ != path) continue;
-            const std::unique_lock other(storage->mutex_, std::try_to_lock); if (other) storage->readers_.clear();
-        }
+        // stall (network shares), so it runs off the UI thread and without locks that reads need.
+        static std::atomic<bool> sweeping{false};
+        if (sweeping.exchange(true)) return;
+        auto sweep = [open = std::move(open)]() mutable {
+            std::erase_if(open, [](const Open& entry) { return detail::present(entry.path); });
+            if (!open.empty()) {
+                auto& r = registry(); const std::lock_guard lock(r.mutex);
+                for (const auto& entry : open) {
+                    // Skip a storage that has gone (or one now at its address reading another file), and
+                    // one read since: the file came back.
+                    const auto* storage = entry.storage;
+                    if (std::find(r.storages.begin(), r.storages.end(), storage) == r.storages.end() || storage->path_ != entry.path) continue;
+                    const std::unique_lock other(storage->mutex_, std::try_to_lock);
+                    if (other && storage->reads_ == entry.reads) storage->readers_.clear();
+                }
+            }
+            sweeping = false;
+        };
+        if (wait) sweep(); else QThreadPool::globalInstance()->start(std::move(sweep));
     }
 private:
     // Reading forward this far decodes through instead of seeking.
@@ -483,6 +503,7 @@ private:
     detail::FileVersion version_;
     mutable std::mutex mutex_;
     mutable std::vector<std::unique_ptr<Reader>> readers_;
+    mutable std::uint64_t reads_ = 0; // Under mutex_: lets the sweep tell whether a read happened since it looked.
     // Sets reader before seeking it, so a failed seek discards that decoder.
     void pick(Frame frame, Reader*& reader) const {
         for (const auto& r : readers_) {
@@ -586,7 +607,7 @@ std::shared_ptr<const AudioData> loadAudio(const QString& path, AudioPreparation
 }
 }
 
-void closeIdleStreams() { StreamStorage::closeIdle(); }
+void closeIdleStreams(bool wait) { StreamStorage::closeIdle(wait); }
 void setAudioPreparation(AudioPreparation value) noexcept { preference.store(value); }
 AudioPreparation audioPreparation() noexcept { return preference.load(); }
 
