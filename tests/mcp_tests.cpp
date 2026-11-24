@@ -680,6 +680,34 @@ private slots:
                      QString("ready"));
         }
 
+        // 21. Emergency Stop All succeeds even when the 128-slot transport command queue is full of Play commands.
+        {
+            Controller c;
+            c.replace(demoProject());
+            for (int i = 0; i < 200; ++i) c.transport.command({Action::Play});
+            // Queue is full, yet emergency Stop All must succeed and leave state Stopped after render.
+            c.transport.requestStopAll();
+            QVERIFY(!c.transport.command({Action::Play}));
+            c.transport.render(nullptr, 0, 0);
+            QCOMPARE(c.transport.state(), State::Stopped);
+        }
+
+        // 22. open_project rejects non-project file extensions before reading the file.
+        {
+            QTemporaryDir dir;
+            QVERIFY(dir.isValid());
+            const QString bogusMedia = dir.filePath("recording.wav");
+            QFile f(bogusMedia);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write("RIFF0000WAVE");
+            f.close();
+            const auto openBad = call(server, "project_action", {
+                {"action", "open_project"}, {"path", bogusMedia}, {"discard_unsaved", true},
+                {"expected_revision", revision(server)}
+            });
+            QVERIFY(openBad["isError"].toBool());
+        }
+
         window.controller().dirty = false;
         server.stop();
     }

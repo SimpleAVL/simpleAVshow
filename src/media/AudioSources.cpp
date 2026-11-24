@@ -208,9 +208,10 @@ public:
         return copy;
     }
     Frame length() const noexcept override { return length_; }
-    void prepare(AudioData& data) {
+    void prepare(AudioData& data, const std::function<bool()>& isCancelled = {}) {
         // A sidecar keyed like the source index skips reading unchanged files on reopen;
         // read() still verifies every block against the recorded hashes.
+        if (isCancelled && isCancelled()) throw std::runtime_error("Media load cancelled");
         const auto source = stamp(path_);
         if (!source.path.isEmpty())
             sidecar_ = audioCacheDirectory() + '/' + QString::fromLatin1(QCryptographicHash::hash(source.path.toUtf8(), QCryptographicHash::Sha256).toHex()) + ".wave";
@@ -220,6 +221,7 @@ public:
         std::array<float, AudioBuffer::blockFrames * 2> scratch{};
         auto hashes = std::make_shared<std::vector<QByteArray>>();
         for (Frame first = 0; first < length_; first += AudioBuffer::blockFrames) {
+            if (isCancelled && isCancelled()) throw std::runtime_error("Media load cancelled");
             const auto count = std::min(AudioBuffer::blockFrames, length_ - first);
             const auto bytes = readBytes(first, static_cast<std::size_t>(count));
             hashes->push_back(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256));
@@ -461,7 +463,8 @@ void trimAudioCache(qint64 maxBytes) {
     }
 }
 
-std::shared_ptr<const AudioData> loadPcmWave(const QString& path) {
+std::shared_ptr<const AudioData> loadPcmWave(const QString& path, const std::function<bool()>& isCancelled) {
+    if (isCancelled && isCancelled()) throw std::runtime_error("Media load cancelled");
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) return {};
     const auto header = file.read(12);
@@ -502,7 +505,7 @@ std::shared_ptr<const AudioData> loadPcmWave(const QString& path) {
     if (word(12) != stride || dword(8) != static_cast<quint32>(sampleRate * stride) || bytes % stride) return {};
     auto data = std::make_shared<AudioData>(); data->mono = channels == 1;
     auto storage = std::make_shared<WaveStorage>(path, offset, bytes / stride, channels, bits, type == 3);
-    storage->prepare(*data); data->storage = std::move(storage);
+    storage->prepare(*data, isCancelled); data->storage = std::move(storage);
     return data;
 }
 

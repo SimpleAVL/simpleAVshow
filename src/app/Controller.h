@@ -10,6 +10,7 @@
 #include <set>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <thread>
 #include <atomic>
 
@@ -51,10 +52,8 @@ public:
     Frame effectivePosition() const;
     bool playInFlight() const { return lastPlaySeq_ > transport.commandsApplied(); }
     bool configureAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer);
-    bool configureAudioByName(RtAudio::Api api, const QString& wantedName, unsigned channels, unsigned buffer,
-                              unsigned preferredId = 0, bool requirePreferredId = false);
+    bool configureAudioByName(RtAudio::Api api, const QString& wantedName, unsigned channels, unsigned buffer);
     RtAudio::Api activeAudioApi() const { return api_; }
-    unsigned activeAudioDeviceId() const { return deviceId_; }
     bool audioConfigured() const { return configured_; }
     bool configureMidi(int port);
     bool configureMidiByName(const QString& portName);
@@ -99,6 +98,8 @@ private:
     std::shared_ptr<const Show> armed_;
     std::thread midiThread_;
     std::atomic<bool> midiStop_{true};
+    std::mutex testMidiMutex_;
+    std::deque<std::vector<unsigned char>> testMidiQueue_;
     QElapsedTimer midiWatch_, stall_;
     std::uint64_t heartbeat_ = 0;
     std::set<std::string> videoErrors_;

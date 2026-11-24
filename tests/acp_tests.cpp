@@ -256,6 +256,48 @@ private slots:
             QVERIFY(badReplies.contains(reqId));
             QVERIFY(badReplies[reqId]["error"].isObject());
         }
+
+        // 5. Verify --mcp-proxy automatically reinitializes and retries when an expired Mcp-Session-Id gets HTTP 404.
+        int reinitStep = 0;
+        QTcpServer sessionServer;
+        QVERIFY(sessionServer.listen(QHostAddress::LocalHost, 0));
+        connect(&sessionServer, &QTcpServer::newConnection, &sessionServer, [&sessionServer, &reinitStep] {
+            auto* s = sessionServer.nextPendingConnection();
+            connect(s, &QTcpSocket::readyRead, s, [s, &reinitStep] {
+                const QByteArray raw = s->readAll();
+                const int step = reinitStep++;
+                if (step == 0) {
+                    const QByteArray body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"t\",\"version\":\"1\"}}}";
+                    s->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: sid-1\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                } else if (step == 1 && raw.contains("sid-1")) {
+                    const QByteArray body = "{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32001,\"message\":\"Session expired\"}}";
+                    s->write("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                } else if (step == 2) {
+                    const QByteArray body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"t\",\"version\":\"1\"}}}";
+                    s->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: sid-2\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                } else if (raw.contains("sid-2")) {
+                    const QByteArray body = "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}";
+                    s->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                } else {
+                    s->write("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                }
+                s->disconnectFromHost();
+            });
+        });
+        QProcess reinitProxy;
+        reinitProxy.start(SAV_APP_EXECUTABLE, {"--mcp-proxy", QString("http://127.0.0.1:%1/mcp").arg(sessionServer.serverPort())});
+        QVERIFY(reinitProxy.waitForStarted(5000));
+        reinitProxy.write("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}\n");
+        QTRY_VERIFY_WITH_TIMEOUT(reinitProxy.bytesAvailable() > 0, 5000);
+        const auto firstInit = QJsonDocument::fromJson(reinitProxy.readAllStandardOutput().trimmed()).object();
+        QCOMPARE(firstInit["id"].toInt(), 1);
+        reinitProxy.write("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n");
+        reinitProxy.closeWriteChannel();
+        QTRY_VERIFY_WITH_TIMEOUT(reinitProxy.state() == QProcess::NotRunning, 8000);
+        const auto pingOut = QJsonDocument::fromJson(reinitProxy.readAllStandardOutput().trimmed()).object();
+        QCOMPARE(pingOut["id"].toInt(), 2);
+        QVERIFY(pingOut["result"].isObject());
+        QCOMPARE(reinitStep, 4);
     }
 
     void acpPermissionAndCancel() {

@@ -118,7 +118,7 @@ MediaAsset loadMedia(const QString& path, const std::function<bool()>& isCancell
         asset.image = true; asset.width = asset.still.width(); asset.height = asset.still.height(); asset.duration = 10;
         return asset;
     }
-    if (auto pcm = detail::loadPcmWave(asset.path)) {
+    if (auto pcm = detail::loadPcmWave(asset.path, isCancelled)) {
         asset.audio = std::move(pcm); asset.duration = seconds(asset.audio->length());
         return asset;
     }

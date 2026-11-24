@@ -10,6 +10,7 @@
 #include <QPointer>
 #include <QSet>
 #include <QUuid>
+#include <functional>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -57,6 +58,7 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
     const QByteArray token = qgetenv("SAV_MCP_TOKEN");
     // Server-issued Mcp-Session-Id captured from initialize response for spec-compliant scoped cancellation.
     QByteArray sessionId;
+    QByteArray initPayload;
     QNetworkAccessManager network;
     int inFlight = 0;
     bool eof = false;
@@ -71,42 +73,22 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
         if (eof && inFlight == 0) app.quit();
     };
 
-    auto handleLine = [&](const QByteArray& raw) {
-        const QByteArray trimmed = raw.trimmed();
-        if (trimmed.isEmpty()) return;
-        QJsonParseError parseError;
-        const auto doc = QJsonDocument::fromJson(trimmed, &parseError);
-        const QJsonObject msgObj = (parseError.error == QJsonParseError::NoError && doc.isObject())
-            ? doc.object() : QJsonObject{};
-        const QJsonValue requestId = msgObj.contains("id") ? msgObj.value("id") : QJsonValue(QJsonValue::Undefined);
-        const QString idKey = requestIdKey(requestId);
-
-        // Honor MCP notifications/cancelled locally as well as forwarding it to the server so
-        // the original HTTP socket closes immediately and in-flight workers abort before publishing.
-        if (msgObj["method"].toString() == "notifications/cancelled") {
-            const QString targetKey = requestIdKey(msgObj["params"].toObject().value("requestId"));
-            if (!targetKey.isEmpty()) {
-                if (auto it = inflightReplies.find(targetKey); it != inflightReplies.end()) {
-                    locallyCancelled.insert(targetKey);
-                    auto reply = it.value().reply;
-                    inflightReplies.erase(it);
-                    if (reply) reply->abort();
-                }
-            }
-        }
-
+    std::function<void(const QByteArray&, const QJsonObject&, const QJsonValue&, const QString&, bool)> sendRequest;
+    sendRequest = [&](const QByteArray& trimmed, const QJsonObject& msgObj, const QJsonValue& requestId, const QString& idKey, bool isRetry) {
         QNetworkRequest request(url);
         request.setTransferTimeout(isLongFileToolCall(msgObj) ? (30 * 60 * 1000) : 60000);
         request.setRawHeader("Content-Type", "application/json");
         request.setRawHeader("Accept", "application/json, text/event-stream");
         request.setRawHeader("MCP-Protocol-Version", "2025-11-25");
-        if (!sessionId.isEmpty()) request.setRawHeader("Mcp-Session-Id", sessionId);
+        const QByteArray sentSession = sessionId;
+        if (!sentSession.isEmpty() && msgObj["method"].toString() != "initialize")
+            request.setRawHeader("Mcp-Session-Id", sentSession);
         if (!token.isEmpty()) request.setRawHeader("Authorization", "Bearer " + token);
 
         ++inFlight;
         auto* reply = network.post(request, trimmed);
         if (!idKey.isEmpty()) inflightReplies.insert(idKey, {reply, isMutatingToolCall(msgObj)});
-        QObject::connect(reply, &QNetworkReply::finished, &app, [&, reply, requestId, idKey] {
+        QObject::connect(reply, &QNetworkReply::finished, &app, [&, reply, trimmed, msgObj, requestId, idKey, sentSession, isRetry] {
             if (!idKey.isEmpty() && inflightReplies.value(idKey).reply == reply) inflightReplies.remove(idKey);
             const QByteArray serverSession = reply->rawHeader("Mcp-Session-Id").trimmed();
             if (!serverSession.isEmpty()) sessionId = serverSession;
@@ -120,6 +102,36 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
             if (!idKey.isEmpty() && locallyCancelled.remove(idKey)) {
                 maybeQuit();
                 return;
+            }
+
+            // Per MCP Streamable HTTP session management, HTTP 404 for an expired/evicted Mcp-Session-Id
+            // requires dropping the stale session ID and starting a fresh initialize session.
+            if (status == 404 && !sentSession.isEmpty() && msgObj["method"].toString() != "initialize") {
+                if (sessionId == sentSession) sessionId.clear();
+                if (!isRetry && !initPayload.isEmpty()) {
+                    QNetworkRequest reinitReq(url);
+                    reinitReq.setTransferTimeout(15000);
+                    reinitReq.setRawHeader("Content-Type", "application/json");
+                    reinitReq.setRawHeader("Accept", "application/json, text/event-stream");
+                    reinitReq.setRawHeader("MCP-Protocol-Version", "2025-11-25");
+                    if (!token.isEmpty()) reinitReq.setRawHeader("Authorization", "Bearer " + token);
+                    ++inFlight;
+                    auto* reinitReply = network.post(reinitReq, initPayload);
+                    QObject::connect(reinitReply, &QNetworkReply::finished, &app, [&, reinitReply, trimmed, msgObj, requestId, idKey] {
+                        const QByteArray newSid = reinitReply->rawHeader("Mcp-Session-Id").trimmed();
+                        const int reinitStatus = reinitReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+                        reinitReply->deleteLater();
+                        --inFlight;
+                        if (reinitStatus >= 200 && reinitStatus < 300 && !newSid.isEmpty()) {
+                            sessionId = newSid;
+                            sendRequest(trimmed, msgObj, requestId, idKey, true);
+                        } else {
+                            writeError(requestId, -32001, "MCP session expired and reinitialization failed");
+                            maybeQuit();
+                        }
+                    });
+                    return;
+                }
             }
 
             const bool isRequest = !requestId.isUndefined();
@@ -157,6 +169,34 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
             }
             maybeQuit();
         });
+    };
+
+    auto handleLine = [&](const QByteArray& raw) {
+        const QByteArray trimmed = raw.trimmed();
+        if (trimmed.isEmpty()) return;
+        QJsonParseError parseError;
+        const auto doc = QJsonDocument::fromJson(trimmed, &parseError);
+        const QJsonObject msgObj = (parseError.error == QJsonParseError::NoError && doc.isObject())
+            ? doc.object() : QJsonObject{};
+        const QJsonValue requestId = msgObj.contains("id") ? msgObj.value("id") : QJsonValue(QJsonValue::Undefined);
+        const QString idKey = requestIdKey(requestId);
+        if (msgObj["method"].toString() == "initialize") initPayload = trimmed;
+
+        // Honor MCP notifications/cancelled locally as well as forwarding it to the server so
+        // the original HTTP socket closes immediately and in-flight workers abort before publishing.
+        if (msgObj["method"].toString() == "notifications/cancelled") {
+            const QString targetKey = requestIdKey(msgObj["params"].toObject().value("requestId"));
+            if (!targetKey.isEmpty()) {
+                if (auto it = inflightReplies.find(targetKey); it != inflightReplies.end()) {
+                    locallyCancelled.insert(targetKey);
+                    auto reply = it.value().reply;
+                    inflightReplies.erase(it);
+                    if (reply) reply->abort();
+                }
+            }
+        }
+
+        sendRequest(trimmed, msgObj, requestId, idKey, false);
     };
 
     std::thread reader([&] {

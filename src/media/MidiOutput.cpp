@@ -166,12 +166,12 @@ bool MidiOutput::open(int port, QString& error) {
 
 bool MidiOutput::openByName(const QString& wanted, QString& error) {
 #ifdef Q_OS_MACOS
-    // Resolve directly to a stable CoreMIDI MIDIEndpointRef across all destinations first, ranking
-    // matches strictly so a connected endpoint's legacy alias can never preempt another endpoint's
-    // exact primary display name.
+    // Resolve across all destinations first, ranking matches strictly (exact display name > CI display
+    // name > exact alias > CI alias). If multiple endpoints tie at the best rank, keep the currently
+    // connected endpoint when it is among the ties; otherwise reject the ambiguous name.
     const ItemCount count = MIDIGetNumberOfDestinations();
-    MIDIEndpointRef matchedEp = 0;
-    QString matchedName;
+    struct Candidate { MIDIEndpointRef ep; QString name; };
+    std::vector<Candidate> bestMatches;
     int bestRank = 99; // 0 = exact display name, 1 = CI display name, 2 = exact alias, 3 = CI alias
     for (ItemCount i = 0; i < count; ++i) {
         const MIDIEndpointRef ep = MIDIGetDestination(i);
@@ -189,17 +189,28 @@ bool MidiOutput::openByName(const QString& wanted, QString& error) {
         }
         if (rank < bestRank) {
             bestRank = rank;
-            matchedEp = ep;
-            matchedName = primary;
-            if (bestRank == 0) break;
+            bestMatches.clear();
+            bestMatches.push_back({ep, primary});
+        } else if (rank == bestRank && rank < 99) {
+            bestMatches.push_back({ep, primary});
         }
     }
-    if (!matchedEp) { error = "MIDI port not found: " + wanted; return false; }
-    // Reuse the open connection only when the resolved destination IS the already-connected endpoint.
-    if (connected() && coreMidi_->endpoint == matchedEp && coreMidiEndpointExists(matchedEp)) {
-        name_ = matchedName;
-        return true;
+    if (bestMatches.empty()) { error = "MIDI port not found: " + wanted; return false; }
+    // Reuse the open connection if the currently connected endpoint is among the winning matches.
+    if (connected() && coreMidiEndpointExists(coreMidi_->endpoint)) {
+        for (const auto& cand : bestMatches) {
+            if (cand.ep == coreMidi_->endpoint) {
+                name_ = cand.name;
+                return true;
+            }
+        }
     }
+    if (bestMatches.size() > 1) {
+        error = "Multiple MIDI destinations share the name “" + wanted + "”; choose the port manually in Outputs";
+        return false;
+    }
+    const MIDIEndpointRef matchedEp = bestMatches.front().ep;
+    const QString matchedName = bestMatches.front().name;
     // Verify the endpoint's own display name directly on the MIDIEndpointRef before binding.
     if (coreMidiEndpointName(matchedEp) != matchedName) {
         error = "MIDI destination changed while opening " + matchedName;
@@ -214,7 +225,7 @@ bool MidiOutput::openByName(const QString& wanted, QString& error) {
     return true;
 #else
     // Resolve the target port across all destinations first, preferring exact name over case-insensitive
-    // match, and only reuse the live connection when the resolved destination matches our connected port.
+    // match, rejecting ambiguous duplicate names, and reusing the live connection when matched.
     std::string candidateError;
     try {
         auto candidate = std::make_unique<RtMidiOut>();
@@ -222,17 +233,28 @@ bool MidiOutput::openByName(const QString& wanted, QString& error) {
             if (type != RtMidiError::DEBUG_WARNING) *static_cast<std::string*>(ctx) = text;
         }, &candidateError);
         const unsigned count = candidate->getPortCount();
-        int matched = -1;
-        QString matchedName;
+        std::vector<std::pair<int, QString>> exactMatches, ciMatches;
         for (unsigned i = 0; i < count; ++i) {
             const QString portName = QString::fromStdString(candidate->getPortName(i));
-            if (portName == wanted) { matched = static_cast<int>(i); matchedName = portName; break; }
-            if (matched < 0 && portName.compare(wanted, Qt::CaseInsensitive) == 0) { matched = static_cast<int>(i); matchedName = portName; }
+            if (portName == wanted) exactMatches.emplace_back(static_cast<int>(i), portName);
+            else if (portName.compare(wanted, Qt::CaseInsensitive) == 0) ciMatches.emplace_back(static_cast<int>(i), portName);
         }
-        if (matched < 0) { error = "MIDI port not found: " + wanted; return false; }
+        const auto& matches = !exactMatches.empty() ? exactMatches : ciMatches;
+        if (matches.empty()) { error = "MIDI port not found: " + wanted; return false; }
         // On single-client drivers (such as WinMM on Windows), opening a second handle to the
-        // already-connected port fails with MMSYSERR_ALLOCATED. Reuse only when resolved name matches.
-        if (connected() && matchedName == name_) return true;
+        // already-connected port fails with MMSYSERR_ALLOCATED. Reuse when the connected port matches.
+        if (connected()) {
+            for (const auto& [idx, portName] : matches) {
+                (void)idx;
+                if (portName == name_) return true;
+            }
+        }
+        if (matches.size() > 1) {
+            error = "Multiple MIDI ports share the name “" + wanted + "”; choose the port manually in Outputs";
+            return false;
+        }
+        const int matched = matches.front().first;
+        const QString matchedName = matches.front().second;
         if (static_cast<unsigned>(matched) >= candidate->getPortCount() ||
             QString::fromStdString(candidate->getPortName(static_cast<unsigned>(matched))) != matchedName) {
             error = "MIDI port list changed before opening " + matchedName;

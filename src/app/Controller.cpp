@@ -105,7 +105,8 @@ Frame Controller::effectivePosition() const {
 bool Controller::canEdit(bool reportFailure) {
     // Acquire commandsApplied() first so publishedState_ and publishedVoices_ reflect every applied command.
     const bool playPending = playInFlight();
-    const bool allowed = !showMode && !busy && !playPending && transport.state() != State::Playing && transport.state() != State::Held &&
+    const bool allowed = !showMode && !busy && !playPending && !transport.stopAllPending() &&
+        transport.state() != State::Playing && transport.state() != State::Held &&
         transport.asyncVoices() == 0;
     if (!allowed && reportFailure) report(showMode ? "Leave show mode to edit" : "Use Stop All before editing; async audio or video may still be playing");
     return allowed;
@@ -158,7 +159,7 @@ void Controller::arm(Frame position) {
         bool reopened = false;
         if (!audioName.isEmpty()) {
             QString resolvedName;
-            reopened = device.openByName(api_, audioName, audioName, channels_, buffer_, resolvedName, error, &deviceId_, deviceId_);
+            reopened = device.openByName(api_, audioName, audioName, channels_, buffer_, resolvedName, error, &deviceId_);
             if (reopened) audioName = resolvedName;
         } else {
             reopened = device.open(api_, deviceId_, channels_, buffer_, error);
@@ -179,6 +180,19 @@ void Controller::startMidiThread() {
                 if (event.epoch != transport.epoch() || event.marker < 0 || static_cast<std::size_t>(event.marker) >= snapshot->markers.size()) continue;
                 const auto& marker = snapshot->markers[event.marker]; QString error;
                 if (!midi.send(marker.message, error)) {
+                    QMetaObject::invokeMethod(this, [this, error] { report(error); }, Qt::QueuedConnection);
+                }
+            }
+            std::vector<unsigned char> testMsg;
+            for (;;) {
+                {
+                    std::lock_guard lock(testMidiMutex_);
+                    if (testMidiQueue_.empty()) break;
+                    testMsg = std::move(testMidiQueue_.front());
+                    testMidiQueue_.pop_front();
+                }
+                QString error;
+                if (!midi.send(testMsg, error)) {
                     QMetaObject::invokeMethod(this, [this, error] { report(error); }, Qt::QueuedConnection);
                 }
             }
@@ -239,7 +253,12 @@ bool Controller::seek(Frame time) {
     return true;
 }
 bool Controller::stopAll() {
-    if (!postTransportCommand({Action::StopAll})) return false;
+    if (!postTransportCommand({Action::StopAll})) {
+        // Emergency Stop All must never be rejected by a full bounded command queue.
+        transport.requestStopAll();
+        predictedState_ = State::Stopped;
+        lastPlaySeq_ = 0;
+    }
     if (!device.streamActive()) transport.render(nullptr, 0, 0);
     return true;
 }
@@ -247,19 +266,16 @@ bool Controller::configureAudio(RtAudio::Api api, unsigned id, QString name, uns
     if (!canEdit()) return false;
     return openAudio(api, id, std::move(name), channels, buffer);
 }
-bool Controller::configureAudioByName(RtAudio::Api api, const QString& wantedName, unsigned channels, unsigned buffer,
-                                      unsigned preferredId, bool requirePreferredId) {
+bool Controller::configureAudioByName(RtAudio::Api api, const QString& wantedName, unsigned channels, unsigned buffer) {
     if (!canEdit()) return false;
     const bool hadStream = configured_ && device.running();
     const RtAudio::Api prevApi = api_;
-    const unsigned prevId = deviceId_;
     const QString prevName = audioName;
     const unsigned prevChannels = channels_, prevBuffer = buffer_;
     QSettings settings;
     QString resolvedName, error;
-    unsigned resolvedId = preferredId ? preferredId : deviceId_;
-    if (device.openByName(api, wantedName, settings.value("audio/device").toString(), channels, buffer, resolvedName, error,
-                          &resolvedId, preferredId, requirePreferredId)) {
+    unsigned resolvedId = deviceId_;
+    if (device.openByName(api, wantedName, settings.value("audio/device").toString(), channels, buffer, resolvedName, error, &resolvedId)) {
         api_ = api; deviceId_ = resolvedId; channels_ = channels; buffer_ = buffer; audioName = resolvedName; configured_ = true;
         stall_.restart(); playbackProblem.clear();
         settings.setValue("audio/api", static_cast<int>(api)); settings.setValue("audio/device", resolvedName);
@@ -270,11 +286,8 @@ bool Controller::configureAudioByName(RtAudio::Api api, const QString& wantedNam
     configured_ = false;
     if (hadStream && !prevName.isEmpty()) {
         QString restoredName, restoreErr;
-        unsigned restoredId = prevId;
-        // Require the exact previous device ID on rollback when known so a failed switch cannot
-        // silently reopen a different interface that shares the same display name.
-        if (device.openByName(prevApi, prevName, prevName, prevChannels, prevBuffer, restoredName, restoreErr,
-                              &restoredId, prevId, prevId != 0)) {
+        unsigned restoredId = deviceId_;
+        if (device.openByName(prevApi, prevName, prevName, prevChannels, prevBuffer, restoredName, restoreErr, &restoredId)) {
             deviceId_ = restoredId;
             configured_ = true; stall_.restart();
             report("Audio output unavailable: " + error + " (kept previous connection: " + restoredName + ")");
@@ -309,6 +322,7 @@ bool Controller::configureMidiByName(const QString& portName) {
     if (trimmed.isEmpty() || trimmed.compare("none", Qt::CaseInsensitive) == 0 || trimmed.compare("off", Qt::CaseInsensitive) == 0)
         return openMidi(-1);
     stopMidiThread();
+    { std::lock_guard lock(testMidiMutex_); testMidiQueue_.clear(); }
     QString error;
     const bool ok = midi.openByName(trimmed, error);
     startMidiThread();
@@ -318,6 +332,7 @@ bool Controller::configureMidiByName(const QString& portName) {
 }
 bool Controller::openMidi(int port) {
     stopMidiThread();
+    { std::lock_guard lock(testMidiMutex_); testMidiQueue_.clear(); }
     QString error; const bool ok = midi.open(port, error); startMidiThread();
     if (ok) { midiName_ = midi.name(); QSettings().setValue("midi/port", midiName_); playbackProblem.clear(); }
     report(ok ? (port < 0 ? "MIDI output disconnected" : "MIDI output: " + midi.name()) : error); return ok;
@@ -419,12 +434,17 @@ bool Controller::testMidi(const std::vector<unsigned char>& bytes) {
     if (!canEdit() || bytes.empty()) return false;
     if (!validMidi(bytes)) { report("Complete the MIDI message before testing it."); return false; }
     if (!prepareMidi()) return false;
-    QString error;
-    stopMidiThread();
-    const bool sent = midi.send(bytes, error);
-    startMidiThread();
-    if (!sent) { report(error); return false; }
-    report("Test message sent to " + midi.name() + ". External devices may keep playing until they receive a stop message."); return true;
+    // Dispatch off the GUI thread so Windows WinMM SysEx completion waits never freeze operator controls.
+    {
+        std::lock_guard lock(testMidiMutex_);
+        if (testMidiQueue_.size() >= 16) {
+            report("Too many MIDI test messages are already queued; wait for them to finish.");
+            return false;
+        }
+        testMidiQueue_.push_back(bytes);
+    }
+    report("Test message queued for " + midi.name() + ". External devices may keep playing until they receive a stop message.");
+    return true;
 }
 const Marker* Controller::nextCue() const {
     const Frame now = position(); const bool held = transport.state() == State::Held; const Marker* upcoming = nullptr;

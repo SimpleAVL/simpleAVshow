@@ -2,6 +2,7 @@
 #include "core/Model.h"
 #include <QByteArray>
 #include <QString>
+#include <functional>
 #include <memory>
 
 class QLockFile;
@@ -16,7 +17,7 @@ QString audioCacheDirectory();
 // revision or FFmpeg build are removed once unused for 7 days.
 constexpr qint64 automaticAudioCacheBudget = -1;
 void trimAudioCache(qint64 maxBytes = automaticAudioCacheBudget);
-std::shared_ptr<const AudioData> loadPcmWave(const QString& path);
+std::shared_ptr<const AudioData> loadPcmWave(const QString& path, const std::function<bool()>& isCancelled = {});
 // Rebinds a copied WAV's storage path on a worker thread (sharing blockHashes_ via shared_ptr and copying peaks off the GUI thread).
 std::shared_ptr<const AudioData> rebindPcmWavePath(const std::shared_ptr<const AudioData>& existing, const QString& newPath, qint64 knownSize = -1);
 

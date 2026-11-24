@@ -348,18 +348,25 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         focusPrompt();
     });
     connect(&acp_, &AcpClient::messageChunk, this, [this](const QString& chunk) {
-        constexpr qsizetype maxEntryChars = 64 * 1024;
+        constexpr qsizetype maxEntryChars = 8 * 1024;
+        constexpr qsizetype maxTotalChars = 96 * 1024;
         if (entries_.empty() || entries_.back().kind != ChatEntry::Kind::Assistant)
             appendEntry({ChatEntry::Kind::Assistant, {}, acp_.agentName().isEmpty() ? QString("Agent") : acp_.agentName(), {}, {}, {}, {}});
         auto& text = entries_.back().text;
         if (text.size() < maxEntryChars) {
             text += chunk;
             if (text.size() > maxEntryChars) text = text.left(maxEntryChars) + "\n… [truncated]";
+            qsizetype totalChars = 0;
+            for (const auto& e : entries_) totalChars += e.text.size() + e.thought.size();
+            while (entries_.size() > 1 && totalChars > maxTotalChars) {
+                totalChars -= entries_.front().text.size() + entries_.front().thought.size();
+                entries_.erase(entries_.begin());
+            }
             scheduleRender();
         }
     });
     connect(&acp_, &AcpClient::thoughtChunk, this, [this](const QString& chunk) {
-        constexpr qsizetype maxEntryChars = 32 * 1024;
+        constexpr qsizetype maxEntryChars = 4 * 1024;
         if (entries_.empty() || entries_.back().kind != ChatEntry::Kind::Assistant)
             appendEntry({ChatEntry::Kind::Assistant, {}, acp_.agentName().isEmpty() ? QString("Agent") : acp_.agentName(), {}, {}, {}, {}});
         auto& thought = entries_.back().thought;
@@ -449,6 +456,8 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
             }
             clearPermissionCards();
             appendEntry({ChatEntry::Kind::System, {}, {}, {}, "Cancelled pending permission requests because Show mode became active.", {}, {}});
+        } else if (!c_.showMode && renderPending_) {
+            scheduleRender();
         }
         updateControls();
     });
@@ -719,25 +728,32 @@ QString AgentChatPanel::buildFirstTurnPrompt(const QString& userText) const {
 }
 
 void AgentChatPanel::appendEntry(ChatEntry entry) {
-    constexpr std::size_t maxEntries = 200;
-    constexpr qsizetype maxEntryChars = 64 * 1024;
+    constexpr std::size_t maxEntries = 80;
+    constexpr qsizetype maxEntryChars = 8 * 1024;
+    constexpr qsizetype maxTotalChars = 96 * 1024;
     if (entry.text.size() > maxEntryChars) entry.text = entry.text.left(maxEntryChars) + "\n… [truncated]";
     if (entry.thought.size() > maxEntryChars) entry.thought = entry.thought.left(maxEntryChars) + "\n… [truncated]";
     entries_.push_back(std::move(entry));
     if (entries_.size() > maxEntries) entries_.erase(entries_.begin(), entries_.begin() + static_cast<std::ptrdiff_t>(entries_.size() - maxEntries));
+    qsizetype totalChars = 0;
+    for (const auto& e : entries_) totalChars += e.text.size() + e.thought.size();
+    while (entries_.size() > 1 && totalChars > maxTotalChars) {
+        totalChars -= entries_.front().text.size() + entries_.front().thought.size();
+        entries_.erase(entries_.begin());
+    }
     scheduleRender();
 }
 
 void AgentChatPanel::showEvent(QShowEvent* event) {
     QWidget::showEvent(event);
-    if (renderPending_) {
+    if (renderPending_ && !c_.showMode) {
         renderPending_ = false;
         renderTranscript();
     }
 }
 
 void AgentChatPanel::scheduleRender() {
-    if (!isVisible()) {
+    if (!isVisible() || c_.showMode) {
         renderPending_ = true;
         return;
     }
@@ -745,7 +761,7 @@ void AgentChatPanel::scheduleRender() {
 }
 
 void AgentChatPanel::renderTranscript() {
-    if (!isVisible()) {
+    if (!isVisible() || c_.showMode) {
         renderPending_ = true;
         return;
     }

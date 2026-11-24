@@ -54,7 +54,7 @@ bool AudioDevice::open(RtAudio::Api api, unsigned device, unsigned channels, uns
 }
 bool AudioDevice::openByName(RtAudio::Api api, const QString& wantedName, const QString& fallbackRemembered,
                              unsigned channels, unsigned buffer, QString& resolvedName, QString& error,
-                             unsigned* resolvedId, unsigned preferredId, bool requirePreferredId) {
+                             unsigned* resolvedId) {
     close();
     try {
         failed_.store(false); { std::lock_guard lock(errorMutex_); error_.clear(); }
@@ -69,23 +69,22 @@ bool AudioDevice::openByName(RtAudio::Api api, const QString& wantedName, const 
             if (info.outputChannels) list.push_back({id, QString::fromStdString(info.name), info.outputChannels, info.isDefaultOutput});
         }
         std::optional<DeviceDescription> chosen;
-        if (preferredId != 0) {
+        const QString lookupName = wantedName.isEmpty() ? fallbackRemembered : wantedName;
+        if (lookupName.isEmpty()) {
+            chosen = playbackDevice(list, {});
+        } else {
+            // RtAudio assigns device IDs per-instance, so duplicate display names cannot be distinguished
+            // reliably across probe/open cycles. Refuse ambiguous names instead of guessing the wrong output.
+            std::vector<DeviceDescription> exactMatches, ciMatches;
             for (const auto& d : list) {
-                if (d.id == preferredId && (wantedName.isEmpty() || d.name == wantedName)) {
-                    chosen = d; break;
-                }
+                if (d.name == lookupName) exactMatches.push_back(d);
+                else if (d.name.compare(lookupName, Qt::CaseInsensitive) == 0) ciMatches.push_back(d);
             }
-            if (!chosen && requirePreferredId)
-                throw std::runtime_error("Selected audio device is no longer available");
-        }
-        if (!chosen) {
-            if (wantedName.isEmpty()) {
-                chosen = playbackDevice(list, fallbackRemembered);
-            } else {
-                for (const auto& d : list) if (d.name == wantedName) { chosen = d; break; }
-                if (!chosen) for (const auto& d : list) if (d.name.compare(wantedName, Qt::CaseInsensitive) == 0) { chosen = d; break; }
-                if (!chosen) throw std::runtime_error(("Audio device not found: " + wantedName).toStdString());
-            }
+            const auto& matches = !exactMatches.empty() ? exactMatches : ciMatches;
+            if (matches.size() > 1)
+                throw std::runtime_error(QString("Multiple audio devices share the name “%1”; choose the interface manually in Outputs").arg(lookupName).toStdString());
+            if (matches.size() == 1) chosen = matches.front();
+            else if (!wantedName.isEmpty()) throw std::runtime_error(("Audio device not found: " + wantedName).toStdString());
         }
         if (!chosen) throw std::runtime_error("No available audio output device found");
         if (channels < 1 || channels > chosen->channels)

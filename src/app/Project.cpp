@@ -441,9 +441,15 @@ void loadProjectMedia(Project& p, const std::function<bool()>& isCancelled) {
 Project readProject(const QString& path, const std::function<bool()>& isCancelled) {
     if (isCancelled && isCancelled()) throw std::runtime_error("Project load cancelled");
     if (isProjectPackage(path)) return readProjectPackage(path, isCancelled);
+    constexpr qint64 maxProjectFileBytes = 32 * 1024 * 1024;
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) throw std::runtime_error(file.errorString().toStdString());
-    Project p = parseProject(file.readAll(), QFileInfo(path).absolutePath());
+    if (file.size() > maxProjectFileBytes)
+        throw std::runtime_error("Project file is too large to be a valid .savshow manifest");
+    const QByteArray bytes = file.read(maxProjectFileBytes + 1);
+    if (bytes.size() > maxProjectFileBytes)
+        throw std::runtime_error("Project file is too large to be a valid .savshow manifest");
+    Project p = parseProject(bytes, QFileInfo(path).absolutePath());
     loadProjectMedia(p, isCancelled); return p;
 }
 namespace {
@@ -533,6 +539,7 @@ void materializeProjectMedia(Project& p, const QString& directory, const std::fu
 StagedProjectMedia stageProjectMedia(const Project& p, const QString& stagingDirectory,
                                      const QString& finalTargetDirectory,
                                      const std::function<bool()>& isCancelled) {
+    if (isCancelled && isCancelled()) throw std::runtime_error("Save cancelled");
     QDir dir(stagingDirectory);
     QDir finalDir(finalTargetDirectory);
     if (!QDir().mkpath(dir.absolutePath())) throw std::runtime_error("Cannot create media staging directory");

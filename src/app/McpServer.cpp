@@ -201,7 +201,7 @@ QJsonArray tools() {
     // 3. Hardware outputs, phone remote, project files & rehearsal transport
     add("configure_outputs", "Configure audio driver/device/channels/buffer, connect or disconnect the MIDI output port, open or close the fullscreen audience display, or send a single test MIDI message. Blocked during playback and Show mode.",
         objectSchema({
-            {"audio", objectSchema({{"api", field("string")}, {"device", field("string")}, {"device_id", integer(1, 2147483646)}, {"channels", integer(1, 256)}, {"buffer", integer(32, 8192)}})},
+            {"audio", objectSchema({{"api", field("string")}, {"device", field("string")}, {"channels", integer(1, 256)}, {"buffer", integer(32, 8192)}})},
             {"midi", objectSchema({{"port", field("string")}}, {"port"})},
             {"display", objectSchema({{"open", field("boolean")}, {"screen", integer(0, 64)}, {"allow_cover_editor", field("boolean")}}, {"open"})},
             {"test_midi", objectSchema({{"message", QJsonObject{{"type", "array"}, {"minItems", 1}, {"items", integer(0, 255)}}}}, {"message"})}
@@ -1295,7 +1295,7 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
         fail("Provide at least one of audio, midi, display, or test_midi");
 
     // Phase 1: Validate every nested field and resolve targets before mutating any real outputs.
-    struct PlannedAudio { RtAudio::Api api; QString name; unsigned channels; unsigned buffer; unsigned preferredId = 0; bool requirePreferredId = false; };
+    struct PlannedAudio { RtAudio::Api api; QString name; unsigned channels; unsigned buffer; };
     std::optional<PlannedAudio> plannedAudio;
     std::optional<QString> plannedMidiName;
     struct PlannedDisplay { bool open = false; int screen = 0; bool allowCover = false; };
@@ -1305,7 +1305,7 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
     if (a.contains("audio")) {
         if (!a["audio"].isObject()) fail("audio must be an object");
         const auto cfg = a["audio"].toObject();
-        knownFields(cfg, {{"api", {}}, {"device", {}}, {"device_id", {}}, {"channels", {}}, {"buffer", {}}});
+        knownFields(cfg, {{"api", {}}, {"device", {}}, {"channels", {}}, {"buffer", {}}});
         if (cfg.isEmpty()) fail("audio must specify at least one setting");
         QSettings settings;
         RtAudio::Api api = c_.audioConfigured()
@@ -1327,49 +1327,28 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
             if (!cfg["device"].isString()) fail("audio.device must be a string");
             wantedDevice = cfg["device"].toString().trimmed();
         }
-        unsigned wantedDeviceId = 0;
-        if (cfg.contains("device_id")) {
-            const auto v = cfg["device_id"];
-            if (!v.isDouble() || !std::isfinite(v.toDouble()) || std::floor(v.toDouble()) != v.toDouble() ||
-                v.toDouble() < 1 || v.toDouble() > 2147483646.0)
-                fail("audio.device_id must be a positive integer");
-            wantedDeviceId = static_cast<unsigned>(v.toDouble());
-        }
         const auto devices = c_.device.devices(api);
         std::optional<DeviceDescription> chosen;
-        unsigned preferredId = 0;
-        bool requirePreferredId = false;
-        if (wantedDeviceId != 0) {
-            for (const auto& d : devices) if (d.id == wantedDeviceId) { chosen = d; break; }
-            if (!chosen) fail(QString("Audio device ID %1 not found").arg(wantedDeviceId));
-            if (!wantedDevice.isEmpty() && chosen->name.compare(wantedDevice, Qt::CaseInsensitive) != 0)
-                fail(QString("Audio device ID %1 (%2) does not match requested name %3").arg(wantedDeviceId).arg(chosen->name, wantedDevice));
-            preferredId = chosen->id;
-            requirePreferredId = true;
-        } else if (wantedDevice.isEmpty()) {
-            // Preserve the currently selected interface by exact device ID on partial (channels/buffer) updates.
-            if (c_.audioConfigured() && api == c_.activeAudioApi() && c_.activeAudioDeviceId() != 0) {
-                for (const auto& d : devices) if (d.id == c_.activeAudioDeviceId()) { chosen = d; break; }
-                if (!chosen) fail("Active audio interface is no longer available; specify audio.device or audio.device_id");
-                preferredId = chosen->id;
-                requirePreferredId = true;
-            } else {
-                chosen = playbackDevice(devices, settings.value("audio/device").toString());
-                if (chosen) preferredId = chosen->id;
-            }
+        const QString lookupName = !wantedDevice.isEmpty()
+            ? wantedDevice
+            : (c_.audioConfigured() && api == c_.activeAudioApi() && !c_.audioName.isEmpty()
+                ? c_.audioName
+                : settings.value("audio/device").toString());
+        if (lookupName.isEmpty()) {
+            chosen = playbackDevice(devices, {});
         } else {
+            // RtAudio assigns device IDs per-instance, so duplicate display names cannot be distinguished
+            // reliably across probe/open cycles. Refuse ambiguous names instead of routing to the wrong output.
             std::vector<DeviceDescription> exactMatches, ciMatches;
             for (const auto& d : devices) {
-                if (d.name == wantedDevice) exactMatches.push_back(d);
-                else if (d.name.compare(wantedDevice, Qt::CaseInsensitive) == 0) ciMatches.push_back(d);
+                if (d.name == lookupName) exactMatches.push_back(d);
+                else if (d.name.compare(lookupName, Qt::CaseInsensitive) == 0) ciMatches.push_back(d);
             }
             const auto& matches = !exactMatches.empty() ? exactMatches : ciMatches;
-            if (matches.empty()) fail("Audio device not found: " + wantedDevice);
             if (matches.size() > 1)
-                fail(QString("Multiple audio devices match “%1”; pass audio.device_id from get_environment to choose one unambiguously").arg(wantedDevice));
-            chosen = matches.front();
-            preferredId = chosen->id;
-            requirePreferredId = true;
+                fail(QString("Multiple audio devices share the name “%1”; choose the interface manually in Outputs").arg(lookupName));
+            if (matches.size() == 1) chosen = matches.front();
+            else if (!wantedDevice.isEmpty()) fail("Audio device not found: " + wantedDevice);
         }
         if (!chosen) fail("No available audio output device found");
         unsigned channels = settings.value("audio/channels", 2).toUInt();
@@ -1388,7 +1367,7 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
                 fail("audio.buffer must be an integer between 32 and 8192 samples");
             buffer = static_cast<unsigned>(v.toDouble());
         }
-        plannedAudio = PlannedAudio{api, chosen->name, channels, buffer, preferredId, requirePreferredId};
+        plannedAudio = PlannedAudio{api, chosen->name, channels, buffer};
     }
 
     if (a.contains("midi")) {
@@ -1462,8 +1441,7 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
         fail(reason + " (already applied: " + applied.join(", ") + ")");
     };
     if (plannedAudio) {
-        if (!c_.configureAudioByName(plannedAudio->api, plannedAudio->name, plannedAudio->channels, plannedAudio->buffer,
-                                     plannedAudio->preferredId, plannedAudio->requirePreferredId))
+        if (!c_.configureAudioByName(plannedAudio->api, plannedAudio->name, plannedAudio->channels, plannedAudio->buffer))
             failPartial(c_.status);
         applied << "audio";
     }
@@ -1602,10 +1580,10 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
                 auto result = snapshot(); result.insert("action", action); result.insert("target_path", target);
                 finish(toolResult(result));
             });
-        watcher->setFuture(QtConcurrent::run([candidate = c_.project, stagePath = stagingDir->path(), finalMediaDir, isCancelled]() mutable {
+        watcher->setFuture(QtConcurrent::run([candidate = c_.project, stagingDir, finalMediaDir, isCancelled]() mutable {
             SavePrep out;
             try {
-                out.staged = stageProjectMedia(candidate, stagePath, finalMediaDir, isCancelled);
+                out.staged = stageProjectMedia(candidate, stagingDir->path(), finalMediaDir, isCancelled);
                 out.candidate = std::move(candidate);
             } catch (const std::exception& e) {
                 out.error = QString::fromUtf8(e.what());
@@ -1654,7 +1632,7 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
                 auto result = snapshot(); result.insert("action", action); result.insert("target_path", path);
                 finish(toolResult(result));
             });
-        watcher->setFuture(QtConcurrent::run([projectSnapshot = c_.project, stagedPackage, path, isCancelled] {
+        watcher->setFuture(QtConcurrent::run([projectSnapshot = c_.project, stagingDir, stagedPackage, path, isCancelled] {
             try { writeProjectPackage(projectSnapshot, stagedPackage, isCancelled, path); return QString(); }
             catch (const std::exception& e) { return QString::fromUtf8(e.what()); }
         }));
@@ -1663,10 +1641,17 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
 
     if (action == "open_project") {
         if (c_.dirty && !discard) fail("Current show has unsaved changes. Save first or pass discard_unsaved: true");
-        if (path.isEmpty() || !QFileInfo(path).isAbsolute() || !QFileInfo(path).isFile())
+        const QFileInfo openInfo(path);
+        if (path.isEmpty() || !openInfo.isAbsolute() || !openInfo.isFile())
             fail("Provide an existing absolute .savshow or .savpack file path");
         const bool pkg = isProjectPackage(path);
         const bool autosave = path.endsWith(".savshow.autosave", Qt::CaseInsensitive);
+        const bool showFile = path.endsWith(".savshow", Qt::CaseInsensitive);
+        if (!pkg && !autosave && !showFile)
+            fail("Project path must be a .savshow, .savshow.autosave, or .savpack file");
+        constexpr qint64 maxProjectFileBytes = 32 * 1024 * 1024;
+        if (!pkg && openInfo.size() > maxProjectFileBytes)
+            fail("Project file exceeds the 32 MB .savshow manifest size limit");
         QString targetPath;
         if (!pkg) {
             if (autosave) {
@@ -1805,6 +1790,7 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, const QStrin
         }
         if (!a["paths"].isArray() || a["paths"].toArray().isEmpty() || a["paths"].toArray().size() > 64) fail("Supply between 1 and 64 local file paths");
         if (importState_ == "preparing") fail("Media preparation is already running");
+        if (activeAsyncJobs_ >= 8) fail("Too many concurrent async MCP operations; wait for in-flight requests to finish");
         QStringList paths;
         for (const auto& value : a["paths"].toArray()) {
             if (!value.isString() || !QFileInfo(value.toString()).isAbsolute() || !QFileInfo(value.toString()).isFile()) fail("Media path must be an existing absolute local file");
@@ -1815,6 +1801,7 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, const QStrin
         importId_ = newId(); importState_ = "preparing"; importError_.clear(); imported_.clear();
         importShowEpoch_ = c_.showEpoch();
         importOwnerBearer_ = bearerToken;
+        ++activeAsyncJobs_;
         const quint64 jobGen = generation_;
         const quint64 jobEditGen = editGeneration_;
         const quint64 jobShowEpoch = importShowEpoch_;
@@ -1824,6 +1811,7 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, const QStrin
         auto* watcher = new QFutureWatcher<Prepared>(this); const auto job = importId_;
         connect(watcher, &QFutureWatcher<Prepared>::finished, this, [this, watcher, job, jobGen, jobEditGen, jobShowEpoch, importCancelled] {
             const auto prepared = watcher->result(); watcher->deleteLater();
+            activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1);
             if (job != importId_ || generation_ != jobGen) return;
             if (importCancelled->load()) {
                 imported_.clear();

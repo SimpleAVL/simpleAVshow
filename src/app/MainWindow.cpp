@@ -143,7 +143,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
         openOutput(index, false);
         return bool(outputWindow_ && outputWindow_->isVisible());
     };
-    host.closeDisplay = [this] { if (outputWindow_) outputWindow_->hide(); };
+    host.closeDisplay = [this] { outputLost_ = false; if (outputWindow_) outputWindow_->hide(); };
     host.remoteStatus = [this] {
         return QJsonObject{{"available", true}, {"running", remote_.running()},
             {"port", remote_.running() ? static_cast<int>(remote_.port()) : QSettings().value("remote/port", 48124).toInt()},
@@ -1132,14 +1132,33 @@ void MainWindow::screensChanged() {
 void MainWindow::requestShowMode(bool enabled) {
     const State state = c_.transport.state();
     if (enabled) {
+        const quint64 lease = c_.acquireBusy();
+        if (!lease) {
+            showButton_->setChecked(false);
+            c_.report("Wait for the current file operation to finish before entering Show mode.");
+            return;
+        }
+        const quint64 initialRev = c_.projectRevision();
+        const QString initialAudio = c_.audioName;
+        const QString initialMidi = c_.midi.name();
+        const bool initialOutputOpen = bool(outputWindow_ && outputWindow_->isVisible());
         auto problems = c_.preflight();
         const bool picture = std::any_of(c_.project.show.clips.begin(), c_.project.show.clips.end(), [this](const Clip& clip) { return c_.project.show.tracks[clip.track].visual; });
-        if (picture && !(outputWindow_ && outputWindow_->isVisible())) problems << "The program output is not open. Open it from Audience display.";
+        if (picture && !initialOutputOpen) problems << "The program output is not open. Open it from Audience display.";
+        bool confirmed = true;
         if (!problems.isEmpty()) {
             QMessageBox box(QMessageBox::Warning, "Check before the show", "Show mode can start, but these need attention:", QMessageBox::Cancel, this);
             box.setInformativeText("• " + problems.join("\n• "));
             auto* start = box.addButton("Enter Show mode anyway", QMessageBox::AcceptRole); box.setDefaultButton(QMessageBox::Cancel); box.exec();
-            if (box.clickedButton() != start) { showButton_->setChecked(false); return; }
+            confirmed = box.clickedButton() == start;
+        }
+        c_.releaseBusy(lease);
+        if (!confirmed) { showButton_->setChecked(false); return; }
+        if (c_.projectRevision() != initialRev || c_.audioName != initialAudio || c_.midi.name() != initialMidi ||
+            bool(outputWindow_ && outputWindow_->isVisible()) != initialOutputOpen) {
+            showButton_->setChecked(false);
+            c_.report("Show or output state changed during preflight; review preflight again before entering Show mode.");
+            return;
         }
     } else if (state == State::Playing || state == State::Held || c_.transport.asyncVoices()) {
         if (QMessageBox::question(this, "Leave Show mode?", "The show is running. Leaving Show mode unlocks editing and timeline seeking.",

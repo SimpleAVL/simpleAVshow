@@ -87,6 +87,7 @@ void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
     if (show_) for (std::size_t i = 0; i < buffers_.size(); ++i) if (buffers_[i] && !buffers_[i]->failed()) previous.emplace(show_->clips[i].id, i);
     const auto retired = std::move(show_); auto reusable = std::move(buffers_);
     show_ = std::move(show);
+    urgentStop_.store(false, std::memory_order_release);
     commands_.clear(); applied_ = 0; commandsApplied_.store(0, std::memory_order_release); midi_.reset(std::max(std::size_t{1024}, show_->markers.size()));
     voices_.assign(show_->clips.size(), {}); releases_.assign(show_->clips.size(), {});
     releasing_.clear(); releasing_.reserve(show_->clips.size());
@@ -169,18 +170,23 @@ void Transport::apply(Command command) noexcept {
         break;
     }
     case Action::StopAll:
-        for (std::size_t i = 0; i < voices_.size(); ++i) cut(i);
-        std::fill(voices_.begin(), voices_.end(), Voice{}); state_ = State::Stopped; heldMarker_ = -1;
-        epoch_.fetch_add(1); clipped_.store(false); prime();
+        applyStopAll();
         break;
     }
     ++applied_;
 }
 
+void Transport::applyStopAll() noexcept {
+    for (std::size_t i = 0; i < voices_.size(); ++i) cut(i);
+    std::fill(voices_.begin(), voices_.end(), Voice{}); state_ = State::Stopped; heldMarker_ = -1;
+    epoch_.fetch_add(1); clipped_.store(false); prime();
+}
+
 void Transport::forceStopAll() noexcept {
     if (!show_) return;
+    urgentStop_.store(false, std::memory_order_release);
     commands_.clear();
-    apply({Action::StopAll});
+    applyStopAll();
     applied_ = 0;
     publish(0);
 }
@@ -190,6 +196,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
     if (!show_) return;
     Command command;
     while (commands_.pop(command)) apply(command);
+    if (urgentStop_.exchange(false, std::memory_order_acq_rel)) applyStopAll();
     float peak = 0; bool waiting = false;
     for (unsigned f = 0; f < count; ++f) {
         if (waiting && releasing_.empty()) break; // Remaining device samples stay silent; retry at the same show/source time.

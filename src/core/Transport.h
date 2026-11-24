@@ -23,7 +23,13 @@ public:
     // The device and MIDI consumer MUST be stopped before configure.
     // The Show remains immutable until the device is closed.
     void configure(std::shared_ptr<const Show> show, Frame position = 0);
-    bool command(Command command) noexcept { return commands_.push(command); }
+    bool command(Command command) noexcept {
+        if (command.action != Action::StopAll && urgentStop_.load(std::memory_order_acquire)) return false;
+        return commands_.push(command);
+    }
+    // Lock-free emergency Stop All that succeeds even when the bounded command queue is full.
+    void requestStopAll() noexcept { urgentStop_.store(true, std::memory_order_release); }
+    bool stopAllPending() const noexcept { return urgentStop_.load(std::memory_order_acquire); }
     // Safe only when the audio stream is closed: clears pending commands, stops all voices, and resets counters.
     void forceStopAll() noexcept;
     void render(float* output, unsigned count, unsigned channels) noexcept;
@@ -77,11 +83,12 @@ private:
     std::atomic<State> publishedState_{State::Stopped};
     std::atomic<int> publishedMarker_{-1}, publishedVoices_{0};
     std::atomic<float> publishedPeak_{0};
-    std::atomic<bool> clipped_{false}, overflow_{false};
+    std::atomic<bool> clipped_{false}, overflow_{false}, urgentStop_{false};
     std::atomic<std::uint64_t> epoch_{0};
     std::uint64_t applied_ = 0;
     std::atomic<std::uint64_t> commandsApplied_{0};
     void apply(Command command) noexcept;
+    void applyStopAll() noexcept;
     void dispatch(int marker) noexcept;
     void publish(float peak) noexcept;
     void stopAudioWorker();
