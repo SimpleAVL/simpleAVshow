@@ -70,6 +70,19 @@ public:
     SourceFile(const SourceFile&) = delete;
     SourceFile& operator=(const SourceFile&) = delete;
     AVIOContext* io() const noexcept { return io_; }
+    // Identity and size of the file actually open, whatever is at its path by now.
+    std::pair<detail::FileIdentity, qint64> opened() const {
+#ifdef Q_OS_WIN
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!GetFileInformationByHandle(handle_, &info)) return {};
+        return {{info.dwVolumeSerialNumber, (quint64{info.nFileIndexHigh} << 32) | info.nFileIndexLow},
+            static_cast<qint64>((quint64{info.nFileSizeHigh} << 32) | info.nFileSizeLow)};
+#else
+        struct stat info{};
+        if (::fstat(fd_, &info)) return {};
+        return {{static_cast<quint64>(info.st_dev), static_cast<quint64>(info.st_ino)}, static_cast<qint64>(info.st_size)};
+#endif
+    }
 private:
 #ifdef Q_OS_WIN
     HANDLE handle_ = INVALID_HANDLE_VALUE;
@@ -169,7 +182,10 @@ public:
     // resampler fills its filter, so seeked output matches a decode from the start.
     static constexpr Frame preroll = sampleRate / 2;
     using SeekPoints = std::shared_ptr<const std::vector<detail::SeekPoint>>;
-    explicit AudioDecoder(QString path, SeekPoints points = {}) : path_(std::move(path)), points_(std::move(points)) { open(); }
+    // expected: the file as imported. Every open (including a restart) checks the file it actually
+    // opened against it, so a replacement between a path check and the open cannot be decoded.
+    explicit AudioDecoder(QString path, SeekPoints points = {}, std::optional<detail::FileVersion> expected = {})
+        : path_(std::move(path)), points_(std::move(points)), expected_(std::move(expected)) { open(); }
     bool mono() const noexcept { return mono_; }
     // Record seek points during the coming linear decode (the import pass).
     void record() { recording_ = true; }
@@ -218,6 +234,7 @@ public:
 private:
     QString path_;
     SeekPoints points_;
+    std::optional<detail::FileVersion> expected_;
     std::vector<detail::SeekPoint> recorded_;
     std::optional<detail::SeekPoint> landing_; // The seek point a seek aims at.
     std::int64_t nextPoint_ = 0, lastPts_ = AV_NOPTS_VALUE;
@@ -232,6 +249,8 @@ private:
     std::vector<float> scratch_;
     void open() {
         input_ = std::make_unique<Input>(); input_->open(path_);
+        if (expected_ && input_->file->opened() != std::pair{expected_->identity, expected_->size})
+            throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString());
         stream_ = av_find_best_stream(input_->format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
         if (stream_ < 0) throw std::runtime_error("File contains no audio");
         input_->decoder(stream_);
@@ -408,7 +427,7 @@ private:
     static constexpr Frame continueWithin = 2 * sampleRate;
     struct Reader {
         // Takes over the budget slot makeRoom reserved.
-        Reader(const QString& path, AudioDecoder::SeekPoints points) : decoder(path, std::move(points)) {}
+        Reader(const QString& path, AudioDecoder::SeekPoints points, const detail::FileVersion& version) : decoder(path, std::move(points), version) {}
         ~Reader() { --registry().open; }
         Reader(const Reader&) = delete; Reader& operator=(const Reader&) = delete;
         AudioDecoder decoder;
@@ -433,7 +452,7 @@ private:
         if (readers_.size() < maxReaders) {
             makeRoom();
             std::unique_ptr<Reader> fresh;
-            try { fresh = std::make_unique<Reader>(path_, points_); }
+            try { fresh = std::make_unique<Reader>(path_, points_, version_); }
             catch (...) { --registry().open; throw; } // The reserved slot was never taken.
             readers_.push_back(std::move(fresh)); reader = readers_.back().get();
             if (frame < continueWithin) return; // A fresh decoder starts at the beginning.

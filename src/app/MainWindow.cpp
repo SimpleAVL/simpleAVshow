@@ -994,13 +994,10 @@ void MainWindow::outputSettings() {
     connect(sources, &QComboBox::activated, &dialog, [&] {
         const auto chosen = static_cast<AudioPreparation>(sources->currentData().toInt()), previous = audioPreparation();
         // Choosing the current mode again retries sources still on the other one (after a failed reload).
-        const bool mismatched = std::any_of(c_.project.assets.cbegin(), c_.project.assets.cend(), [chosen](const MediaAsset& a) {
-            const auto* storage = a.audio ? a.audio->storage.get() : nullptr;
-            return storage && (chosen == AudioPreparation::Prepared ? storage->decodes() : !storage->readsSource());
-        });
-        if (chosen == previous && !mismatched) return;
+        if (chosen == previous && !c_.audioDiffersFrom(chosen)) return;
         if (!c_.canEdit()) { sources->setCurrentIndex(sources->findData(static_cast<int>(previous))); return; }
-        c_.setAudioPreparation(chosen); reloadAudio(previous);
+        // The reload's outcome (possibly restoring previous) is reported in the editor, not this dialog.
+        c_.setAudioPreparation(chosen); dialog.reject(); reloadAudio(previous);
     });
     auto* midiBox = new QGroupBox("MIDI · control lights, instruments or other apps"); auto* midiForm = new QFormLayout(midiBox); layout->addWidget(midiBox);
     auto* midiHint = new QLabel("Only needed for cues that send MIDI. Choose a destination once; selecting it connects immediately and Play reconnects it next time.");

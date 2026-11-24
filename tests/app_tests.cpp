@@ -1713,8 +1713,9 @@ private slots:
         setAudioPreparation(AudioPreparation::Stream); auto added = loadMedia(other);
         QVERIFY(c.edit([&](Project& p) { p.assets.insert(added.id, added); }));
         c.undo(); QVERIFY(!c.project.assets.contains(added.id)); QVERIFY(c.audioSources().contains(other));
+        QVERIFY(c.audioDiffersFrom(AudioPreparation::Prepared)); // Only redo still holds streamed audio.
         setAudioPreparation(AudioPreparation::Prepared); const auto preparedOther = loadMedia(other).audio;
-        QVERIFY(c.replaceAudio({{other, preparedOther}}));
+        QVERIFY(c.replaceAudio({{other, preparedOther}})); QVERIFY(!c.audioDiffersFrom(AudioPreparation::Prepared));
         c.redo(); QCOMPARE(c.project.assets[added.id].audio, preparedOther);
         // A snapshot the new audio would invalidate keeps its previous audio, so undo can still arm it.
         QVERIFY(c.edit([](Project& p) { p.show.clips[0].offset = frames(1.5); p.show.clips[0].duration = frames(.4); }));

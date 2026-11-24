@@ -53,7 +53,10 @@ public:
     void setAudioPreparation(AudioPreparation preparation);
     // File-backed audio sources of the show and its undo/redo history.
     QStringList audioSources() const;
-    // Swaps reloaded audio, by source path, into the show and its history (after a preparation change) without an undo step.
+    // Whether any file-backed audio in the show or its history is prepared other than as preparation says.
+    bool audioDiffersFrom(AudioPreparation preparation) const;
+    // Swaps reloaded audio, by source path, into the show and its history (after a preparation change)
+    // without an undo step. False only when nothing changed (editing locked or the show rejects it).
     bool replaceAudio(const QMap<QString, std::shared_ptr<const AudioData>>& audio);
     QString midiDestination() const { return midiName_; }
     void setShowMode(bool enabled);

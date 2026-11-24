@@ -220,6 +220,16 @@ QStringList Controller::audioSources() const {
     for (const auto* history : {&undo_, &redo_}) for (const auto& p : *history) collect(p);
     return paths;
 }
+bool Controller::audioDiffersFrom(AudioPreparation preparation) const {
+    // Direct WAVs read their source in both modes; generated audio has no storage.
+    const auto differs = [preparation](const Project& p) {
+        return std::any_of(p.assets.cbegin(), p.assets.cend(), [preparation](const MediaAsset& a) {
+            const auto* storage = a.audio ? a.audio->storage.get() : nullptr;
+            return storage && (preparation == AudioPreparation::Prepared ? storage->decodes() : !storage->readsSource());
+        });
+    };
+    return differs(project) || std::any_of(undo_.cbegin(), undo_.cend(), differs) || std::any_of(redo_.cbegin(), redo_.cend(), differs);
+}
 bool Controller::replaceAudio(const QMap<QString, std::shared_ptr<const AudioData>>& audio) {
     if (!canEdit()) return false;
     // Matching by path keeps a relinked asset (same id, other file) on its own source.
@@ -230,16 +240,19 @@ bool Controller::replaceAudio(const QMap<QString, std::shared_ptr<const AudioDat
         }
         bindAudio(p);
     };
-    try {
-        Project next = project; swap(next); validate(next);
-        // A history snapshot the new audio would invalidate (an offset beyond a shorter replacement)
-        // keeps its previous audio rather than becoming a state undo cannot arm.
-        for (auto* history : {&undo_, &redo_}) for (auto& p : *history) {
-            Project candidate = p; swap(candidate);
-            try { validate(candidate); p = std::move(candidate); } catch (const std::exception&) {}
-        }
-        project = std::move(next); arm(std::min(position(), project.show.duration)); emit changed(); return true;
-    } catch (const std::exception& e) { report(QString::fromUtf8(e.what())); return false; }
+    Project next = project;
+    try { swap(next); validate(next); }
+    catch (const std::exception& e) { report(QString::fromUtf8(e.what())); return false; }
+    // A history snapshot the new audio would invalidate (an offset beyond a shorter replacement)
+    // keeps its previous audio rather than becoming a state undo cannot arm.
+    for (auto* history : {&undo_, &redo_}) for (auto& p : *history) {
+        Project candidate = p;
+        try { swap(candidate); validate(candidate); p = std::move(candidate); } catch (const std::exception&) {}
+    }
+    // Committed: a failure to re-arm is reported like any other, but the new audio stays.
+    project = std::move(next);
+    try { arm(std::min(position(), project.show.duration)); } catch (const std::exception& e) { report(QString::fromUtf8(e.what())); }
+    emit changed(); return true;
 }
 QStringList Controller::preflight() {
     QStringList problems;
