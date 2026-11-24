@@ -268,6 +268,14 @@ int main() {
             checkedRender(t, out.data(), 2048, 2); // Frames 10240-12287 straddle the 12000-frame grace.
             expect(t.audioGaps() == 1, "a gap past the grace counts even mid-callback");
         }},
+        {"arming: a rejected show keeps the armed one, nothing plays unarmed", [] {
+            Transport t; expect(!t.armed(), "a new transport is not armed");
+            std::vector<float> out; render(t, 4, out); expect(out[0] == 0 && t.state() == State::Stopped, "unarmed renders silence");
+            t.configure(show()); expect(t.armed(), "configure arms");
+            auto invalid = show(); invalid->duration = 0;
+            try { t.configure(invalid); expect(false, "invalid show accepted"); } catch (const std::invalid_argument&) {}
+            expect(t.armed(), "a show rejected before loading leaves the armed one"); play(t); render(t, 1, out); near(out[0], .1, "and it still plays");
+        }},
         {"late sources count as waits or gaps only outside the seek grace", [] {
             for (const auto policy : {LateAudio::Freeze, LateAudio::Gap}) {
                 auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));

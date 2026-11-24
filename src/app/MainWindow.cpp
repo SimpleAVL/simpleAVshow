@@ -812,11 +812,13 @@ void MainWindow::reloadAudio(AudioPreparation previous) {
     auto* watcher = new QFutureWatcher<Reloaded>(this);
     connect(watcher, &QFutureWatcher<Reloaded>::finished, this, [this, watcher, progress, preparing, previous] {
         const auto [audio, errors] = watcher->result(); c_.busy = false; progress->deleteLater(); watcher->deleteLater();
-        if (!audio.isEmpty() && !c_.replaceAudio(audio)) {
+        const auto outcome = audio.isEmpty() ? Controller::AudioSwap::Applied : c_.replaceAudio(audio);
+        if (outcome == Controller::AudioSwap::Rejected) {
             // The show could not use the reloaded audio; it keeps its sources, so the preference does too.
             const auto reason = c_.status; c_.setAudioPreparation(previous);
             c_.report("Audio sources were not changed: " + reason); return;
         }
+        if (outcome == Controller::AudioSwap::ArmFailed) return; // The new sources stay; the failure stays on screen.
         if (!errors.isEmpty()) QMessageBox::warning(this, "Some audio kept its previous preparation", errors.join("\n\n"));
         else c_.report(QString("Audio sources set to %1; reloaded %2 audio sources.").arg(preparing ? "Prepared cache" : "Stream").arg(audio.size()));
     });

@@ -80,6 +80,20 @@ void Transport::cut(std::size_t i) noexcept {
 }
 void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
     if (!show || show->duration <= 0 || show->duration > maxFrame) throw std::invalid_argument("Invalid show duration");
+    // Failing partway (out of memory, no worker thread) must not leave voices without their buffers:
+    // the transport disarms instead, rendering silence until a configure succeeds.
+    armed_.store(false);
+    try { load(std::move(show), position); } catch (...) { disarm(); throw; }
+    armed_.store(true);
+}
+void Transport::disarm() noexcept {
+    stopAudioWorker();
+    show_.reset(); buffers_.clear(); voices_.clear(); releases_.clear(); releasing_.clear();
+    starts_.clear(); markers_.clear(); active_.clear(); pictures_.clear();
+    publishedSourceCount_ = 0; publishedSources_.reset(); state_ = State::Stopped; heldMarker_ = -1;
+    publishedState_.store(State::Stopped); publishedVoices_.store(0);
+}
+void Transport::load(std::shared_ptr<const Show> show, Frame position) {
     stopAudioWorker();
     audioReadFailed_.store(false);
     // Edits re-arm often: unchanged disk clips keep their read-ahead and only retarget their entry.

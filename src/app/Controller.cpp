@@ -150,6 +150,11 @@ void Controller::toggle() {
     const bool recovering = !playing && !playbackProblem.isEmpty();
     QString warning; // A problem this resume continues past; reconnecting a device must not clear it.
     if (!playing) {
+        // A configure that failed partway left nothing armed; preparing again comes first.
+        if (!transport.armed()) {
+            try { arm(position()); }
+            catch (const std::exception& e) { report("Playback could not be prepared: " + QString::fromUtf8(e.what())); playbackProblem = status; return; }
+        }
         playbackProblem.clear();
         // Re-arming retries sources that were briefly unavailable; changed sources still need reopening.
         if (transport.audioReadFailed() && state != State::Held && !transport.asyncVoices()) arm(position());
@@ -230,8 +235,8 @@ bool Controller::audioDiffersFrom(AudioPreparation preparation) const {
     };
     return differs(project) || std::any_of(undo_.cbegin(), undo_.cend(), differs) || std::any_of(redo_.cbegin(), redo_.cend(), differs);
 }
-bool Controller::replaceAudio(const QMap<QString, std::shared_ptr<const AudioData>>& audio) {
-    if (!canEdit()) return false;
+Controller::AudioSwap Controller::replaceAudio(const QMap<QString, std::shared_ptr<const AudioData>>& audio) {
+    if (!canEdit()) return AudioSwap::Rejected;
     // Matching by path keeps a relinked asset (same id, other file) on its own source.
     const auto swap = [&](Project& p) {
         for (auto& a : p.assets) if (a.audio && a.audio->storage && audio.contains(a.path)) {
@@ -242,17 +247,18 @@ bool Controller::replaceAudio(const QMap<QString, std::shared_ptr<const AudioDat
     };
     Project next = project;
     try { swap(next); validate(next); }
-    catch (const std::exception& e) { report(QString::fromUtf8(e.what())); return false; }
+    catch (const std::exception& e) { report(QString::fromUtf8(e.what())); return AudioSwap::Rejected; }
     // A history snapshot the new audio would invalidate (an offset beyond a shorter replacement)
     // keeps its previous audio rather than becoming a state undo cannot arm.
     for (auto* history : {&undo_, &redo_}) for (auto& p : *history) {
         Project candidate = p;
         try { swap(candidate); validate(candidate); p = std::move(candidate); } catch (const std::exception&) {}
     }
-    // Committed: a failure to re-arm is reported like any other, but the new audio stays.
-    project = std::move(next);
-    try { arm(std::min(position(), project.show.duration)); } catch (const std::exception& e) { report(QString::fromUtf8(e.what())); }
-    emit changed(); return true;
+    // Committed: a failure to re-arm leaves the transport disarmed (Play retries) and the new audio in place.
+    project = std::move(next); auto outcome = AudioSwap::Applied;
+    try { arm(std::min(position(), project.show.duration)); }
+    catch (const std::exception& e) { report("Audio was reloaded, but playback could not be prepared: " + QString::fromUtf8(e.what())); playbackProblem = status; outcome = AudioSwap::ArmFailed; }
+    emit changed(); return outcome;
 }
 QStringList Controller::preflight() {
     QStringList problems;

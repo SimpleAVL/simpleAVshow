@@ -1704,7 +1704,7 @@ private slots:
         }
         QVERIFY(c.edit([](Project& p) { p.show.clips[0].gain = .5; }));
         QCOMPARE(c.audioSources(), QStringList{streamed.path});
-        QVERIFY(c.replaceAudio({{streamed.path, prepared}}));
+        QCOMPARE(c.replaceAudio({{streamed.path, prepared}}), Controller::AudioSwap::Applied);
         QVERIFY(!streaming()); QCOMPARE(c.project.show.clips[0].audio, prepared);
         // Swapping storage is not an edit, and undo keeps the chosen preparation.
         c.undo(); QCOMPARE(c.project.show.clips[0].gain, 1.); QCOMPARE(c.project.show.clips[0].audio, prepared);
@@ -1715,13 +1715,13 @@ private slots:
         c.undo(); QVERIFY(!c.project.assets.contains(added.id)); QVERIFY(c.audioSources().contains(other));
         QVERIFY(c.audioDiffersFrom(AudioPreparation::Prepared)); // Only redo still holds streamed audio.
         setAudioPreparation(AudioPreparation::Prepared); const auto preparedOther = loadMedia(other).audio;
-        QVERIFY(c.replaceAudio({{other, preparedOther}})); QVERIFY(!c.audioDiffersFrom(AudioPreparation::Prepared));
+        QCOMPARE(c.replaceAudio({{other, preparedOther}}), Controller::AudioSwap::Applied); QVERIFY(!c.audioDiffersFrom(AudioPreparation::Prepared));
         c.redo(); QCOMPARE(c.project.assets[added.id].audio, preparedOther);
         // A snapshot the new audio would invalidate keeps its previous audio, so undo can still arm it.
         QVERIFY(c.edit([](Project& p) { p.show.clips[0].offset = frames(1.5); p.show.clips[0].duration = frames(.4); }));
         QVERIFY(c.edit([](Project& p) { p.show.clips.clear(); }));
         const auto shorter = loadMedia([&] { const auto f = dir.filePath("short.wav"); writeBytes(f, waveBytes(16, 1, 2, 44100, false, 44100)); return f; }()).audio;
-        QVERIFY(c.replaceAudio({{streamed.path, shorter}}));
+        QCOMPARE(c.replaceAudio({{streamed.path, shorter}}), Controller::AudioSwap::Applied);
         QCOMPARE(c.project.assets[streamed.id].duration, seconds(shorter->length())); // New clips use the reloaded length.
         c.save(dir.filePath("show.savshow")); QVERIFY2(!c.dirty, qPrintable(c.status)); // Saving must not rebind history to the new audio.
         c.undo(); QCOMPARE(c.project.show.clips[0].offset, frames(1.5)); QCOMPARE(c.project.show.clips[0].audio, prepared);
@@ -1812,7 +1812,7 @@ private slots:
         c.toggle(); QCOMPARE(c.transport.state(), State::Stopped);
         // A prepared cache does not need the original.
         writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 + 211)); const auto prepared = loadMedia(path, AudioPreparation::Prepared).audio;
-        QVERIFY(!prepared->storage->readsSource()); QVERIFY(c.replaceAudio({{asset.path, prepared}})); QVERIFY(QFile::remove(path));
+        QVERIFY(!prepared->storage->readsSource()); QCOMPARE(c.replaceAudio({{asset.path, prepared}}), Controller::AudioSwap::Applied); QVERIFY(QFile::remove(path));
         QVERIFY(c.missingMedia().isEmpty()); QVERIFY(!Controller::needsRelink(c.project.assets[asset.id]));
     }
     void saveKeepsUndoStepsThatSavedMediaWouldInvalidate() {
@@ -1830,7 +1830,7 @@ private slots:
         Controller c; c.replace(readProject(package)); const auto extracted = c.project.assets[asset.id].path; const auto before = c.project.show.clips[0].audio;
         QVERIFY(c.edit([](Project& p) { p.show.clips.clear(); }));
         writeBytes(extracted, waveBytes(16, 1, 2, 44100, false, 13230));
-        QVERIFY(c.replaceAudio({{extracted, loadMedia(extracted).audio}}));
+        QCOMPARE(c.replaceAudio({{extracted, loadMedia(extracted).audio}}), Controller::AudioSwap::Applied);
         c.save(dir.filePath("show.savshow")); QVERIFY2(!c.dirty, qPrintable(c.status));
         c.undo(); QCOMPARE(c.project.show.clips.size(), std::size_t{1}); QCOMPARE(c.project.show.clips[0].audio, before);
         validate(c.project); QVERIFY(!before->storage->readsSource()); QVERIFY(!c.transport.audioReadFailed());
