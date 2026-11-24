@@ -33,6 +33,8 @@ public:
     // Issues a revocable bearer token for an embedded chat session without affecting external clients.
     QString issueChatToken();
     void revokeChatToken(const QString& token);
+    bool externallyShared() const { return externallyShared_; }
+    void markExternallyShared() { if (running()) externallyShared_ = true; }
     QString errorString() const { return server_.errorString(); }
     bool editingEnabled() const { return editing_; }
     void setEditingEnabled(bool enabled);
@@ -49,11 +51,15 @@ private:
     QString token_;
     QSet<QString> chatTokens_;
     QMap<QString, QString> issuedSessions_; // Mcp-Session-Id -> issuing bearer token
+    QMap<QString, QStringList> bearerSessions_; // bearer token -> FIFO session IDs
+    QStringList sessionOrder_; // global FIFO session IDs
     bool editing_ = false;
+    bool externallyShared_ = false;
     quint64 revision_ = 0;
     quint64 generation_ = 0;
     quint64 editGeneration_ = 0;
     quint64 importShowEpoch_ = 0;
+    QString importOwnerBearer_;
     std::shared_ptr<std::atomic<bool>> editSessionCancelled_ = std::make_shared<std::atomic<bool>>(false);
     std::shared_ptr<std::atomic<bool>> importCancelled_ = std::make_shared<std::atomic<bool>>(false);
     std::shared_ptr<std::atomic<bool>> previewCancelled_ = std::make_shared<std::atomic<bool>>(false);
@@ -82,7 +88,8 @@ private:
     void dispatch(const QJsonObject& request, const QString& bearerToken, const QString& clientScope,
                   std::shared_ptr<std::atomic<bool>> cancelled,
                   std::function<void()> abortConnection, std::function<void(QJsonObject, QByteArray)> finish);
-    void callTool(const QString& name, const QJsonObject& arguments, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish);
+    void callTool(const QString& name, const QJsonObject& arguments, const QString& bearerToken,
+                  std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish);
     QJsonObject snapshot() const;
     QJsonObject environmentReport() const;
     QJsonObject preflightReport() const;

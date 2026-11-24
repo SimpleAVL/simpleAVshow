@@ -605,7 +605,8 @@ private slots:
             QVERIFY(commitErr["isError"].toBool());
         }
 
-        // 19. initialize issues a server-generated Mcp-Session-Id instead of echoing a caller-supplied value.
+        // 19. initialize issues a server-generated Mcp-Session-Id instead of echoing a caller-supplied value,
+        //     unknown/evicted session IDs return HTTP 404, and per-bearer FIFO eviction protects other bearers.
         {
             const QByteArray initBody = QJsonDocument(QJsonObject{
                 {"jsonrpc", "2.0"}, {"id", 601}, {"method", "initialize"},
@@ -615,10 +616,68 @@ private slots:
                     {"clientInfo", QJsonObject{{"name", "test"}, {"version", "1"}}}
                 }}
             }).toJson(QJsonDocument::Compact);
+            const QByteArray pingBody = QJsonDocument(QJsonObject{
+                {"jsonrpc", "2.0"}, {"id", 602}, {"method", "ping"}
+            }).toJson(QJsonDocument::Compact);
             const auto initRes = http(server, initBody, "POST", {{"Mcp-Session-Id", "caller-forged-scope"}});
             QCOMPARE(initRes.status, 200);
             QVERIFY(!initRes.sessionId.isEmpty());
             QVERIFY(initRes.sessionId != QByteArray("caller-forged-scope"));
+            // Unknown / forged Mcp-Session-Id on non-initialize must return HTTP 404.
+            QCOMPARE(http(server, pingBody, "POST", {{"Mcp-Session-Id", "caller-forged-scope"}}).status, 404);
+            QCOMPARE(http(server, pingBody, "POST", {{"Mcp-Session-Id", initRes.sessionId}}).status, 200);
+            // A second bearer churning >16 sessions evicts its own oldest session (404) without evicting primary's session.
+            const QString churnTok = server.issueChatToken();
+            QByteArray firstChurnSid;
+            for (int i = 0; i < 18; ++i) {
+                const auto r = http(server, initBody, "POST", {{"Authorization", "Bearer " + churnTok.toUtf8()}});
+                QCOMPARE(r.status, 200);
+                if (i == 0) firstChurnSid = r.sessionId;
+            }
+            QCOMPARE(http(server, pingBody, "POST", {
+                {"Authorization", "Bearer " + churnTok.toUtf8()},
+                {"Mcp-Session-Id", firstChurnSid}
+            }).status, 404);
+            QCOMPARE(http(server, pingBody, "POST", {{"Mcp-Session-Id", initRes.sessionId}}).status, 200);
+            server.revokeChatToken(churnTok);
+        }
+
+        // 20. Revoking a chat token cancels a chat-owned staged import without disturbing an external client's import.
+        {
+            QTemporaryDir dir;
+            QVERIFY(dir.isValid());
+            const QString imgPath = dir.filePath("owner.png");
+            QImage img(16, 16, QImage::Format_RGBA8888);
+            img.fill(Qt::green);
+            QVERIFY(img.save(imgPath, "PNG"));
+
+            const QString chatTok = server.issueChatToken();
+            const QByteArray startChatImport = QJsonDocument(QJsonObject{
+                {"jsonrpc", "2.0"}, {"id", 701}, {"method", "tools/call"},
+                {"params", QJsonObject{{"name", "import_media"}, {"arguments", QJsonObject{
+                    {"expected_revision", revision(server)}, {"paths", QJsonArray{imgPath}}
+                }}}}
+            }).toJson(QJsonDocument::Compact);
+            const auto chatImp = http(server, startChatImport, "POST", {{"Authorization", "Bearer " + chatTok.toUtf8()}});
+            QCOMPARE(chatImp.status, 200);
+            const QString chatJobId = chatImp.body["result"].toObject()["structuredContent"].toObject()["job_id"].toString();
+            QVERIFY(!chatJobId.isEmpty());
+            server.revokeChatToken(chatTok);
+            const auto stAfterRevoke = call(server, "get_import", {{"job_id", chatJobId}})["structuredContent"].toObject();
+            QCOMPARE(stAfterRevoke["state"].toString(), QString("cancelled"));
+
+            // Now an external client starts an import; revoking an unrelated chat token must leave it ready.
+            const QString otherChatTok = server.issueChatToken();
+            const auto extImp = call(server, "import_media", {
+                {"expected_revision", revision(server)}, {"paths", QJsonArray{imgPath}}
+            })["structuredContent"].toObject();
+            const QString extJobId = extImp["job_id"].toString();
+            QTRY_COMPARE_WITH_TIMEOUT(
+                call(server, "get_import", {{"job_id", extJobId}})["structuredContent"].toObject()["state"].toString(),
+                QString("ready"), 5000);
+            server.revokeChatToken(otherChatTok);
+            QCOMPARE(call(server, "get_import", {{"job_id", extJobId}})["structuredContent"].toObject()["state"].toString(),
+                     QString("ready"));
         }
 
         window.controller().dirty = false;

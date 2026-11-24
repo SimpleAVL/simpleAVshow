@@ -247,16 +247,19 @@ bool Controller::configureAudio(RtAudio::Api api, unsigned id, QString name, uns
     if (!canEdit()) return false;
     return openAudio(api, id, std::move(name), channels, buffer);
 }
-bool Controller::configureAudioByName(RtAudio::Api api, const QString& wantedName, unsigned channels, unsigned buffer) {
+bool Controller::configureAudioByName(RtAudio::Api api, const QString& wantedName, unsigned channels, unsigned buffer,
+                                      unsigned preferredId, bool requirePreferredId) {
     if (!canEdit()) return false;
     const bool hadStream = configured_ && device.running();
     const RtAudio::Api prevApi = api_;
+    const unsigned prevId = deviceId_;
     const QString prevName = audioName;
     const unsigned prevChannels = channels_, prevBuffer = buffer_;
     QSettings settings;
     QString resolvedName, error;
-    unsigned resolvedId = deviceId_;
-    if (device.openByName(api, wantedName, settings.value("audio/device").toString(), channels, buffer, resolvedName, error, &resolvedId)) {
+    unsigned resolvedId = preferredId ? preferredId : deviceId_;
+    if (device.openByName(api, wantedName, settings.value("audio/device").toString(), channels, buffer, resolvedName, error,
+                          &resolvedId, preferredId, requirePreferredId)) {
         api_ = api; deviceId_ = resolvedId; channels_ = channels; buffer_ = buffer; audioName = resolvedName; configured_ = true;
         stall_.restart(); playbackProblem.clear();
         settings.setValue("audio/api", static_cast<int>(api)); settings.setValue("audio/device", resolvedName);
@@ -267,8 +270,11 @@ bool Controller::configureAudioByName(RtAudio::Api api, const QString& wantedNam
     configured_ = false;
     if (hadStream && !prevName.isEmpty()) {
         QString restoredName, restoreErr;
-        unsigned restoredId = deviceId_;
-        if (device.openByName(prevApi, prevName, prevName, prevChannels, prevBuffer, restoredName, restoreErr, &restoredId)) {
+        unsigned restoredId = prevId;
+        // Require the exact previous device ID on rollback when known so a failed switch cannot
+        // silently reopen a different interface that shares the same display name.
+        if (device.openByName(prevApi, prevName, prevName, prevChannels, prevBuffer, restoredName, restoreErr,
+                              &restoredId, prevId, prevId != 0)) {
             deviceId_ = restoredId;
             configured_ = true; stall_.restart();
             report("Audio output unavailable: " + error + " (kept previous connection: " + restoredName + ")");

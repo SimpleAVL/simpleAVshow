@@ -487,6 +487,20 @@ private slots:
         QVERIFY(window.mcpServer().running());
         window.mcpServer().stop();
 
+        // If chat auto-starts the MCP server and the operator later shares it externally,
+        // disconnecting chat must keep the listener running for external clients.
+        QVERIFY(!window.mcpServer().running());
+        customCommand->setText(QString("\"%1\" --http-mcp").arg(SAV_MOCK_ACP_AGENT));
+        connectButton->click();
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
+        QVERIFY(window.mcpServer().running());
+        QVERIFY(!window.mcpServer().externallyShared());
+        window.mcpServer().markExternallyShared();
+        connectButton->click(); // Disconnect chat
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
+        QVERIFY(window.mcpServer().running());
+        window.mcpServer().stop();
+
         // Read-only chat transcript must NOT intercept Space (Space should reach Controller::toggle).
         transcript->setFocus();
         window.controller().status.clear();

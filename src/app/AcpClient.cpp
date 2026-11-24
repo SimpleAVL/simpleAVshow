@@ -261,7 +261,11 @@ void AcpClient::connectToAgent(const QString& program, const QStringList& args, 
 
     process_ = new QProcess(this);
     process_->setProcessChannelMode(QProcess::SeparateChannels);
-    process_->setWorkingDirectory(cwd_);
+    // Launch the agent executable from a trusted application directory so Windows .cmd shims
+    // cannot resolve runtimes from an untrusted show folder; pass the show directory via ACP session/new cwd.
+    const QString launchDir = QCoreApplication::applicationDirPath().isEmpty()
+        ? QDir::homePath() : QCoreApplication::applicationDirPath();
+    process_->setWorkingDirectory(launchDir);
 
     // Ensure GUI-launched apps (e.g. macOS .app bundles) still find Homebrew/npm/bun tools.
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
@@ -269,6 +273,9 @@ void AcpClient::connectToAgent(const QString& program, const QStringList& args, 
     QStringList pathParts = env.value("PATH").split(sep, Qt::SkipEmptyParts);
     for (const auto& extra : extraSearchPaths()) if (!pathParts.contains(extra)) pathParts << extra;
     env.insert("PATH", pathParts.join(sep));
+#ifdef Q_OS_WIN
+    env.insert("NoDefaultCurrentDirectoryInExePath", "1");
+#endif
     process_->setProcessEnvironment(env);
 
     connect(process_, &QProcess::started, this, [this] {
@@ -604,9 +611,11 @@ void AcpClient::handleAgentRequest(const QJsonValue& id, const QString& method, 
         for (const auto& val : params["options"].toArray()) {
             if (static_cast<int>(request.options.size()) >= maxPermissionOptions) break;
             const auto opt = val.toObject();
-            if (!opt["optionId"].toString().isEmpty()) {
-                request.options.push_back({clamp(opt["optionId"].toString(), 128),
-                    clamp(opt["name"].toString(opt["optionId"].toString()), 64),
+            const QString optionId = opt["optionId"].toString();
+            if (!optionId.isEmpty()) {
+                // Keep the opaque protocol optionId intact; only clamp display labels.
+                request.options.push_back({optionId,
+                    clamp(opt["name"].toString(optionId), 64),
                     clamp(opt["kind"].toString(), 64)});
             }
         }

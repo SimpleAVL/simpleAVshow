@@ -331,10 +331,11 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
                 chatMcpToken_.clear();
             }
         }
-        // If an unexpected exit or protocol error ends a chat-owned session, revoke its auto-started MCP server.
+        // If an unexpected exit or protocol error ends a chat-owned session, revoke its auto-started MCP server
+        // unless the operator also shared or connected external MCP clients to it.
         if (!connecting_ && (st == AcpState::Disconnected || st == AcpState::Error) && autoStartedMcp_ && mcp_.running()) {
             autoStartedMcp_ = false;
-            mcp_.stop();
+            if (!mcp_.externallyShared()) mcp_.stop();
         }
         updateControls();
     });
@@ -483,7 +484,7 @@ void AgentChatPanel::shutdown() {
     }
     if (autoStartedMcp_ && mcp_.running()) {
         autoStartedMcp_ = false;
-        mcp_.stop();
+        if (!mcp_.externallyShared()) mcp_.stop();
     }
 }
 
@@ -595,7 +596,7 @@ void AgentChatPanel::toggleConnection() {
         }
         if (autoStartedMcp_ && mcp_.running()) {
             autoStartedMcp_ = false;
-            mcp_.stop();
+            if (!mcp_.externallyShared()) mcp_.stop();
         }
         appendEntry({ChatEntry::Kind::System, {}, {}, {}, "Disconnected.", {}, {}});
         updateControls();
@@ -657,7 +658,7 @@ void AgentChatPanel::toggleConnection() {
         }
         if (autoStartedMcp_ && mcp_.running()) {
             autoStartedMcp_ = false;
-            mcp_.stop();
+            if (!mcp_.externallyShared()) mcp_.stop();
         }
     } else if (!autoStartedMcp_ && mcp_.editingEnabled()) {
         appendEntry({ChatEntry::Kind::System, {}, {}, {},

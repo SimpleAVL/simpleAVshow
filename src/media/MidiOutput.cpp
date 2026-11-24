@@ -166,18 +166,9 @@ bool MidiOutput::open(int port, QString& error) {
 
 bool MidiOutput::openByName(const QString& wanted, QString& error) {
 #ifdef Q_OS_MACOS
-    // If already connected to this exact live endpoint, keep the open port without re-opening.
-    if (connected() && coreMidiEndpointExists(coreMidi_->endpoint)) {
-        const auto aliases = coreMidiEndpointAliases(coreMidi_->endpoint);
-        for (const auto& alias : aliases) {
-            if (alias.compare(wanted, Qt::CaseInsensitive) == 0) {
-                name_ = coreMidiEndpointName(coreMidi_->endpoint);
-                return true;
-            }
-        }
-    }
-    // Resolve directly to a stable CoreMIDI MIDIEndpointRef and rank matches strictly so an
-    // earlier endpoint's legacy alias can never beat a later endpoint's exact primary display name.
+    // Resolve directly to a stable CoreMIDI MIDIEndpointRef across all destinations first, ranking
+    // matches strictly so a connected endpoint's legacy alias can never preempt another endpoint's
+    // exact primary display name.
     const ItemCount count = MIDIGetNumberOfDestinations();
     MIDIEndpointRef matchedEp = 0;
     QString matchedName;
@@ -204,6 +195,11 @@ bool MidiOutput::openByName(const QString& wanted, QString& error) {
         }
     }
     if (!matchedEp) { error = "MIDI port not found: " + wanted; return false; }
+    // Reuse the open connection only when the resolved destination IS the already-connected endpoint.
+    if (connected() && coreMidi_->endpoint == matchedEp && coreMidiEndpointExists(matchedEp)) {
+        name_ = matchedName;
+        return true;
+    }
     // Verify the endpoint's own display name directly on the MIDIEndpointRef before binding.
     if (coreMidiEndpointName(matchedEp) != matchedName) {
         error = "MIDI destination changed while opening " + matchedName;
@@ -217,15 +213,8 @@ bool MidiOutput::openByName(const QString& wanted, QString& error) {
     lost_.store(false);
     return true;
 #else
-    // On single-client drivers (such as WinMM on Windows), opening a second handle to the
-    // already-connected port fails with MMSYSERR_ALLOCATED. Reuse the live connection if present.
-    if (connected() && name_.compare(wanted, Qt::CaseInsensitive) == 0) {
-        const auto available = ports();
-        for (const auto& p : available) {
-            if (p == name_) return true;
-        }
-    }
-    // Open the replacement client before touching the existing connection so a failure preserves it.
+    // Resolve the target port across all destinations first, preferring exact name over case-insensitive
+    // match, and only reuse the live connection when the resolved destination matches our connected port.
     std::string candidateError;
     try {
         auto candidate = std::make_unique<RtMidiOut>();
@@ -241,6 +230,9 @@ bool MidiOutput::openByName(const QString& wanted, QString& error) {
             if (matched < 0 && portName.compare(wanted, Qt::CaseInsensitive) == 0) { matched = static_cast<int>(i); matchedName = portName; }
         }
         if (matched < 0) { error = "MIDI port not found: " + wanted; return false; }
+        // On single-client drivers (such as WinMM on Windows), opening a second handle to the
+        // already-connected port fails with MMSYSERR_ALLOCATED. Reuse only when resolved name matches.
+        if (connected() && matchedName == name_) return true;
         if (static_cast<unsigned>(matched) >= candidate->getPortCount() ||
             QString::fromStdString(candidate->getPortName(static_cast<unsigned>(matched))) != matchedName) {
             error = "MIDI port list changed before opening " + matchedName;

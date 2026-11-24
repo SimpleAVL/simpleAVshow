@@ -4,7 +4,9 @@
 #include <QUuid>
 #include <QImageReader>
 #include <QTemporaryFile>
+#include <chrono>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -29,6 +31,24 @@ double mediaOrigin(const AVFormatContext* format) {
     }
     return std::isfinite(origin) ? origin : 0;
 }
+struct InterruptState {
+    std::function<bool()> isCancelled;
+    std::chrono::steady_clock::time_point deadline{};
+    bool hasDeadline = false;
+    bool triggered = false;
+    bool timedOut = false;
+};
+int avInterruptCallback(void* opaque) {
+    auto* state = static_cast<InterruptState*>(opaque);
+    if (!state) return 0;
+    if (state->isCancelled && state->isCancelled()) { state->triggered = true; return 1; }
+    if (state->hasDeadline && std::chrono::steady_clock::now() >= state->deadline) {
+        state->triggered = true;
+        state->timedOut = true;
+        return 1;
+    }
+    return 0;
+}
 struct Input {
     AVFormatContext* format = nullptr;
     AVCodecContext* codec = nullptr;
@@ -36,15 +56,38 @@ struct Input {
     AVPacket* packet = av_packet_alloc();
     SwrContext* resampler = nullptr;
     SwsContext* scaler = nullptr;
+    std::unique_ptr<InterruptState> interrupt;
     ~Input() {
         swr_free(&resampler); sws_freeContext(scaler);
         av_packet_free(&packet); av_frame_free(&frame);
         avcodec_free_context(&codec); avformat_close_input(&format);
     }
-    void open(const QString& path) {
+    void open(const QString& path, const std::function<bool()>& isCancelled = {}, std::chrono::milliseconds timeout = {}) {
         const QByteArray encoded = path.toUtf8();
-        checked(avformat_open_input(&format, encoded.constData(), nullptr, nullptr), "Open media");
-        checked(avformat_find_stream_info(format, nullptr), "Read media information");
+        if (isCancelled || timeout.count() > 0) {
+            format = avformat_alloc_context();
+            if (!format) throw std::bad_alloc();
+            interrupt = std::make_unique<InterruptState>();
+            interrupt->isCancelled = isCancelled;
+            if (timeout.count() > 0) {
+                interrupt->hasDeadline = true;
+                interrupt->deadline = std::chrono::steady_clock::now() + timeout;
+            }
+            format->interrupt_callback.callback = &avInterruptCallback;
+            format->interrupt_callback.opaque = interrupt.get();
+        }
+        const int openRes = avformat_open_input(&format, encoded.constData(), nullptr, nullptr);
+        if (openRes < 0) {
+            if (interrupt && interrupt->triggered)
+                throw std::runtime_error(interrupt->timedOut ? "Timed out opening media" : "Media operation cancelled");
+            checked(openRes, "Open media");
+        }
+        const int infoRes = avformat_find_stream_info(format, nullptr);
+        if (infoRes < 0) {
+            if (interrupt && interrupt->triggered)
+                throw std::runtime_error(interrupt->timedOut ? "Timed out reading media information" : "Media operation cancelled");
+            checked(infoRes, "Read media information");
+        }
     }
     void decoder(int stream) {
         const auto* decoder = avcodec_find_decoder(format->streams[stream]->codecpar->codec_id);
@@ -79,7 +122,7 @@ MediaAsset loadMedia(const QString& path, const std::function<bool()>& isCancell
         asset.audio = std::move(pcm); asset.duration = seconds(asset.audio->length());
         return asset;
     }
-    Input input; input.open(path);
+    Input input; input.open(path, isCancelled);
     if (input.format->duration != AV_NOPTS_VALUE) asset.duration = input.format->duration / static_cast<double>(AV_TIME_BASE);
     const int video = av_find_best_stream(input.format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     if (video >= 0) {
@@ -351,7 +394,7 @@ void VideoReader::run() {
 QImage videoFrameAt(const QString& path, double time, QSize maximum, QString* error, const std::function<bool()>& isCancelled) {
     try {
         if (isCancelled && isCancelled()) { if (error) *error = "Preview decode cancelled"; return {}; }
-        Input input; input.open(path);
+        Input input; input.open(path, isCancelled, std::chrono::seconds(15));
         const int index = av_find_best_stream(input.format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
         if (index < 0) { if (error) *error = "No video stream found"; return {}; }
         input.decoder(index);
@@ -414,9 +457,14 @@ QImage videoFrameAt(const QString& path, double time, QSize maximum, QString* er
             QImage blank(1, 1, QImage::Format_RGBA8888); blank.fill(Qt::transparent); return blank;
         }
         if (!reached || best.isNull()) {
-            if (error) *error = decoded >= 240
-                ? QString("Could not reach video frame at %1 s within preview decode budget").arg(target, 0, 'f', 2)
-                : QString("Could not decode video frame at %1 s").arg(target, 0, 'f', 2);
+            if (error) {
+                if (input.interrupt && input.interrupt->triggered)
+                    *error = input.interrupt->timedOut ? "Preview decode timed out" : "Preview decode cancelled";
+                else if (decoded >= 240)
+                    *error = QString("Could not reach video frame at %1 s within preview decode budget").arg(target, 0, 'f', 2);
+                else
+                    *error = QString("Could not decode video frame at %1 s").arg(target, 0, 'f', 2);
+            }
             return {};
         }
         return best;

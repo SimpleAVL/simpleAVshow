@@ -1394,6 +1394,8 @@ void MainWindow::agentSettings() {
             commitInspector();
             if (!mcp_.start(static_cast<quint16>(port->value()))) {
                 refresh(); status->setText("Cannot start MCP server: " + mcp_.errorString());
+            } else {
+                mcp_.markExternallyShared();
             }
         } else { mcp_.stop(); c_.report("Agent collaboration disabled."); }
     });
@@ -1402,10 +1404,15 @@ void MainWindow::agentSettings() {
         c_.report(on ? "Agent edits and controls enabled. Project edits can be undone from Edit; Show mode stays operator-only." : "Agent collaboration is read only.");
     });
     connect(copy, &QPushButton::clicked, &dialog, [&] {
+        mcp_.markExternallyShared();
         QApplication::clipboard()->setText(QString::fromUtf8(QJsonDocument(mcp_.clientConfig()).toJson(QJsonDocument::Indented)));
         status->setText("Connection configuration copied. Paste it into your agent's MCP server settings.");
     });
-    connect(copyToken, &QPushButton::clicked, &dialog, [&] { QApplication::clipboard()->setText(mcp_.token()); status->setText("Bearer token copied."); });
+    connect(copyToken, &QPushButton::clicked, &dialog, [&] {
+        mcp_.markExternallyShared();
+        QApplication::clipboard()->setText(mcp_.token());
+        status->setText("Bearer token copied.");
+    });
     auto* close = button("Close", layout); connect(close, &QPushButton::clicked, &dialog, &QDialog::accept);
     refresh(); dialog.exec();
 }

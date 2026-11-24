@@ -54,7 +54,7 @@ bool AudioDevice::open(RtAudio::Api api, unsigned device, unsigned channels, uns
 }
 bool AudioDevice::openByName(RtAudio::Api api, const QString& wantedName, const QString& fallbackRemembered,
                              unsigned channels, unsigned buffer, QString& resolvedName, QString& error,
-                             unsigned* resolvedId, unsigned preferredId) {
+                             unsigned* resolvedId, unsigned preferredId, bool requirePreferredId) {
     close();
     try {
         failed_.store(false); { std::lock_guard lock(errorMutex_); error_.clear(); }
@@ -69,16 +69,23 @@ bool AudioDevice::openByName(RtAudio::Api api, const QString& wantedName, const 
             if (info.outputChannels) list.push_back({id, QString::fromStdString(info.name), info.outputChannels, info.isDefaultOutput});
         }
         std::optional<DeviceDescription> chosen;
-        if (wantedName.isEmpty()) {
-            chosen = playbackDevice(list, fallbackRemembered);
-        } else {
-            // Preserve the operator's exact selected device ID when multiple devices share the same display name.
-            if (preferredId != 0) {
-                for (const auto& d : list) if (d.id == preferredId && d.name == wantedName) { chosen = d; break; }
+        if (preferredId != 0) {
+            for (const auto& d : list) {
+                if (d.id == preferredId && (wantedName.isEmpty() || d.name == wantedName)) {
+                    chosen = d; break;
+                }
             }
-            if (!chosen) for (const auto& d : list) if (d.name == wantedName) { chosen = d; break; }
-            if (!chosen) for (const auto& d : list) if (d.name.compare(wantedName, Qt::CaseInsensitive) == 0) { chosen = d; break; }
-            if (!chosen) throw std::runtime_error(("Audio device not found: " + wantedName).toStdString());
+            if (!chosen && requirePreferredId)
+                throw std::runtime_error("Selected audio device is no longer available");
+        }
+        if (!chosen) {
+            if (wantedName.isEmpty()) {
+                chosen = playbackDevice(list, fallbackRemembered);
+            } else {
+                for (const auto& d : list) if (d.name == wantedName) { chosen = d; break; }
+                if (!chosen) for (const auto& d : list) if (d.name.compare(wantedName, Qt::CaseInsensitive) == 0) { chosen = d; break; }
+                if (!chosen) throw std::runtime_error(("Audio device not found: " + wantedName).toStdString());
+            }
         }
         if (!chosen) throw std::runtime_error("No available audio output device found");
         if (channels < 1 || channels > chosen->channels)

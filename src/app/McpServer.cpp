@@ -201,7 +201,7 @@ QJsonArray tools() {
     // 3. Hardware outputs, phone remote, project files & rehearsal transport
     add("configure_outputs", "Configure audio driver/device/channels/buffer, connect or disconnect the MIDI output port, open or close the fullscreen audience display, or send a single test MIDI message. Blocked during playback and Show mode.",
         objectSchema({
-            {"audio", objectSchema({{"api", field("string")}, {"device", field("string")}, {"channels", integer(1, 256)}, {"buffer", integer(32, 8192)}})},
+            {"audio", objectSchema({{"api", field("string")}, {"device", field("string")}, {"device_id", integer(1, 2147483646)}, {"channels", integer(1, 256)}, {"buffer", integer(32, 8192)}})},
             {"midi", objectSchema({{"port", field("string")}}, {"port"})},
             {"display", objectSchema({{"open", field("boolean")}, {"screen", integer(0, 64)}, {"allow_cover_editor", field("boolean")}}, {"open"})},
             {"test_midi", objectSchema({{"message", QJsonObject{{"type", "array"}, {"minItems", 1}, {"items", integer(0, 255)}}}}, {"message"})}
@@ -413,9 +413,12 @@ void McpServer::invalidatePreviews() {
 bool McpServer::start(quint16 port) {
     if (running()) return true;
     if (!server_.listen(QHostAddress::LocalHost, port)) return false;
-    token_ = newId() + newId(); editing_ = false;
+    token_ = newId() + newId(); editing_ = false; externallyShared_ = false;
     chatTokens_.clear();
     issuedSessions_.clear();
+    bearerSessions_.clear();
+    sessionOrder_.clear();
+    importOwnerBearer_.clear();
     invalidateEditSession();
     invalidatePreviews();
     c_.report("Agent collaboration enabled (read only). Open Project → Agent collaboration to allow edits.");
@@ -430,10 +433,13 @@ void McpServer::stop() {
     for (auto it = inflight.cbegin(); it != inflight.cend(); ++it) {
         if (it.value().cancelled) it.value().cancelled->store(true);
     }
-    server_.close(); token_.clear(); chatTokens_.clear(); issuedSessions_.clear(); editing_ = false;
+    server_.close(); token_.clear(); chatTokens_.clear();
+    issuedSessions_.clear(); bearerSessions_.clear(); sessionOrder_.clear();
+    editing_ = false; externallyShared_ = false;
     // Invalidate outstanding connections as well as all credentials.
     for (auto* socket : findChildren<QTcpSocket*>()) socket->abort();
-    imported_.clear(); importId_.clear(); importState_.clear(); importError_.clear(); importShowEpoch_ = 0;
+    imported_.clear(); importId_.clear(); importState_.clear(); importError_.clear();
+    importOwnerBearer_.clear(); importShowEpoch_ = 0;
     emit stateChanged();
 }
 QString McpServer::issueChatToken() {
@@ -445,9 +451,18 @@ QString McpServer::issueChatToken() {
 void McpServer::revokeChatToken(const QString& token) {
     if (token.isEmpty()) return;
     chatTokens_.remove(token);
+    const auto removedSessions = bearerSessions_.take(token);
+    for (const auto& sid : removedSessions) {
+        issuedSessions_.remove(sid);
+        sessionOrder_.removeAll(sid);
+    }
     for (auto it = issuedSessions_.begin(); it != issuedSessions_.end();) {
-        if (it.value() == token) it = issuedSessions_.erase(it);
-        else ++it;
+        if (it.value() == token) {
+            sessionOrder_.removeAll(it.key());
+            it = issuedSessions_.erase(it);
+        } else {
+            ++it;
+        }
     }
     for (auto it = inflightRequests_.begin(); it != inflightRequests_.end();) {
         if (it.value().bearerToken == token) {
@@ -456,6 +471,14 @@ void McpServer::revokeChatToken(const QString& token) {
         } else {
             ++it;
         }
+    }
+    if (!importId_.isEmpty() && importOwnerBearer_ == token &&
+        (importState_ == "preparing" || importState_ == "ready")) {
+        if (importCancelled_) importCancelled_->store(true);
+        importCancelled_ = std::make_shared<std::atomic<bool>>(false);
+        imported_.clear();
+        importState_ = "cancelled";
+        importError_ = "Import cancelled because the chat session disconnected";
     }
     for (auto* socket : findChildren<QTcpSocket*>()) {
         if (socket->property("savBearer").toString() == token) socket->abort();
@@ -1272,7 +1295,7 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
         fail("Provide at least one of audio, midi, display, or test_midi");
 
     // Phase 1: Validate every nested field and resolve targets before mutating any real outputs.
-    struct PlannedAudio { RtAudio::Api api; QString name; unsigned channels; unsigned buffer; };
+    struct PlannedAudio { RtAudio::Api api; QString name; unsigned channels; unsigned buffer; unsigned preferredId = 0; bool requirePreferredId = false; };
     std::optional<PlannedAudio> plannedAudio;
     std::optional<QString> plannedMidiName;
     struct PlannedDisplay { bool open = false; int screen = 0; bool allowCover = false; };
@@ -1282,10 +1305,12 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
     if (a.contains("audio")) {
         if (!a["audio"].isObject()) fail("audio must be an object");
         const auto cfg = a["audio"].toObject();
-        knownFields(cfg, {{"api", {}}, {"device", {}}, {"channels", {}}, {"buffer", {}}});
+        knownFields(cfg, {{"api", {}}, {"device", {}}, {"device_id", {}}, {"channels", {}}, {"buffer", {}}});
         if (cfg.isEmpty()) fail("audio must specify at least one setting");
         QSettings settings;
-        RtAudio::Api api = static_cast<RtAudio::Api>(settings.value("audio/api", static_cast<int>(RtAudio::UNSPECIFIED)).toInt());
+        RtAudio::Api api = c_.audioConfigured()
+            ? c_.activeAudioApi()
+            : static_cast<RtAudio::Api>(settings.value("audio/api", static_cast<int>(RtAudio::UNSPECIFIED)).toInt());
         if (cfg.contains("api")) {
             if (!cfg["api"].isString()) fail("audio.api must be a string");
             const QString wantedApi = cfg["api"].toString().trimmed();
@@ -1302,14 +1327,49 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
             if (!cfg["device"].isString()) fail("audio.device must be a string");
             wantedDevice = cfg["device"].toString().trimmed();
         }
+        unsigned wantedDeviceId = 0;
+        if (cfg.contains("device_id")) {
+            const auto v = cfg["device_id"];
+            if (!v.isDouble() || !std::isfinite(v.toDouble()) || std::floor(v.toDouble()) != v.toDouble() ||
+                v.toDouble() < 1 || v.toDouble() > 2147483646.0)
+                fail("audio.device_id must be a positive integer");
+            wantedDeviceId = static_cast<unsigned>(v.toDouble());
+        }
         const auto devices = c_.device.devices(api);
         std::optional<DeviceDescription> chosen;
-        if (wantedDevice.isEmpty()) {
-            chosen = playbackDevice(devices, settings.value("audio/device").toString());
+        unsigned preferredId = 0;
+        bool requirePreferredId = false;
+        if (wantedDeviceId != 0) {
+            for (const auto& d : devices) if (d.id == wantedDeviceId) { chosen = d; break; }
+            if (!chosen) fail(QString("Audio device ID %1 not found").arg(wantedDeviceId));
+            if (!wantedDevice.isEmpty() && chosen->name.compare(wantedDevice, Qt::CaseInsensitive) != 0)
+                fail(QString("Audio device ID %1 (%2) does not match requested name %3").arg(wantedDeviceId).arg(chosen->name, wantedDevice));
+            preferredId = chosen->id;
+            requirePreferredId = true;
+        } else if (wantedDevice.isEmpty()) {
+            // Preserve the currently selected interface by exact device ID on partial (channels/buffer) updates.
+            if (c_.audioConfigured() && api == c_.activeAudioApi() && c_.activeAudioDeviceId() != 0) {
+                for (const auto& d : devices) if (d.id == c_.activeAudioDeviceId()) { chosen = d; break; }
+                if (!chosen) fail("Active audio interface is no longer available; specify audio.device or audio.device_id");
+                preferredId = chosen->id;
+                requirePreferredId = true;
+            } else {
+                chosen = playbackDevice(devices, settings.value("audio/device").toString());
+                if (chosen) preferredId = chosen->id;
+            }
         } else {
-            for (const auto& d : devices) if (d.name == wantedDevice) { chosen = d; break; }
-            if (!chosen) for (const auto& d : devices) if (d.name.compare(wantedDevice, Qt::CaseInsensitive) == 0) { chosen = d; break; }
-            if (!chosen) fail("Audio device not found: " + wantedDevice);
+            std::vector<DeviceDescription> exactMatches, ciMatches;
+            for (const auto& d : devices) {
+                if (d.name == wantedDevice) exactMatches.push_back(d);
+                else if (d.name.compare(wantedDevice, Qt::CaseInsensitive) == 0) ciMatches.push_back(d);
+            }
+            const auto& matches = !exactMatches.empty() ? exactMatches : ciMatches;
+            if (matches.empty()) fail("Audio device not found: " + wantedDevice);
+            if (matches.size() > 1)
+                fail(QString("Multiple audio devices match “%1”; pass audio.device_id from get_environment to choose one unambiguously").arg(wantedDevice));
+            chosen = matches.front();
+            preferredId = chosen->id;
+            requirePreferredId = true;
         }
         if (!chosen) fail("No available audio output device found");
         unsigned channels = settings.value("audio/channels", 2).toUInt();
@@ -1328,7 +1388,7 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
                 fail("audio.buffer must be an integer between 32 and 8192 samples");
             buffer = static_cast<unsigned>(v.toDouble());
         }
-        plannedAudio = PlannedAudio{api, chosen->name, channels, buffer};
+        plannedAudio = PlannedAudio{api, chosen->name, channels, buffer, preferredId, requirePreferredId};
     }
 
     if (a.contains("midi")) {
@@ -1402,7 +1462,8 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
         fail(reason + " (already applied: " + applied.join(", ") + ")");
     };
     if (plannedAudio) {
-        if (!c_.configureAudioByName(plannedAudio->api, plannedAudio->name, plannedAudio->channels, plannedAudio->buffer))
+        if (!c_.configureAudioByName(plannedAudio->api, plannedAudio->name, plannedAudio->channels, plannedAudio->buffer,
+                                     plannedAudio->preferredId, plannedAudio->requirePreferredId))
             failPartial(c_.status);
         applied << "audio";
     }
@@ -1697,7 +1758,8 @@ QJsonObject McpServer::importStatus() const {
     return {{"job_id", importId_}, {"state", importState_}, {"error", importError_}, {"assets", assets}};
 }
 
-void McpServer::callTool(const QString& name, const QJsonObject& a, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish) {
+void McpServer::callTool(const QString& name, const QJsonObject& a, const QString& bearerToken,
+                         std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish) {
     try {
         QJsonObject schema;
         for (const auto& t : tools()) if (t.toObject()["name"] == name) schema = t.toObject()["inputSchema"].toObject();
@@ -1752,6 +1814,7 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, std::shared_
         importCancelled_ = std::make_shared<std::atomic<bool>>(false);
         importId_ = newId(); importState_ = "preparing"; importError_.clear(); imported_.clear();
         importShowEpoch_ = c_.showEpoch();
+        importOwnerBearer_ = bearerToken;
         const quint64 jobGen = generation_;
         const quint64 jobEditGen = editGeneration_;
         const quint64 jobShowEpoch = importShowEpoch_;
@@ -1759,9 +1822,17 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, std::shared_
         const auto importCancelled = importCancelled_;
         struct Prepared { std::vector<MediaAsset> assets; QString error; };
         auto* watcher = new QFutureWatcher<Prepared>(this); const auto job = importId_;
-        connect(watcher, &QFutureWatcher<Prepared>::finished, this, [this, watcher, job, jobGen, jobEditGen, jobShowEpoch] {
+        connect(watcher, &QFutureWatcher<Prepared>::finished, this, [this, watcher, job, jobGen, jobEditGen, jobShowEpoch, importCancelled] {
             const auto prepared = watcher->result(); watcher->deleteLater();
             if (job != importId_ || generation_ != jobGen) return;
+            if (importCancelled->load()) {
+                imported_.clear();
+                if (importState_ == "preparing") {
+                    importState_ = "cancelled";
+                    if (importError_.isEmpty()) importError_ = "Import cancelled";
+                }
+                return;
+            }
             if (c_.showEpoch() != jobShowEpoch) {
                 imported_.clear();
                 importState_ = "cancelled";
@@ -1847,9 +1918,23 @@ void McpServer::dispatch(const QJsonObject& request, const QString& bearerToken,
     QByteArray extraHeaders;
     if (method == "initialize") {
         if (!params["protocolVersion"].isString() || !params["capabilities"].isObject() || !params["clientInfo"].isObject()) { wrappedFinish(QJsonObject{{"jsonrpc", "2.0"}, {"id", id}, {"error", QJsonObject{{"code", -32602}, {"message", "Invalid initialization parameters"}}}}); return; }
-        if (issuedSessions_.size() >= 256) issuedSessions_.erase(issuedSessions_.begin());
+        constexpr int maxSessionsPerBearer = 16;
+        constexpr int maxTotalSessions = 256;
+        auto& perBearer = bearerSessions_[bearerToken];
+        while (perBearer.size() >= maxSessionsPerBearer) {
+            const QString oldest = perBearer.takeFirst();
+            issuedSessions_.remove(oldest);
+            sessionOrder_.removeAll(oldest);
+        }
+        while (sessionOrder_.size() >= maxTotalSessions) {
+            const QString oldest = sessionOrder_.takeFirst();
+            const QString owner = issuedSessions_.take(oldest);
+            if (!owner.isEmpty()) bearerSessions_[owner].removeAll(oldest);
+        }
         const QString sessionHeader = newId();
         issuedSessions_.insert(sessionHeader, bearerToken);
+        perBearer.append(sessionHeader);
+        sessionOrder_.append(sessionHeader);
         extraHeaders = "Mcp-Session-Id: " + sessionHeader.toUtf8() + "\r\n";
         result = {{"protocolVersion", versions.contains(params["protocolVersion"].toString()) ? params["protocolVersion"] : QJsonValue(versions.front())},
             {"capabilities", QJsonObject{{"tools", QJsonObject{}}, {"resources", QJsonObject{}}}},
@@ -1861,7 +1946,7 @@ void McpServer::dispatch(const QJsonObject& request, const QString& bearerToken,
         if (!params["name"].isString() || (params.contains("arguments") && !params["arguments"].isObject())) { wrappedFinish(QJsonObject{{"jsonrpc", "2.0"}, {"id", id}, {"error", QJsonObject{{"code", -32602}, {"message", "Invalid tool call"}}}}); return; }
         bool found = false; for (const auto& t : tools()) found |= t.toObject()["name"] == params["name"];
         if (!found) { wrappedFinish(QJsonObject{{"jsonrpc", "2.0"}, {"id", id}, {"error", QJsonObject{{"code", -32602}, {"message", "Unknown tool"}}}}); return; }
-        callTool(params["name"].toString(), params["arguments"].toObject(), std::move(cancelled), [id, wrappedFinish = std::move(wrappedFinish)](QJsonObject toolRes) {
+        callTool(params["name"].toString(), params["arguments"].toObject(), bearerToken, std::move(cancelled), [id, wrappedFinish = std::move(wrappedFinish)](QJsonObject toolRes) {
             wrappedFinish({{"jsonrpc", "2.0"}, {"id", id}, {"result", toolRes}});
         });
         return;
@@ -1952,8 +2037,10 @@ void McpServer::acceptConnection() {
             }
             const QByteArray auth = headers.value("authorization");
             const QString bearer = auth.startsWith("Bearer ") ? QString::fromUtf8(auth.mid(7)) : QString();
-            const bool validBearer = !bearer.isEmpty() && ((!token_.isEmpty() && bearer == token_) || chatTokens_.contains(bearer));
+            const bool isPrimaryToken = !token_.isEmpty() && bearer == token_;
+            const bool validBearer = !bearer.isEmpty() && (isPrimaryToken || chatTokens_.contains(bearer));
             if (!validBearer) { respond(401, "Unauthorized"); return; }
+            if (isPrimaryToken) externallyShared_ = true;
             socket->setProperty("savBearer", bearer);
             if (requestLine[1] != "/mcp") { respond(404, "Not Found"); return; }
             if (requestLine[0] != "POST") { respond(405, "Method Not Allowed", {}, "Allow: POST\r\n"); return; }
@@ -1976,13 +2063,25 @@ void McpServer::acceptConnection() {
             }
             *done = true;
             const auto reqObj = doc.object();
-            const QString toolName = reqObj["method"].toString() == "tools/call" ? reqObj["params"].toObject()["name"].toString() : QString();
+            const QString reqMethod = reqObj["method"].toString();
+            const QString toolName = reqMethod == "tools/call" ? reqObj["params"].toObject()["name"].toString() : QString();
             const bool longFileJob = toolName == "project_action" || toolName == "relink_media";
             timeout->start(longFileJob ? (30 * 60 * 1000) : 60000);
-            // Only honor Mcp-Session-Id values previously issued by this server to the same bearer token.
-            const QString rawSession = QString::fromUtf8(headers.value("mcp-session-id"));
-            const QString clientScope = (!rawSession.isEmpty() && issuedSessions_.value(rawSession) == bearer) ? rawSession : QString();
+            // Streamable HTTP session management: reject expired/unknown/mismatched Mcp-Session-Id
+            // on non-initialize requests with HTTP 404 so clients reinitialize instead of losing cancellation.
+            const QString rawSession = QString::fromUtf8(headers.value("mcp-session-id")).trimmed();
             const auto reqId = reqObj["id"];
+            QString clientScope;
+            if (!rawSession.isEmpty() && reqMethod != "initialize") {
+                if (issuedSessions_.value(rawSession) != bearer) {
+                    const QJsonObject sessionErr{{"jsonrpc", "2.0"},
+                        {"id", reqId.isUndefined() ? QJsonValue(QJsonValue::Null) : reqId},
+                        {"error", QJsonObject{{"code", -32001}, {"message", "Session not found or expired; reinitialize the MCP session"}}}};
+                    respond(404, "Not Found", QJsonDocument(sessionErr).toJson(QJsonDocument::Compact));
+                    return;
+                }
+                clientScope = rawSession;
+            }
             if (!clientScope.isEmpty() && !reqId.isUndefined()) {
                 const QString idPart = reqId.isString() ? ("s:" + reqId.toString())
                     : (reqId.isDouble() && std::floor(reqId.toDouble()) == reqId.toDouble() ? ("n:" + QString::number(reqId.toDouble(), 'f', 0)) : QString());

@@ -51,7 +51,11 @@ public:
     Frame effectivePosition() const;
     bool playInFlight() const { return lastPlaySeq_ > transport.commandsApplied(); }
     bool configureAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer);
-    bool configureAudioByName(RtAudio::Api api, const QString& wantedName, unsigned channels, unsigned buffer);
+    bool configureAudioByName(RtAudio::Api api, const QString& wantedName, unsigned channels, unsigned buffer,
+                              unsigned preferredId = 0, bool requirePreferredId = false);
+    RtAudio::Api activeAudioApi() const { return api_; }
+    unsigned activeAudioDeviceId() const { return deviceId_; }
+    bool audioConfigured() const { return configured_; }
     bool configureMidi(int port);
     bool configureMidiByName(const QString& portName);
     bool testMidi(const std::vector<unsigned char>& message);
