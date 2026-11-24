@@ -149,7 +149,19 @@ void Transport::apply(Command command, PendingResumeMidi& pendingResume) noexcep
     }
     switch (command.action) {
     case Action::Play: {
-        if (state_ == State::Playing || (position_ >= show_->duration && state_ != State::Held)) break;
+        if (state_ == State::Playing) {
+            // If an operator (or higher-privilege domain) also pressed Play in the same batch after
+            // an agent resumed from a hold, promote the pending resume so late agent revocation
+            // cannot roll back the operator's Play.
+            if (pendingResume.active &&
+                ((command.source == CommandSource::Operator && pendingResume.source != CommandSource::Operator) ||
+                 (command.source == CommandSource::ExternalAgent && pendingResume.source == CommandSource::ChatAgent))) {
+                pendingResume.source = command.source;
+                pendingResume.sourceEpoch = command.sourceEpoch;
+            }
+            break;
+        }
+        if (position_ >= show_->duration && state_ != State::Held) break;
         const State prevState = state_;
         const int prevHeldMarker = heldMarker_;
         const bool wasHeld = state_ == State::Held;
