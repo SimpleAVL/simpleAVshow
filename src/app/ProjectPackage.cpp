@@ -126,7 +126,7 @@ struct PackageDirectory : QTemporaryDir {
     PackageDirectory() : QTemporaryDir(QDir::tempPath() + "/simpleavshow-package-XXXXXX") {}
     ~PackageDirectory() {
         if (!isValid()) return;
-        lock.unlock();
+        lock.unlock(); setAutoRemove(false); // Removed here, once.
         if (!remove()) { const std::lock_guard guard(pendingMutex); pendingRemovals.push_back(path()); }
     }
     QLockFile lock{filePath(".lock")};
