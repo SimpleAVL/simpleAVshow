@@ -44,10 +44,11 @@ double mediaOrigin(const AVFormatContext* format) {
 // Local files only: no format may reach the network on its own (an .sdp or HLS playlist would).
 AVDictionary* localOnly() { AVDictionary* options = nullptr; av_dict_set(&options, "protocol_whitelist", "file", 0); return options; }
 // A media file opened by the app for FFmpeg rather than through FFmpeg's file protocol. On Windows that
-// protocol's C runtime open denies deleting or renaming the file while it is open, and a show streams
-// from its originals for hours (and video readers hold theirs), so this opens with read, write and
-// delete sharing like other readers: replacing or removing a playing file then surfaces as a changed or
-// missing source, and package extractions can be cleaned up. Other systems read through POSIX calls.
+// protocol's C runtime open denies deleting or renaming the file while it is open. Streamed audio stays
+// open for the whole show, and streaming is the mode for building one, where an editor re-exporting a
+// stem (often by renaming a new file over it) must not fail with "file in use"; so this opens with read,
+// write and delete sharing, and a replaced or removed file surfaces as a changed or missing source.
+// Performances use prepared caches, which do not read the original. Other systems use POSIX calls.
 class SourceFile {
 public:
     explicit SourceFile(const QString& path) {
@@ -131,12 +132,17 @@ struct Input {
         av_packet_free(&packet); av_frame_free(&frame);
         avcodec_free_context(&codec); avformat_close_input(&format);
     }
-    void open(const QString& path) {
+    // Sharing::Lock keeps FFmpeg's own file protocol, which on Windows stops the file from being deleted
+    // or renamed while open: playing videos stay protected during a show, as before streaming existed.
+    enum class Sharing { AllowReplace, Lock };
+    void open(const QString& path, Sharing sharing = Sharing::AllowReplace) {
         const auto* detected = identify(path);
-        file = std::make_unique<SourceFile>(path);
-        format = avformat_alloc_context();
-        if (!format) throw std::bad_alloc();
-        format->pb = file->io();
+        if (sharing == Sharing::AllowReplace) {
+            file = std::make_unique<SourceFile>(path);
+            format = avformat_alloc_context();
+            if (!format) throw std::bad_alloc();
+            format->pb = file->io();
+        }
         AVDictionary* options = localOnly();
         const int opened = avformat_open_input(&format, path.toUtf8().constData(), detected, &options); av_dict_free(&options);
         checked(opened, "Open media");
@@ -584,7 +590,7 @@ QImage VideoReader::imageAt(double time) {
 void VideoReader::run() {
     struct Stopped {};
     try {
-        Input input; input.open(path_);
+        Input input; input.open(path_, Input::Sharing::Lock);
         const int index = av_find_best_stream(input.format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
         checked(index, "Find video stream"); input.decoder(index);
         auto* stream = input.format->streams[index];
