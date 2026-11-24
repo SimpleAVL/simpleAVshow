@@ -554,26 +554,30 @@ private:
     // concurrent opens cannot claim the same one. If every other source is busy, the budget is
     // exceeded for now.
     void makeRoom() const {
-        // Declared before the locks: evicted decoders close after they are released, since closing a
-        // file can stall on a share while the UI's sweep waits for the registry. Each still counts
+        // Evicted decoders close on a thread of their own: closing a file can stall on a share, and this
+        // source's lock (held by the caller) or the registry's must not wait for that. Each still counts
         // against the budget until it closes.
-        std::vector<std::unique_ptr<Reader>> evicted;
-        auto& r = registry();
-        const std::lock_guard lock(r.mutex);
-        while (r.open.load() >= openBudget + evicted.size()) {
-            const StreamStorage* owner = nullptr; std::size_t index = 0;
-            std::vector<std::unique_lock<std::mutex>> held;
-            for (const auto* storage : r.storages) {
-                if (storage != this) { std::unique_lock other(storage->mutex_, std::try_to_lock); if (!other) continue; held.push_back(std::move(other)); }
-                for (std::size_t i = 0; i < storage->readers_.size(); ++i)
-                    if (!owner || storage->readers_[i]->used < owner->readers_[index]->used) { owner = storage; index = i; }
+        auto evicted = std::make_shared<std::vector<std::unique_ptr<Reader>>>();
+        {
+            auto& r = registry();
+            const std::lock_guard lock(r.mutex);
+            while (r.open.load() >= openBudget + evicted->size()) {
+                const StreamStorage* owner = nullptr; std::size_t index = 0;
+                std::vector<std::unique_lock<std::mutex>> held;
+                for (const auto* storage : r.storages) {
+                    if (storage != this) { std::unique_lock other(storage->mutex_, std::try_to_lock); if (!other) continue; held.push_back(std::move(other)); }
+                    for (std::size_t i = 0; i < storage->readers_.size(); ++i)
+                        if (!owner || storage->readers_[i]->used < owner->readers_[index]->used) { owner = storage; index = i; }
+                }
+                if (!owner) break;
+                evicted->reserve(evicted->size() + 1);
+                const auto at = owner->readers_.begin() + static_cast<std::ptrdiff_t>(index);
+                evicted->push_back(std::move(*at)); owner->readers_.erase(at);
             }
-            if (!owner) break;
-            evicted.reserve(evicted.size() + 1);
-            const auto at = owner->readers_.begin() + static_cast<std::ptrdiff_t>(index);
-            evicted.push_back(std::move(*at)); owner->readers_.erase(at);
+            ++r.open;
         }
-        ++r.open;
+        if (evicted->empty()) return;
+        try { std::thread([evicted] { evicted->clear(); }).detach(); } catch (...) {} // Otherwise they close here.
     }
 };
 
