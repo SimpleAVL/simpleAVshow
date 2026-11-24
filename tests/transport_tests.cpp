@@ -426,6 +426,30 @@ int main() {
             t.command({Action::StopAll, 0, CommandSource::Operator, 0});
             checkedRender(t, out.data(), 64, 2);
             expect(t.state() == State::Stopped && t.position() == 900, "operator stop preserves final valid seek position");
+        }},
+        {"agent play start tags start-frame arrival MIDI with source epoch and blocks revoked starts", [] {
+            auto p = show(false); p->duration = 2000;
+            p->markers.push_back({"intro", "Intro", 0, false, MidiTiming::Arrival, {0x90, 64, 100}});
+            Transport t; t.configure(p);
+            std::vector<float> out(64 * 2);
+            const auto chatEp = t.chatAgentEpoch();
+            t.command({Action::Play, 0, CommandSource::ChatAgent, chatEp});
+            t.invalidateChatAgentCommands();
+            checkedRender(t, out.data(), 64, 2);
+            MidiEvent ev;
+            expect(t.state() == State::Stopped, "revoked agent play does not start playback");
+            expect(!t.takeMidi(ev), "revoked agent play does not fire arrival MIDI");
+            const auto freshEp = t.chatAgentEpoch();
+            t.command({Action::Play, 0, CommandSource::ChatAgent, freshEp});
+            checkedRender(t, out.data(), 64, 2);
+            expect(t.state() == State::Playing, "authorized agent play starts playback");
+            expect(t.takeMidi(ev) && ev.source == CommandSource::ChatAgent && ev.sourceEpoch == freshEp,
+                "start-frame arrival MIDI carries the initiating agent epoch");
+            // Same-batch Operator StopAll cannot be defeated by a trailing agent Play in the same callback.
+            t.command({Action::StopAll, 0, CommandSource::Operator, 0});
+            t.command({Action::Play, 0, CommandSource::ChatAgent, freshEp});
+            checkedRender(t, out.data(), 64, 2);
+            expect(t.state() == State::Stopped, "same-batch agent play cannot defeat operator stop");
         }}
     };
     for (const auto& [name, test] : tests) {

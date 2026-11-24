@@ -270,6 +270,64 @@ bool MidiOutput::open(int port, QString& error) {
 #endif
 }
 
+bool MidiOutput::hasPortByName(const QString& wanted) const {
+    if (wanted.isEmpty()) return false;
+#ifdef Q_OS_MACOS
+    const ItemCount count = MIDIGetNumberOfDestinations();
+    int bestRank = 99;
+    int matchCount = 0;
+    for (ItemCount i = 0; i < count; ++i) {
+        const MIDIEndpointRef ep = MIDIGetDestination(i);
+        const QString primary = coreMidiEndpointName(ep);
+        int rank = 99;
+        if (primary == wanted) {
+            rank = 0;
+        } else if (primary.compare(wanted, Qt::CaseInsensitive) == 0) {
+            rank = 1;
+        } else {
+            for (const auto& alias : coreMidiEndpointAliases(ep)) {
+                if (alias == wanted) { rank = std::min(rank, 2); break; }
+                if (alias.compare(wanted, Qt::CaseInsensitive) == 0) rank = std::min(rank, 3);
+            }
+        }
+        if (rank < bestRank) { bestRank = rank; matchCount = 1; }
+        else if (rank == bestRank && rank < 99) ++matchCount;
+    }
+    return bestRank < 99 && (matchCount == 1 || (connected() && coreMidi_ && coreMidiEndpointExists(coreMidi_->endpoint)));
+#elif defined(Q_OS_WIN)
+    const UINT count = midiOutGetNumDevs();
+    int bestRank = 99;
+    int matchCount = 0;
+    for (UINT i = 0; i < count; ++i) {
+        MIDIOUTCAPSW caps{};
+        if (midiOutGetDevCapsW(i, &caps, sizeof(caps)) != MMSYSERR_NOERROR) continue;
+        const QString numbered = winMmPortName(i, caps);
+        const QString rawName = QString::fromWCharArray(caps.szPname);
+        int rank = 99;
+        if (numbered == wanted) rank = 0;
+        else if (numbered.compare(wanted, Qt::CaseInsensitive) == 0) rank = 1;
+        else if (rawName == wanted) rank = 2;
+        else if (rawName.compare(wanted, Qt::CaseInsensitive) == 0) rank = 3;
+        if (rank < bestRank) { bestRank = rank; matchCount = 1; }
+        else if (rank == bestRank && rank < 99) ++matchCount;
+    }
+    return bestRank < 99 && (matchCount == 1 || connected());
+#else
+    try {
+        RtMidiOut probe;
+        const unsigned count = probe.getPortCount();
+        int exact = 0, ci = 0;
+        for (unsigned i = 0; i < count; ++i) {
+            const QString portName = QString::fromStdString(probe.getPortName(i));
+            if (portName == wanted) ++exact;
+            else if (portName.compare(wanted, Qt::CaseInsensitive) == 0) ++ci;
+        }
+        const int matches = exact > 0 ? exact : ci;
+        return matches == 1 || (matches > 1 && connected());
+    } catch (...) { return false; }
+#endif
+}
+
 bool MidiOutput::openByName(const QString& wanted, QString& error) {
 #ifdef Q_OS_MACOS
     // Resolve across all destinations first, ranking matches strictly (exact display name > CI display

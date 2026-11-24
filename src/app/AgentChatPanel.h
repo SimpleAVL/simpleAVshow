@@ -60,6 +60,8 @@ private:
     bool lastCanEdit_ = true;
     bool shuttingDown_ = false;
     bool renderPending_ = false;
+    bool logsPending_ = false;
+    QString pendingLogs_;
     QString chatMcpToken_;
 
     QLabel* statusLabel_ = nullptr;
@@ -79,6 +81,7 @@ private:
     QPlainTextEdit* promptInput_ = nullptr;
     QPushButton* sendButton_ = nullptr;
     QTimer renderTimer_;
+    QTimer logsTimer_;
 
     void populatePresets();
     void updatePresetUi();
@@ -89,6 +92,7 @@ private:
     void sendPromptText(const QString& userText);
     void scheduleRender();
     void renderTranscript();
+    void flushLogs();
     void appendEntry(ChatEntry entry);
     void addPermissionCard(const AcpPermissionRequest& request);
     void clearPermissionCards();

@@ -288,6 +288,9 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
     renderTimer_.setSingleShot(true);
     renderTimer_.setInterval(60);
     connect(&renderTimer_, &QTimer::timeout, this, &AgentChatPanel::renderTranscript);
+    logsTimer_.setSingleShot(true);
+    logsTimer_.setInterval(100);
+    connect(&logsTimer_, &QTimer::timeout, this, &AgentChatPanel::flushLogs);
 
     populatePresets();
 
@@ -409,21 +412,15 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         scheduleRender();
     });
     connect(&acp_, &AcpClient::stderrReceived, this, [this](const QString& text) {
-        constexpr int maxLogChars = 64 * 1024;
+        constexpr qsizetype maxPendingLogs = 64 * 1024;
         constexpr qsizetype maxChunkChars = 4096;
         QString chunk = text.size() > maxChunkChars ? (text.left(maxChunkChars) + "…\n") : text;
         if (!chunk.contains('\n') && chunk.size() > 512) chunk.append('\n');
-        auto* doc = logsView_->document();
-        if (doc->characterCount() + chunk.size() > maxLogChars) {
-            QTextCursor trim(doc);
-            trim.movePosition(QTextCursor::Start);
-            trim.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor,
-                std::min(doc->characterCount(), (doc->characterCount() + static_cast<int>(chunk.size())) - maxLogChars / 2));
-            trim.removeSelectedText();
-        }
-        logsView_->moveCursor(QTextCursor::End);
-        logsView_->insertPlainText(chunk);
-        logsView_->moveCursor(QTextCursor::End);
+        pendingLogs_ += chunk;
+        if (pendingLogs_.size() > maxPendingLogs)
+            pendingLogs_ = pendingLogs_.right(maxPendingLogs);
+        logsPending_ = true;
+        if (!c_.showMode && !logsTimer_.isActive()) logsTimer_.start();
     });
     connect(&acp_, &AcpClient::errorOccurred, this, [this](const QString& message) {
         clearPermissionCards();
@@ -458,8 +455,9 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
             }
             clearPermissionCards();
             appendEntry({ChatEntry::Kind::System, {}, {}, {}, "Cancelled pending permission requests because Show mode became active.", {}, {}});
-        } else if (!c_.showMode && renderPending_) {
-            scheduleRender();
+        } else if (!c_.showMode) {
+            if (renderPending_) scheduleRender();
+            if (logsPending_ && !logsTimer_.isActive()) logsTimer_.start();
         }
         updateControls();
     });
@@ -484,6 +482,9 @@ void AgentChatPanel::shutdown() {
     if (shuttingDown_) return;
     shuttingDown_ = true;
     renderTimer_.stop();
+    logsTimer_.stop();
+    pendingLogs_.clear();
+    logsPending_ = false;
     acp_.disconnect(this);
     mcp_.disconnect(this);
     c_.disconnect(this);
@@ -659,6 +660,9 @@ void AgentChatPanel::toggleConnection() {
     mcpConfig.proxyExecutable = QCoreApplication::applicationFilePath();
 
     logsView_->clear();
+    pendingLogs_.clear();
+    logsPending_ = false;
+    logsTimer_.stop();
     connecting_ = true;
     acp_.connectToAgent(program, args, currentWorkingDirectory(), mcpConfig);
     connecting_ = false;
@@ -764,6 +768,25 @@ void AgentChatPanel::showEvent(QShowEvent* event) {
         renderPending_ = false;
         renderTranscript();
     }
+}
+
+void AgentChatPanel::flushLogs() {
+    if (c_.showMode || pendingLogs_.isEmpty()) return;
+    constexpr int maxLogChars = 64 * 1024;
+    const QString chunk = std::move(pendingLogs_);
+    pendingLogs_.clear();
+    logsPending_ = false;
+    auto* doc = logsView_->document();
+    if (doc->characterCount() + chunk.size() > maxLogChars) {
+        QTextCursor trim(doc);
+        trim.movePosition(QTextCursor::Start);
+        trim.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor,
+            std::min(doc->characterCount(), (doc->characterCount() + static_cast<int>(chunk.size())) - maxLogChars / 2));
+        trim.removeSelectedText();
+    }
+    logsView_->moveCursor(QTextCursor::End);
+    logsView_->insertPlainText(chunk);
+    logsView_->moveCursor(QTextCursor::End);
 }
 
 void AgentChatPanel::scheduleRender() {

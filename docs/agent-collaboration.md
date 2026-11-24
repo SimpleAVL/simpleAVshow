@@ -50,6 +50,7 @@ The copied configuration looks like this (using the live URL and token from the 
 - **Local to this window only:** The server binds to `127.0.0.1` on your machine, so remote/cloud-hosted agents cannot reach it.
 - **Session-only credentials:** The server starts **off** on every app launch. Disabling it or restarting SimpleAVShow generates a brand-new bearer token, so update your client's config when reconnecting.
 - **Protocol support:** Implements MCP versions `2025-11-25`, `2025-06-18`, and `2025-03-26` using Streamable HTTP JSON responses and polling (no server-push notifications or standalone SSE stream). Clients that only speak stdio need an HTTP-to-stdio bridge.
+- **Process cleanup (ACP):** Disconnecting or closing SimpleAVShow stops the built-in ACP agent and its child process tree (using a Job Object on Windows and the agent's process group on macOS/Linux; helper daemons that explicitly detach into a new POSIX session may outlive the app).
 
 ---
 
@@ -93,7 +94,7 @@ The top-bar button always tells you what the agent can do right now: **Agent · 
 | `relink_media` | Searches a local folder recursively by file name to relink offline assets in one undo step. |
 | `configure_outputs` | Configures audio driver/device/channels/buffer, MIDI output port, audience display, or sends a single test MIDI message (stopped, outside Show mode). |
 | `configure_remote` | Starts/stops the phone remote, sets its port, or rotates its secret key (outside Show mode). |
-| `project_action` | Saves `.savshow`, saves as, exports `.savpack`, creates a new show, opens the demo, or opens an existing show/package (refuses to discard unsaved edits unless `discard_unsaved: true`). |
+| `project_action` | Saves `.savshow`, saves as, exports `.savpack`, creates a new show, opens the demo, or opens an existing show/package (refuses to overwrite existing files on `save_as`/`export_package` unless `overwrite: true`, and refuses to discard unsaved edits unless `discard_unsaved: true`). |
 | `transport_control` | Rehearsal playback control (`play`, `pause`, `continue`, `stop_all`, `seek`); strictly blocked in Show mode. |
 
 ### Key conventions for agent callers

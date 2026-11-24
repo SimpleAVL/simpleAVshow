@@ -74,11 +74,11 @@ public:
     QImage composeAt(Frame position, QSize maximum = QSize(), const QMap<std::string, QImage>* videoFrames = nullptr) const {
         return composeProjectAt(project, position, maximum, videoFrames);
     }
-    bool save(QString target);
+    bool save(QString target, bool allowOverwrite = true);
     // Saving an opened package or generated media copies files; MainWindow runs that part on a worker.
     bool savingCopiesMedia() const;
     static QString mediaDirectory(const QString& target);
-    bool commitSave(Project candidate, QString target);
+    bool commitSave(Project candidate, QString target, bool allowOverwrite = true);
     void report(QString message);
     // Sidecar for crash recovery: next to the show, or in app data while untitled.
     QString autosavePath() const;
@@ -99,7 +99,7 @@ private:
     std::map<std::string, std::unique_ptr<VideoReader>> videos_;
     std::shared_ptr<const Show> armed_;
     std::thread midiThread_;
-    std::atomic<bool> midiStop_{true}, showModeAtomic_{false};
+    std::atomic<bool> midiStop_{true}, showModeAtomic_{false}, testMidiInFlight_{false};
     std::atomic<std::uint64_t> testMidiGen_{1};
     struct PendingTestMidi {
         std::vector<unsigned char> bytes;
@@ -124,7 +124,7 @@ private:
         std::uint64_t seq = 0;
         Command command;
     };
-    std::uint64_t commandsPosted_ = 0;
+    std::uint64_t commandsPosted_ = 0, operatorStopSeq_ = 0;
     std::deque<PendingTransportCommand> pendingCommands_;
     std::pair<State, Frame> predictTransport(bool* hasPendingPlay = nullptr) const;
     bool postTransportCommand(Command cmd);

@@ -18,6 +18,9 @@
 #include <cerrno>
 #include <csignal>
 #include <unistd.h>
+#ifdef Q_OS_LINUX
+#include <sys/prctl.h>
+#endif
 #endif
 
 namespace sav {
@@ -26,11 +29,21 @@ struct AcpClient::ProcessTreeHandle {
     qint64 pid = 0;
 #ifdef Q_OS_WIN
     HANDLE job = nullptr;
+#elif defined(Q_OS_UNIX)
+    bool ownsProcessGroup = false;
 #endif
     bool closed = false;
 
     void attach(qint64 childPid) {
         pid = childPid;
+#if defined(Q_OS_UNIX)
+        // Verify setpgid(0, 0) succeeded in the child before ever signaling -pid.
+        // Note: on POSIX, process-group signals tear down the agent and any children remaining
+        // in its process group (e.g. shell wrappers and --mcp-proxy), while a helper that
+        // explicitly detaches into a new session/process group (setsid/setpgid) is outside the
+        // group; its SimpleAVShow MCP access is still terminated immediately by bearer revocation.
+        ownsProcessGroup = pid > 0 && ::getpgid(static_cast<pid_t>(pid)) == static_cast<pid_t>(pid);
+#endif
     }
 
 #ifdef Q_OS_WIN
@@ -113,7 +126,7 @@ struct AcpClient::ProcessTreeHandle {
 
     bool groupAlive() const {
 #if defined(Q_OS_UNIX)
-        if (closed || pid <= 0) return false;
+        if (closed || !ownsProcessGroup || pid <= 0) return false;
         return ::kill(-static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
 #else
         return false;
@@ -122,7 +135,7 @@ struct AcpClient::ProcessTreeHandle {
 
     void terminateTree() {
 #if defined(Q_OS_UNIX)
-        if (!closed && pid > 0) ::kill(-static_cast<pid_t>(pid), SIGTERM);
+        if (!closed && ownsProcessGroup && pid > 0) ::kill(-static_cast<pid_t>(pid), SIGTERM);
 #endif
     }
 
@@ -130,7 +143,7 @@ struct AcpClient::ProcessTreeHandle {
 #ifdef Q_OS_WIN
         if (job && !closed) TerminateJobObject(job, 1);
 #elif defined(Q_OS_UNIX)
-        if (!closed && pid > 0) ::kill(-static_cast<pid_t>(pid), SIGKILL);
+        if (!closed && ownsProcessGroup && pid > 0) ::kill(-static_cast<pid_t>(pid), SIGKILL);
 #endif
     }
 
@@ -496,6 +509,8 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
 #endif
     stopping_ = false;
     cancelling_ = false;
+    stdoutDrainScheduled_ = false;
+    stderrDrainScheduled_ = false;
     agentName_.clear(); agentVersion_.clear(); sessionId_.clear(); lastError_.clear();
     agentSupportsHttpMcp_ = false; agentSupportsSessionClose_ = false; usedHttpMcp_ = false;
     stdoutBuffer_.clear(); pending_.clear(); pendingPermissions_.clear();
@@ -511,7 +526,12 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
     });
 #elif defined(Q_OS_UNIX)
     // Put the agent in its own process group so Disconnect/shutdown tears down wrapper/grandchild processes too.
-    process_->setChildProcessModifier([] { ::setpgid(0, 0); });
+    process_->setChildProcessModifier([] {
+        ::setpgid(0, 0);
+#ifdef Q_OS_LINUX
+        ::prctl(PR_SET_PDEATHSIG, SIGTERM);
+#endif
+    });
 #endif
     // Launch the agent executable from a trusted application directory so Windows .cmd shims
     // cannot resolve runtimes from an untrusted show folder; pass the show directory via ACP session/new cwd.
@@ -559,11 +579,7 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
         sendRequest("initialize", params, PendingKind::Initialize);
     });
     connect(process_, &QProcess::readyReadStandardOutput, this, &AcpClient::handleStdout);
-    connect(process_, &QProcess::readyReadStandardError, this, [this] {
-        if (!process_) return;
-        const QString text = QString::fromUtf8(process_->readAllStandardError());
-        if (!text.isEmpty()) emit stderrReceived(text);
-    });
+    connect(process_, &QProcess::readyReadStandardError, this, &AcpClient::handleStderr);
     connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         if (stopping_ || !process_) return;
         if (error == QProcess::FailedToStart) failConnection("Failed to start ACP agent: " + process_->errorString());
@@ -708,15 +724,37 @@ void AcpClient::sendErrorResponse(const QJsonValue& id, int code, const QString&
     sendJson({{"jsonrpc", "2.0"}, {"id", id}, {"error", QJsonObject{{"code", code}, {"message", message}}}});
 }
 
+void AcpClient::handleStderr() {
+    if (!process_) return;
+    constexpr qint64 maxStderrReadPerTurn = 16 * 1024;
+    process_->setReadChannel(QProcess::StandardError);
+    const QByteArray chunk = process_->read(maxStderrReadPerTurn);
+    const bool hasMore = process_->bytesAvailable() > 0;
+    process_->setReadChannel(QProcess::StandardOutput);
+    if (!chunk.isEmpty()) emit stderrReceived(QString::fromUtf8(chunk));
+    if (hasMore && !stderrDrainScheduled_) {
+        stderrDrainScheduled_ = true;
+        QTimer::singleShot(16, this, [this] {
+            stderrDrainScheduled_ = false;
+            handleStderr();
+        });
+    }
+}
+
 void AcpClient::handleStdout() {
     if (!process_) return;
     constexpr qsizetype maxStdoutBufferBytes = 4 * 1024 * 1024;
-    stdoutBuffer_.append(process_->readAllStandardOutput());
+    constexpr qint64 maxReadPerTurn = 64 * 1024;
+    constexpr int maxLinesPerTurn = 32;
+    process_->setReadChannel(QProcess::StandardOutput);
+    const QByteArray incoming = process_->read(maxReadPerTurn);
+    if (!incoming.isEmpty()) stdoutBuffer_.append(incoming);
     if (stdoutBuffer_.size() > maxStdoutBufferBytes * 2) {
         failConnection("ACP agent output exceeded maximum buffer size.");
         return;
     }
-    for (;;) {
+    int processedLines = 0;
+    while (processedLines < maxLinesPerTurn) {
         const qsizetype newline = stdoutBuffer_.indexOf('\n');
         if (newline < 0) {
             if (stdoutBuffer_.size() > maxStdoutBufferBytes) {
@@ -730,11 +768,20 @@ void AcpClient::handleStdout() {
         }
         QByteArray line = stdoutBuffer_.left(newline);
         stdoutBuffer_.remove(0, newline + 1);
+        ++processedLines;
         if (!line.isEmpty() && line.endsWith('\r')) line.chop(1);
         if (!line.trimmed().isEmpty()) {
             handleLine(line);
-            if (!process_) break;
+            if (!process_) return;
         }
+    }
+    if (process_ && (stdoutBuffer_.contains('\n') || process_->bytesAvailable() > 0) && !stdoutDrainScheduled_) {
+        stdoutDrainScheduled_ = true;
+        // Yield back to the Qt event loop so Stop All, audio timers, and Program output stay responsive.
+        QTimer::singleShot(0, this, [this] {
+            stdoutDrainScheduled_ = false;
+            handleStdout();
+        });
     }
 }
 

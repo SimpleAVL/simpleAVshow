@@ -15,6 +15,8 @@ public:
     MidiOutput& operator=(const MidiOutput&) = delete;
 
     QStringList ports();
+    // Non-opening check using the same alias/case ranking as openByName() (for preflight/hotplug).
+    bool hasPortByName(const QString& name) const;
     bool open(int port, QString& error);
     // Resolves and opens a port by name (binding directly to the endpoint identity on CoreMIDI).
     bool openByName(const QString& name, QString& error);

@@ -369,6 +369,11 @@ private slots:
         QCOMPARE(window.controller().transport.state(), State::Held);
         QVERIFY(!call(server, "transport_control", {{"action", "stop_all"}})["isError"].toBool());
         window.controller().transport.render(samples, 1, 2);
+        // A pending StopAll must block an agent Play until the audio callback applies the stop.
+        window.controller().transport.requestStopAll();
+        QVERIFY(call(server, "transport_control", {{"action", "play"}})["isError"].toBool());
+        window.controller().transport.render(samples, 1, 2);
+        QCOMPARE(window.controller().transport.state(), State::Stopped);
 
         // 7. list_media_files, relink_media, and project_action (save_as, export_package, open_project, new_show)
         QTemporaryDir dir;
@@ -394,8 +399,14 @@ private slots:
             if (p.toString().contains("program output is not open")) sawClosedDisplay = true;
         QVERIFY(sawClosedDisplay);
         QVERIFY(call(server, "project_action", {{"action", "save_as"}, {"path", dir.filePath("no-such-subdir/fail.savshow")}})["isError"].toBool());
+        // Existing files are protected from silent overwrite unless overwrite: true; ordinary save updates the current file.
+        QVERIFY(call(server, "project_action", {{"action", "save_as"}, {"path", showPath}})["isError"].toBool());
+        QVERIFY(!call(server, "project_action", {{"action", "save_as"}, {"path", showPath}, {"overwrite", true}})["isError"].toBool());
+        QVERIFY(!call(server, "project_action", {{"action", "save"}})["isError"].toBool());
         QVERIFY(!call(server, "project_action", {{"action", "export_package"}, {"path", packPath}})["isError"].toBool());
         QVERIFY(QFileInfo::exists(packPath));
+        QVERIFY(call(server, "project_action", {{"action", "export_package"}, {"path", packPath}})["isError"].toBool());
+        QVERIFY(!call(server, "project_action", {{"action", "export_package"}, {"path", packPath}, {"overwrite", true}})["isError"].toBool());
         // Show-replacing actions require expected_revision and reject stale revisions even with discard_unsaved: true.
         QVERIFY(call(server, "project_action", {{"action", "new_show"}, {"discard_unsaved", true}})["isError"].toBool());
         QVERIFY(call(server, "project_action", {{"action", "new_show"}, {"expected_revision", revision(server) - 1}, {"discard_unsaved", true}})["isError"].toBool());

@@ -22,7 +22,7 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
             configured_ = false; device.close();
             // Once the device is closed, force-stop directly so even a full command queue cannot leave Playing behind.
             transport.forceStopAll();
-            commandsPosted_ = 0; pendingCommands_.clear();
+            commandsPosted_ = 0; operatorStopSeq_ = 0; pendingCommands_.clear();
             report("Audio output " + reason + ". Press Play to reconnect, or choose another device in Outputs.");
             playbackProblem = status;
         }
@@ -179,7 +179,7 @@ void Controller::arm(Frame position) {
         if (asset != project.assets.cend() && asset->video && !asset->offline) clip.videoLength = frames(asset->duration);
     }
     armed_ = std::move(armed); transport.configure(armed_, position);
-    commandsPosted_ = 0; pendingCommands_.clear();
+    commandsPosted_ = 0; operatorStopSeq_ = 0; pendingCommands_.clear();
     if (keep && device.resume()) stall_.restart();
     else if (configured_) {
         QString error;
@@ -237,6 +237,7 @@ void Controller::startMidiThread() {
                         preSubmitCancel = std::make_shared<std::atomic<bool>>(false);
                         inFlightTestCancel_ = preSubmitCancel;
                         inFlightTestOwner_ = item.owner;
+                        testMidiInFlight_.store(true, std::memory_order_release);
                     }
                 }
                 if (!authorized) continue;
@@ -251,6 +252,7 @@ void Controller::startMidiThread() {
                 };
                 QString error;
                 const bool sent = midi.send(item.bytes, error, allowSubmit);
+                testMidiInFlight_.store(false, std::memory_order_release);
                 {
                     std::lock_guard lock(testMidiMutex_);
                     if (inFlightTestCancel_ == preSubmitCancel) {
@@ -280,6 +282,13 @@ bool Controller::routesValid() const {
 }
 bool Controller::play(CommandSource source) {
     if (busy) return false;
+    // Hold agent Play/Continue until the audio thread acknowledges any pending Operator Stop All
+    // so an agent cannot restart playback in the same callback as an Operator Stop All.
+    if (source != CommandSource::Operator &&
+        (transport.stopAllPending() || operatorStopSeq_ > transport.commandsApplied())) {
+        report("Operator Stop All is in progress; wait for playback to stop before starting.");
+        return false;
+    }
     cancelPendingTestMidi();
     const State state = transport.state();
     if (state != State::Playing) {
@@ -289,6 +298,11 @@ bool Controller::play(CommandSource source) {
         if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and press Play to retry, or reopen the project to rebuild changed or damaged caches."); playbackProblem = status; return false; }
         // Resuming a live show never blocks on picture or MIDI; it warns and continues.
         const bool resuming = state == State::Held || transport.asyncVoices() || (state == State::Paused && device.running());
+        if (!resuming && needsMidi() && testMidiInFlight_.load(std::memory_order_acquire)) {
+            report("Wait for the in-flight MIDI test message to finish before starting playback.");
+            playbackProblem = status;
+            return false;
+        }
         if (const auto missing = missingMedia(); !missing.isEmpty()) {
             report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
             playbackProblem = status;
@@ -301,7 +315,9 @@ bool Controller::play(CommandSource source) {
     const std::uint64_t ep = source == CommandSource::ExternalAgent ? transport.externalAgentEpoch()
         : source == CommandSource::ChatAgent ? transport.chatAgentEpoch() : 0;
     // Always enqueue Action::Play so a Play queued immediately after a Pause is honored in arrival order.
-    return postTransportCommand({Action::Play, 0, source, ep});
+    if (!postTransportCommand({Action::Play, 0, source, ep})) return false;
+    if (source == CommandSource::Operator) operatorStopSeq_ = 0;
+    return true;
 }
 bool Controller::pause(CommandSource source) {
     if (busy) return false;
@@ -335,6 +351,8 @@ bool Controller::stopAll(CommandSource source) {
         if (source != CommandSource::Operator) return false;
         // Emergency operator Stop All must never be rejected by a full bounded command queue.
         transport.requestStopAll();
+    } else if (source == CommandSource::Operator) {
+        operatorStopSeq_ = commandsPosted_;
     }
     if (!device.streamActive()) transport.render(nullptr, 0, 0);
     cancelPendingTestMidi();
@@ -423,7 +441,7 @@ QStringList Controller::preflight(bool probeHardware) {
         const QString remembered = QSettings().value("midi/port").toString();
         if (remembered.isEmpty()) problems << "MIDI cues need a destination. Choose one in Outputs.";
         else if (!probeHardware) problems << "MIDI destination “" + remembered + "” is not connected.";
-        else if (!midi.ports().contains(remembered)) problems << "MIDI destination “" + remembered + "” is missing.";
+        else if (!midi.hasPortByName(remembered)) problems << "MIDI destination “" + remembered + "” is missing.";
     }
     // Probe audio drivers only while nothing is playing and hardware probing is permitted.
     if (probeHardware && !device.running() && transport.state() != State::Playing && transport.state() != State::Held && !transport.asyncVoices()) {
@@ -447,7 +465,7 @@ QStringList Controller::missingMedia(bool probeFilesystem) const {
 }
 void Controller::watchMidi() {
     if (!needsMidi() || midiName_.isEmpty() || busy) return;
-    const bool present = midi.ports().contains(midiName_);
+    const bool present = midi.hasPortByName(midiName_);
     if (midi.connected() && !present) {
         stopMidiThread(); midi.close(); startMidiThread();
         report("MIDI destination “" + midiName_ + "” disconnected. Cues are skipped until it reconnects."); playbackProblem = status;
@@ -711,17 +729,17 @@ QString Controller::mediaDirectory(const QString& target) {
 bool Controller::savingCopiesMedia() const {
     return project.packageDirectory || std::any_of(project.assets.cbegin(), project.assets.cend(), [](const MediaAsset& a) { return a.path.isEmpty(); });
 }
-bool Controller::save(QString target) {
+bool Controller::save(QString target, bool allowOverwrite) {
     if (!canEdit()) return false;
-    try { Project candidate = project; materializeProjectMedia(candidate, mediaDirectory(target)); return commitSave(std::move(candidate), target); }
+    try { Project candidate = project; materializeProjectMedia(candidate, mediaDirectory(target)); return commitSave(std::move(candidate), target, allowOverwrite); }
     catch (const std::exception& e) { report("Save failed: " + QString::fromUtf8(e.what())); return false; }
 }
-bool Controller::commitSave(Project candidate, QString target) {
+bool Controller::commitSave(Project candidate, QString target, bool allowOverwrite) {
     try {
         const auto sourceDirectory = project.packageDirectory;
         const auto preSaveAssets = project.assets;
         const QString previous = path;
-        writeProject(candidate, target); project.assets = std::move(candidate.assets); bindAudio(project); project.packageDirectory.reset(); path = target; dirty = false; ++projectRevision_;
+        writeProject(candidate, target, allowOverwrite); project.assets = std::move(candidate.assets); bindAudio(project); project.packageDirectory.reset(); path = target; dirty = false; ++projectRevision_;
         // Rebase Undo/Redo history ONLY for assets actually materialized by this save whose
         // historical source identity still matches the pre-save asset (never overwrite relink history).
         // Check each snapshot against its OWN packageDirectory so a second save never deletes

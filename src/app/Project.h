@@ -30,7 +30,7 @@ void loadProjectMedia(Project& project, const std::function<bool()>& isCancelled
 Project readProject(const QString& path, const std::function<bool()>& isCancelled = {});
 // Shared manifest representation; an empty directory keeps absolute source paths.
 QJsonObject projectJson(const Project& project, const QString& directory = {});
-void writeProject(const Project& project, const QString& path);
+void writeProject(const Project& project, const QString& path, bool allowOverwrite = true);
 bool isProjectPackage(const QString& path);
 Project readProjectPackage(const QString& path, const std::function<bool()>& isCancelled = {});
 void writeProjectPackage(const Project& project, const QString& path,

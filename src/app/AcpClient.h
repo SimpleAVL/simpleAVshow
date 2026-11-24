@@ -133,6 +133,8 @@ private:
     bool usedHttpMcp_ = false;
     bool stopping_ = false;
     bool cancelling_ = false;
+    bool stdoutDrainScheduled_ = false;
+    bool stderrDrainScheduled_ = false;
     QByteArray stdoutBuffer_;
     int nextId_ = 1;
     int nextPermissionKey_ = 1;
@@ -158,6 +160,7 @@ private:
     void sendResponse(const QJsonValue& id, const QJsonObject& result);
     void sendErrorResponse(const QJsonValue& id, int code, const QString& message);
     void handleStdout();
+    void handleStderr();
     void handleLine(const QByteArray& line);
     void handleResponse(int id, const QJsonObject& msg);
     void handleNotification(const QString& method, const QJsonObject& params);

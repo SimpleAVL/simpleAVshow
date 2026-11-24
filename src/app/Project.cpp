@@ -8,6 +8,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QTemporaryFile>
 #include <QUuid>
 #include <QPainter>
 #include <QDataStream>
@@ -19,6 +20,9 @@
 #include <stdexcept>
 #ifdef Q_OS_WIN
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 namespace sav {
@@ -373,7 +377,7 @@ QJsonObject projectJson(const Project& p, const QString& directory) {
         {"duration", static_cast<double>(p.show.duration)}, {"tracks", tracks}, {"clips", clips}, {"markers", markers}, {"assets", assets}};
     return root;
 }
-void writeProject(const Project& p, const QString& path) {
+void writeProject(const Project& p, const QString& path, bool allowOverwrite) {
     constexpr qint64 compactThresholdBytes = 32 * 1024 * 1024;
     constexpr qint64 maxProjectFileBytes = 128 * 1024 * 1024;
     validate(p);
@@ -384,9 +388,66 @@ void writeProject(const Project& p, const QString& path) {
     if (bytes.size() > compactThresholdBytes) bytes = QJsonDocument(root).toJson(QJsonDocument::Compact);
     if (bytes.size() > maxProjectFileBytes)
         throw std::runtime_error("Show manifest exceeds the 128 MB save limit");
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error(file.errorString().toStdString());
-    if (file.write(bytes) != bytes.size() || !file.commit()) throw std::runtime_error(file.errorString().toStdString());
+    if (allowOverwrite) {
+        QSaveFile file(path);
+        if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error(file.errorString().toStdString());
+        if (file.write(bytes) != bytes.size() || !file.commit()) throw std::runtime_error(file.errorString().toStdString());
+        return;
+    }
+    if (QFileInfo::exists(path))
+        throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
+    QTemporaryFile temp(QFileInfo(path).absolutePath() + "/.simpleavshow-save-XXXXXX");
+    temp.setAutoRemove(true);
+    if (!temp.open()) throw std::runtime_error(temp.errorString().toStdString());
+    if (temp.write(bytes) != bytes.size() || !temp.flush()) throw std::runtime_error(temp.errorString().toStdString());
+    const QString tempPath = temp.fileName();
+    temp.close();
+#ifdef Q_OS_WIN
+    const std::wstring srcW = tempPath.toStdWString();
+    const std::wstring dstW = path.toStdWString();
+    if (!MoveFileExW(srcW.c_str(), dstW.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        const DWORD err = GetLastError();
+        if (err == ERROR_ALREADY_EXISTS || err == ERROR_FILE_EXISTS)
+            throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
+        throw std::runtime_error("Cannot save project file (Win32 error " + std::to_string(err) + ")");
+    }
+    temp.setAutoRemove(false);
+#else
+    const QByteArray src = QFile::encodeName(tempPath);
+    const QByteArray dst = QFile::encodeName(path);
+    if (::link(src.constData(), dst.constData()) == 0) {
+        return; // temp auto-removes its temporary directory entry while dst keeps the linked inode.
+    }
+    if (errno == EEXIST)
+        throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
+    if (errno == EPERM || errno == EOPNOTSUPP || errno == EXDEV) {
+        // Fallback for filesystems without hard links (e.g. FAT32/exFAT): O_CREAT|O_EXCL still prevents overwrite.
+        const int fd = ::open(dst.constData(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (fd < 0) {
+            if (errno == EEXIST)
+                throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
+            throw std::runtime_error(std::string("Cannot create project file: ") + std::strerror(errno));
+        }
+        qint64 written = 0;
+        while (written < bytes.size()) {
+            const auto n = ::write(fd, bytes.constData() + written, static_cast<size_t>(bytes.size() - written));
+            if (n <= 0) {
+                const int err = errno;
+                ::close(fd);
+                ::unlink(dst.constData());
+                throw std::runtime_error(std::string("Cannot write project file: ") + std::strerror(err));
+            }
+            written += n;
+        }
+        if (::close(fd) != 0) {
+            const int err = errno;
+            ::unlink(dst.constData());
+            throw std::runtime_error(std::string("Cannot close project file: ") + std::strerror(err));
+        }
+        return;
+    }
+    throw std::runtime_error(std::string("Cannot save project file: ") + std::strerror(errno));
+#endif
 }
 Project parseProject(const QByteArray& json, const QString& directory) {
     QJsonParseError parseError; const auto doc = QJsonDocument::fromJson(json, &parseError);

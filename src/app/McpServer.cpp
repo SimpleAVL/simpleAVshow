@@ -25,6 +25,9 @@
 #include <set>
 #ifdef Q_OS_WIN
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 namespace sav {
@@ -33,24 +36,93 @@ constexpr qsizetype maxBody = 2 * 1024 * 1024;
 const QStringList versions{"2025-11-25", "2025-06-18", "2025-03-26"};
 [[noreturn]] void fail(const QString& message) { throw std::runtime_error(message.toStdString()); }
 
-bool atomicReplaceFile(const QString& source, const QString& target, QString& error) {
+bool atomicPublishFile(const QString& source, const QString& target, bool allowOverwrite, QString& error) {
 #ifdef Q_OS_WIN
     const std::wstring srcW = source.toStdWString();
     const std::wstring dstW = target.toStdWString();
-    if (!MoveFileExW(srcW.c_str(), dstW.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        error = QString("Cannot publish file (Win32 error %1)").arg(GetLastError());
+    const DWORD flags = allowOverwrite ? (MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) : MOVEFILE_WRITE_THROUGH;
+    if (!MoveFileExW(srcW.c_str(), dstW.c_str(), flags)) {
+        const DWORD err = GetLastError();
+        if (!allowOverwrite && (err == ERROR_ALREADY_EXISTS || err == ERROR_FILE_EXISTS)) {
+            error = "Destination file already exists; pass overwrite: true to replace it";
+            return false;
+        }
+        error = QString("Cannot publish file (Win32 error %1)").arg(err);
         return false;
     }
     return true;
 #else
     const QByteArray src = QFile::encodeName(source);
     const QByteArray dst = QFile::encodeName(target);
-    if (::rename(src.constData(), dst.constData()) != 0) {
-        error = QString("Cannot publish file: %1").arg(QString::fromLocal8Bit(std::strerror(errno)));
+    if (allowOverwrite) {
+        if (::rename(src.constData(), dst.constData()) != 0) {
+            error = QString("Cannot publish file: %1").arg(QString::fromLocal8Bit(std::strerror(errno)));
+            return false;
+        }
+        return true;
+    }
+    if (::link(src.constData(), dst.constData()) == 0) {
+        ::unlink(src.constData());
+        return true;
+    }
+    if (errno == EEXIST) {
+        error = "Destination file already exists; pass overwrite: true to replace it";
         return false;
     }
-    return true;
+    if (errno == EPERM || errno == EOPNOTSUPP || errno == EXDEV) {
+        // Fallback for filesystems without hard links (e.g. FAT32/exFAT): O_CREAT|O_EXCL still prevents overwrite.
+        const int fd = ::open(dst.constData(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (fd < 0) {
+            error = errno == EEXIST
+                ? QString("Destination file already exists; pass overwrite: true to replace it")
+                : QString("Cannot create file: %1").arg(QString::fromLocal8Bit(std::strerror(errno)));
+            return false;
+        }
+        QFile in(source);
+        if (!in.open(QIODevice::ReadOnly)) {
+            ::close(fd);
+            ::unlink(dst.constData());
+            error = QString("Cannot read staged file: %1").arg(in.errorString());
+            return false;
+        }
+        QByteArray buf(1024 * 1024, '\0');
+        while (!in.atEnd()) {
+            const qint64 n = in.read(buf.data(), buf.size());
+            if (n < 0) { ::close(fd); ::unlink(dst.constData()); error = in.errorString(); return false; }
+            if (n == 0) break;
+            qint64 off = 0;
+            while (off < n) {
+                const auto w = ::write(fd, buf.constData() + off, static_cast<size_t>(n - off));
+                if (w <= 0) {
+                    const int err = errno;
+                    ::close(fd);
+                    ::unlink(dst.constData());
+                    error = QString("Cannot publish file: %1").arg(QString::fromLocal8Bit(std::strerror(err)));
+                    return false;
+                }
+                off += w;
+            }
+        }
+        if (::close(fd) != 0) {
+            const int err = errno;
+            ::unlink(dst.constData());
+            error = QString("Cannot publish file: %1").arg(QString::fromLocal8Bit(std::strerror(err)));
+            return false;
+        }
+        ::unlink(src.constData());
+        return true;
+    }
+    error = QString("Cannot publish file: %1").arg(QString::fromLocal8Bit(std::strerror(errno)));
+    return false;
 #endif
+}
+
+bool sameLocalPath(const QString& a, const QString& b) {
+    if (a.isEmpty() || b.isEmpty()) return false;
+    const QFileInfo ia(a), ib(b);
+    const QString ca = ia.canonicalFilePath(), cb = ib.canonicalFilePath();
+    if (!ca.isEmpty() && !cb.isEmpty()) return ca == cb;
+    return QDir::cleanPath(ia.absoluteFilePath()) == QDir::cleanPath(ib.absoluteFilePath());
 }
 
 struct DocChapter {
@@ -208,10 +280,10 @@ QJsonArray tools() {
         }), false);
     add("configure_remote", "Enable or disable the local-network phone remote, choose its port, or rotate its secret link key. Blocked in Show mode.",
         objectSchema({{"enabled", field("boolean")}, {"port", integer(1024, 65535)}, {"change_key", field("boolean")}}, {"enabled"}), false);
-    add("project_action", "Save the show (.savshow), save to a new path, export a portable .savpack package, create a new show, open the built-in demo, or open an existing .savshow/.savpack file. Show-replacing actions (new_show, open_demo, open_project) require expected_revision from get_show and refuse to discard unsaved edits unless discard_unsaved is true. Blocked during playback and Show mode.",
+    add("project_action", "Save the show (.savshow), save to a new path, export a portable .savpack package, create a new show, open the built-in demo, or open an existing .savshow/.savpack file. Show-replacing actions (new_show, open_demo, open_project) require expected_revision from get_show and refuse to discard unsaved edits unless discard_unsaved is true. save_as and export_package refuse to overwrite an existing file unless overwrite is true. Blocked during playback and Show mode.",
         objectSchema({
             {"action", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"save", "save_as", "export_package", "new_show", "open_demo", "open_project"}}}},
-            {"path", field("string")}, {"discard_unsaved", field("boolean")}, {"expected_revision", integer()}
+            {"path", field("string")}, {"discard_unsaved", field("boolean")}, {"overwrite", field("boolean")}, {"expected_revision", integer()}
         }, {"action"}), false);
     add("transport_control", "Rehearsal playback control: play, pause, continue (resume a hold), stop_all, or seek to a frame. Strictly blocked while Show mode is active so live performances stay operator-only.",
         objectSchema({
@@ -1573,7 +1645,9 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
         path = a["path"].toString().trimmed();
     }
     if (a.contains("discard_unsaved") && !a["discard_unsaved"].isBool()) fail("discard_unsaved must be a boolean");
+    if (a.contains("overwrite") && !a["overwrite"].isBool()) fail("overwrite must be a boolean");
     const bool discard = a["discard_unsaved"].toBool(false);
+    const bool overwrite = a["overwrite"].toBool(false);
     const bool replacesShow = action == "new_show" || action == "open_demo" || action == "open_project";
     if (replacesShow || a.contains("expected_revision")) {
         const auto expected = a["expected_revision"];
@@ -1605,8 +1679,13 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
         if (target.isEmpty()) fail("Provide an absolute path to save an untitled show");
         if (!QFileInfo(target).isAbsolute()) fail("Save path must be an absolute local file path");
         if (!target.endsWith(".savshow", Qt::CaseInsensitive)) target += ".savshow";
+        // Ordinary `save` may update the current project file; `save_as` (or saving to a different path)
+        // requires explicit `overwrite: true` and publishes atomically without replacement by default.
+        const bool allowOverwrite = overwrite || (action == "save" && !c_.path.isEmpty() && sameLocalPath(target, c_.path));
+        if (!allowOverwrite && QFileInfo::exists(target))
+            fail("Destination file already exists; pass overwrite: true to replace it");
         if (!c_.savingCopiesMedia()) {
-            if (!c_.save(target)) fail(c_.status);
+            if (!c_.save(target, allowOverwrite)) fail(c_.status);
             auto result = snapshot(); result.insert("action", action); result.insert("target_path", target);
             finish(toolResult(result));
             return;
@@ -1627,7 +1706,7 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
         struct SavePrep { Project candidate; StagedProjectMedia staged; QString error; };
         auto* watcher = new QFutureWatcher<SavePrep>(this);
         connect(watcher, &QFutureWatcher<SavePrep>::finished, this,
-            [this, watcher, action, target, expectedRev, jobGen, jobEditGen, lease, stagingDir, cancelled, finish = std::move(finish)]() mutable {
+            [this, watcher, action, target, allowOverwrite, expectedRev, jobGen, jobEditGen, lease, stagingDir, cancelled, finish = std::move(finish)]() mutable {
                 auto prep = watcher->result(); watcher->deleteLater();
                 releaseBusyLease(lease);
                 activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1);
@@ -1648,7 +1727,7 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
                     finish(toolResult({{"error", QString::fromUtf8(e.what())}, {"revision", static_cast<double>(revision_)}}, true));
                     return;
                 }
-                if (!c_.commitSave(std::move(prep.candidate), target)) {
+                if (!c_.commitSave(std::move(prep.candidate), target, allowOverwrite)) {
                     rollback.rollback();
                     finish(toolResult({{"error", c_.status}, {"revision", static_cast<double>(revision_)}}, true));
                     return;
@@ -1672,6 +1751,8 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
     if (action == "export_package") {
         if (path.isEmpty() || !QFileInfo(path).isAbsolute()) fail("Provide an absolute local path for .savpack export");
         if (!isProjectPackage(path)) path += ".savpack";
+        if (!overwrite && QFileInfo::exists(path))
+            fail("Destination package already exists; pass overwrite: true to replace it");
         const quint64 expectedRev = revision_;
         const quint64 lease = c_.acquireBusy();
         if (!lease) fail("Wait for the current busy operation to finish");
@@ -1685,7 +1766,7 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
         ++activeAsyncJobs_;
         auto* watcher = new QFutureWatcher<QString>(this);
         connect(watcher, &QFutureWatcher<QString>::finished, this,
-            [this, watcher, action, path, stagedPackage, expectedRev, jobGen, jobEditGen, lease, stagingDir, cancelled, finish = std::move(finish)]() mutable {
+            [this, watcher, action, path, overwrite, stagedPackage, expectedRev, jobGen, jobEditGen, lease, stagingDir, cancelled, finish = std::move(finish)]() mutable {
                 const QString err = watcher->result(); watcher->deleteLater();
                 releaseBusyLease(lease);
                 activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1);
@@ -1700,7 +1781,7 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
                     return;
                 }
                 QString replaceErr;
-                if (!atomicReplaceFile(stagedPackage, path, replaceErr)) {
+                if (!atomicPublishFile(stagedPackage, path, overwrite, replaceErr)) {
                     finish(toolResult({{"error", replaceErr}, {"revision", static_cast<double>(revision_)}}, true));
                     return;
                 }
@@ -2168,7 +2249,9 @@ void McpServer::acceptConnection() {
                     }
                     clientScope = "sid:" + rawSession;
                 } else {
-                    clientScope = "bearer:" + bearer;
+                    // Scope legacy sessionless requests to their originating connection so two
+                    // clients sharing the external bearer cannot collide on request IDs or cancel each other.
+                    clientScope = "conn:" + newId();
                 }
             }
             if (!clientScope.isEmpty() && reqObj.contains("method") && !reqId.isUndefined()) {
