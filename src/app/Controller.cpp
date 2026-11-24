@@ -282,9 +282,18 @@ QStringList Controller::preflight() {
     QStringList problems;
     if (dirty) problems << "The show has unsaved changes.";
     // Picture clips carry their video's audio but never play it; only audio tracks stream.
-    if (std::any_of(project.show.clips.begin(), project.show.clips.end(), [this](const Clip& clip) {
-            return !project.show.tracks[clip.track].visual && clip.audio && clip.audio->storage && clip.audio->storage->decodes(); }))
-        problems << "Audio streams from the original media files. For the steadiest playback, choose Prepared audio sources in Outputs.";
+    QStringList streaming;
+    for (const auto& clip : project.show.clips) {
+        if (project.show.tracks[clip.track].visual || !clip.audio || !clip.audio->storage || !clip.audio->storage->decodes()) continue;
+        const auto asset = project.assets.constFind(QString::fromStdString(clip.assetId));
+        const auto name = asset == project.assets.cend() ? QString("audio") : asset->name;
+        if (!streaming.contains(name)) streaming << name;
+    }
+    // With Prepared chosen, a streaming source is one that could not be prepared: say which, and how to retry.
+    if (!streaming.isEmpty())
+        problems << (audioPreparation() == AudioPreparation::Prepared
+            ? "Audio streams from the original media files for " + streaming.join(", ") + ": preparing them failed. Fix the files and reopen the project to prepare them again."
+            : QString("Audio streams from the original media files. For the steadiest playback, choose Prepared audio sources in Outputs."));
     for (const auto& missing : missingMedia()) problems << "Media is missing: " + missing;
     if (needsMidi() && !midi.connected()) {
         const QString remembered = QSettings().value("midi/port").toString();

@@ -1764,6 +1764,10 @@ private slots:
         c.replace(project);
         const auto streaming = [&] { return c.preflight().filter("Audio streams from the original media files").size() == 1; };
         QVERIFY(streaming());
+        // Prepared is chosen, so this source is one that could not be prepared: the check names it.
+        QVERIFY(!c.preflight().filter("preparing them failed").filter(streamed.name).isEmpty());
+        setAudioPreparation(AudioPreparation::Stream); QVERIFY(!c.preflight().filter("choose Prepared audio sources").isEmpty());
+        setAudioPreparation(AudioPreparation::Prepared);
         {
             // A video's sound on a picture layer never plays, so it is no reason to warn.
             auto pictures = project; auto video = streamed; video.video = true; video.duration = 2; pictures.assets.insert(video.id, video);
