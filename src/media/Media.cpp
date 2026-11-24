@@ -13,6 +13,7 @@
 #include <numeric>
 #include <optional>
 #include <stdexcept>
+#include <system_error>
 #include <thread>
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -400,12 +401,15 @@ public:
         // A file deleted while open on Windows keeps its name until handles close; it is not present, so
         // unavailable too: retried, not reported as changed. An identity the file system does not report
         // right now is not a change (sameAs).
-        if (!QFileInfo::exists(path_) || !detail::present(path_)) {
+        // One lookup: values from a failed one (a share dropping now) would look like a change.
+        const QFileInfo info(path_);
+        if (!info.exists() || !info.lastModified().isValid() || !detail::present(path_)) {
             readers_.clear(); throw std::runtime_error("Audio source is unavailable: " + path_.toStdString());
         }
         // File identity also catches a replacement saved with the same size and modification time;
         // an in-place rewrite that keeps both is not detected.
-        if (!detail::fileVersion(path_).sameAs(version_)) { readers_.clear(); throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString()); }
+        const detail::FileVersion current{info.size(), info.lastModified().toMSecsSinceEpoch(), detail::fileIdentity(path_)};
+        if (!current.sameAs(version_)) { readers_.clear(); throw AudioSourceChanged("Audio source changed; reopen the project: " + path_.toStdString()); }
         Reader* reader = nullptr;
         try {
             pick(first, reader);
@@ -451,6 +455,10 @@ public:
     static void closeIdle(bool wait) {
         constexpr auto idleAfter = std::chrono::seconds(3);
         const auto now = std::chrono::steady_clock::now();
+        // One sweep at a time, and the slot comes first: readers are only taken by the sweep that will close
+        // them off this thread. A busy sweep (a stalled share) skips this tick; tests wait for it.
+        static std::atomic<bool> sweeping{false};
+        while (sweeping.exchange(true)) { if (!wait) return; std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
         struct Open { const StreamStorage* storage; std::uint64_t id, reads; QString path; };
         std::vector<Open> open;
         std::vector<std::unique_ptr<Reader>> retired; // Closed without locks held: closing can stall on a share.
@@ -468,9 +476,7 @@ public:
         // release them so the file can be restored or replaced under that name. Checks and closes can
         // stall (network shares), so they run on a detached thread, one sweep at a time, without locks
         // that reads need; the app can quit without waiting for one.
-        static std::atomic<bool> sweeping{false};
-        if (open.empty() && retired.empty()) return;
-        if (sweeping.exchange(true)) { if (wait) retired.clear(); return; }
+        if (open.empty() && retired.empty()) { sweeping = false; return; }
         auto sweep = [open = std::move(open), retired = std::move(retired)]() mutable {
             retired.clear();
             std::erase_if(open, [](const Open& entry) { return detail::present(entry.path); });
@@ -487,7 +493,8 @@ public:
             }
             sweeping = false;
         };
-        if (wait) sweep(); else std::thread(std::move(sweep)).detach();
+        if (!wait) try { std::thread(std::move(sweep)).detach(); return; } catch (const std::system_error&) {}
+        sweep(); // Tests, or no thread available: close here rather than keep the slot or throw into the timer.
     }
 private:
     // Reading forward this far decodes through instead of seeking.
