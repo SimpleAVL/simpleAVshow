@@ -102,9 +102,9 @@ private:
     QJsonObject configureOutputsTool(const QJsonObject& arguments, const QString& bearerToken);
     QJsonObject configureRemoteTool(const QJsonObject& arguments);
     void projectActionAsync(const QJsonObject& arguments, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish);
-    QJsonObject transportControlTool(const QJsonObject& arguments);
+    QJsonObject transportControlTool(const QJsonObject& arguments, const QString& bearerToken);
     QJsonObject historyTool(const QJsonObject& arguments);
-    QJsonObject seekAndSelectTool(const QJsonObject& arguments);
+    QJsonObject seekAndSelectTool(const QJsonObject& arguments, const QString& bearerToken);
     QJsonObject importStatus() const;
     void checkWrite(const QJsonObject& arguments, bool requireRevision = true);
     void checkEnabledAndUnlocked(bool requireStopped = true);

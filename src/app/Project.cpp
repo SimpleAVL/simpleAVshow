@@ -374,15 +374,16 @@ QJsonObject projectJson(const Project& p, const QString& directory) {
     return root;
 }
 void writeProject(const Project& p, const QString& path) {
-    constexpr qint64 maxProjectFileBytes = 32 * 1024 * 1024;
+    constexpr qint64 compactThresholdBytes = 32 * 1024 * 1024;
+    constexpr qint64 maxProjectFileBytes = 128 * 1024 * 1024;
     validate(p);
     for (const auto& a : p.assets)
         if (a.path.isEmpty()) throw std::runtime_error("Use Export demo first to save generated media");
     const auto root = projectJson(p, QFileInfo(path).absolutePath());
     QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
-    if (bytes.size() > maxProjectFileBytes) bytes = QJsonDocument(root).toJson(QJsonDocument::Compact);
+    if (bytes.size() > compactThresholdBytes) bytes = QJsonDocument(root).toJson(QJsonDocument::Compact);
     if (bytes.size() > maxProjectFileBytes)
-        throw std::runtime_error("Show manifest exceeds the 32 MB save limit");
+        throw std::runtime_error("Show manifest exceeds the 128 MB save limit");
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error(file.errorString().toStdString());
     if (file.write(bytes) != bytes.size() || !file.commit()) throw std::runtime_error(file.errorString().toStdString());
@@ -445,9 +446,16 @@ void loadProjectMedia(Project& p, const std::function<bool()>& isCancelled) {
 Project readProject(const QString& path, const std::function<bool()>& isCancelled) {
     if (isCancelled && isCancelled()) throw std::runtime_error("Project load cancelled");
     if (isProjectPackage(path)) return readProjectPackage(path, isCancelled);
-    constexpr qint64 maxProjectFileBytes = 32 * 1024 * 1024;
+    constexpr qint64 maxProjectFileBytes = 128 * 1024 * 1024;
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) throw std::runtime_error(file.errorString().toStdString());
+    // Reject non-JSON binary files immediately before allocating a manifest buffer.
+    const QByteArray head = file.peek(64);
+    qsizetype firstNonSpace = 0;
+    while (firstNonSpace < head.size() && (head[firstNonSpace] == ' ' || head[firstNonSpace] == '\t' ||
+           head[firstNonSpace] == '\r' || head[firstNonSpace] == '\n')) ++firstNonSpace;
+    if (firstNonSpace >= head.size() || head[firstNonSpace] != '{')
+        throw std::runtime_error("Invalid project JSON");
     if (file.size() > maxProjectFileBytes)
         throw std::runtime_error("Project file is too large to be a valid .savshow manifest");
     const QByteArray bytes = file.read(maxProjectFileBytes + 1);

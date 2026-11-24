@@ -599,10 +599,19 @@ private slots:
         QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
         QCOMPARE(window.controller().transport.state(), State::Stopped);
 
-        // Read-only chat transcript must NOT intercept Space (Space should reach Controller::toggle).
+        // Space and Backspace inside the Agent Chat drawer (including read-only transcript/logs)
+        // must NOT trigger live playback or delete selected timeline clips.
+        const auto clipsBeforeTranscript = window.controller().project.show.clips.size();
         transcript->setFocus();
         window.controller().status.clear();
         QTest::keyClick(transcript, Qt::Key_Space);
+        QTest::keyClick(transcript, Qt::Key_Backspace);
+        QCOMPARE(window.controller().transport.state(), State::Stopped);
+        QCOMPARE(window.controller().project.show.clips.size(), clipsBeforeTranscript);
+        QVERIFY(window.controller().status.isEmpty());
+        // Returning focus to the main editor outside chat restores Space for transport toggle.
+        window.setFocus();
+        QTest::keyClick(&window, Qt::Key_Space);
         QVERIFY(!window.controller().status.isEmpty() || window.controller().transport.state() == State::Playing);
         window.controller().stopAll();
         window.controller().dirty = false;

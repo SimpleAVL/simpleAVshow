@@ -43,10 +43,10 @@ public:
     std::size_t redoCount() const { return redo_.size(); }
     void replace(Project next, QString projectPath = {}, bool markDirty = false);
     bool toggle();
-    bool play(bool fromAgent = false);
-    bool pause(bool fromAgent = false);
-    bool seek(Frame position, bool fromAgent = false);
-    bool stopAll(bool fromAgent = false);
+    bool play(CommandSource source = CommandSource::Operator);
+    bool pause(CommandSource source = CommandSource::Operator);
+    bool seek(Frame position, CommandSource source = CommandSource::Operator);
+    bool stopAll(CommandSource source = CommandSource::Operator);
     // Reflects queued transport commands immediately before the next audio callback publishes them.
     State effectiveState() const;
     Frame effectivePosition() const;

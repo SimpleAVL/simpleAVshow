@@ -695,22 +695,27 @@ private slots:
             QCOMPARE(c.transport.state(), State::Held);
             MidiEvent ev;
             while (c.transport.takeMidi(ev)) {}
-            // Ordinary queued Continue followed by StopAll must not publish resume MIDI.
+            // Ordinary queued Continue followed by StopAll must not publish resume MIDI,
+            // while a queued Seek followed by StopAll preserves the seeked position.
+            QVERIFY(c.transport.command({Action::Seek, frames(2)}));
             QVERIFY(c.transport.command({Action::Play}));
             QVERIFY(c.transport.command({Action::StopAll}));
             c.transport.render(buf, 1, 2);
             QCOMPARE(c.transport.state(), State::Stopped);
+            QCOMPARE(c.transport.position(), frames(2));
             QVERIFY(!c.transport.takeMidi(ev));
-            // Re-enter Held and verify agent-originated Continue is skipped after invalidation (e.g., Show mode/Disconnect).
+            // Re-enter Held and verify chat-agent invalidation skips queued ChatAgent Continue
+            // without cancelling an external MCP client's accepted StopAll.
             c.transport.command({Action::Seek, 0});
             c.transport.command({Action::Play});
             c.transport.render(buf, 1, 2);
             QCOMPARE(c.transport.state(), State::Held);
             while (c.transport.takeMidi(ev)) {}
-            QVERIFY(c.transport.command({Action::Play, 0, c.transport.agentEpoch()}));
-            c.transport.invalidateAgentCommands();
+            QVERIFY(c.transport.command({Action::Play, 0, CommandSource::ChatAgent, c.transport.chatAgentEpoch()}));
+            QVERIFY(c.transport.command({Action::StopAll, 0, CommandSource::ExternalAgent, c.transport.externalAgentEpoch()}));
+            c.transport.invalidateChatAgentCommands();
             c.transport.render(buf, 1, 2);
-            QCOMPARE(c.transport.state(), State::Held);
+            QCOMPARE(c.transport.state(), State::Stopped);
             QVERIFY(!c.transport.takeMidi(ev));
             // Full-queue emergency Stop All also discards queued Play without firing resume MIDI.
             for (int i = 0; i < 200; ++i) c.transport.command({Action::Play});

@@ -399,7 +399,7 @@ void McpServer::invalidateEditSession() {
     editSessionCancelled_ = std::make_shared<std::atomic<bool>>(false);
     if (importCancelled_) importCancelled_->store(true);
     importCancelled_ = std::make_shared<std::atomic<bool>>(false);
-    c_.transport.invalidateAgentCommands();
+    c_.transport.invalidateAllAgentCommands();
     c_.cancelPendingTestMidi();
     releaseAllBusyLeases();
     if (importState_ == "preparing" || importState_ == "ready") {
@@ -460,7 +460,8 @@ void McpServer::revokeChatToken(const QString& token) {
     if (token.isEmpty()) return;
     chatTokens_.remove(token);
     if (auto cancelFlag = chatTokenCancelled_.take(token)) cancelFlag->store(true, std::memory_order_release);
-    c_.transport.invalidateAgentCommands();
+    // Only cancel embedded chat commands; never disturb accepted external MCP commands.
+    c_.transport.invalidateChatAgentCommands();
     const auto removedSessions = bearerSessions_.take(token);
     for (const auto& sid : removedSessions) {
         issuedSessions_.remove(sid);
@@ -1281,8 +1282,9 @@ QJsonObject McpServer::historyTool(const QJsonObject& a) {
     return toolResult(result);
 }
 
-QJsonObject McpServer::seekAndSelectTool(const QJsonObject& a) {
+QJsonObject McpServer::seekAndSelectTool(const QJsonObject& a, const QString& bearerToken) {
     checkEnabledAndUnlocked(true);
+    const CommandSource src = chatTokens_.contains(bearerToken) ? CommandSource::ChatAgent : CommandSource::ExternalAgent;
     std::optional<Frame> targetTime;
     if (a.contains("time")) {
         const auto v = a["time"];
@@ -1316,7 +1318,7 @@ QJsonObject McpServer::seekAndSelectTool(const QJsonObject& a) {
                 [&](const Marker& m) { return m.id == markerId.toStdString(); }))
             fail("Unknown marker ID");
     }
-    if (targetTime && !c_.seek(*targetTime, true)) fail(c_.status);
+    if (targetTime && !c_.seek(*targetTime, src)) fail(c_.status);
     if (host_.selectItem && (track >= 0 || !clipId.isEmpty() || !markerId.isEmpty()))
         host_.selectItem(track, clipId, markerId);
     const Frame reportedPos = c_.effectivePosition();
@@ -1470,6 +1472,12 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a, const QString&
         if (cfg["message"].toArray().size() > 64)
             fail("test_midi.message cannot exceed 64 bytes");
         if (!validMidi(bytes)) fail("Complete the MIDI message before testing it");
+#ifdef Q_OS_WIN
+        // RtMidi's WinMM backend spins indefinitely on MIDIERR_STILLPLAYING for SysEx if a driver
+        // stalls, which would block midiThread_ and GUI join() on edit/shutdown.
+        if (!bytes.empty() && bytes[0] == 0xf0)
+            fail("SysEx test_midi is disabled on Windows because WinMM drivers can block indefinitely; send a short channel MIDI message instead");
+#endif
         if (plannedMidiName && plannedMidiName->isEmpty())
             fail("Cannot send test_midi while disconnecting MIDI output");
         if (!plannedMidiName && !c_.midi.connected())
@@ -1693,9 +1701,9 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
         const bool showFile = path.endsWith(".savshow", Qt::CaseInsensitive);
         if (!pkg && !autosave && !showFile)
             fail("Project path must be a .savshow, .savshow.autosave, or .savpack file");
-        constexpr qint64 maxProjectFileBytes = 32 * 1024 * 1024;
+        constexpr qint64 maxProjectFileBytes = 128 * 1024 * 1024;
         if (!pkg && openInfo.size() > maxProjectFileBytes)
-            fail("Project file exceeds the 32 MB .savshow manifest size limit");
+            fail("Project file exceeds the 128 MB .savshow manifest size limit");
         QString targetPath;
         if (!pkg) {
             if (autosave) {
@@ -1754,21 +1762,22 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
     fail("Unknown project action: " + action);
 }
 
-QJsonObject McpServer::transportControlTool(const QJsonObject& a) {
+QJsonObject McpServer::transportControlTool(const QJsonObject& a, const QString& bearerToken) {
     checkEnabledAndUnlocked(false);
     if (!a["action"].isString()) fail("action must be a string");
     const QString action = a["action"].toString();
+    const CommandSource src = chatTokens_.contains(bearerToken) ? CommandSource::ChatAgent : CommandSource::ExternalAgent;
     bool accepted = true;
     if (action == "play" || action == "continue") {
         // Explicit play/continue never toggles a Playing show into Pause.
-        accepted = c_.play(true);
+        accepted = c_.play(src);
         if (!accepted) fail(c_.playbackProblem.isEmpty() ? c_.status : c_.playbackProblem);
     } else if (action == "pause") {
         // Explicit pause never queues Play, even if the audio callback just entered Held.
-        accepted = c_.pause(true);
+        accepted = c_.pause(src);
         if (!accepted) fail(c_.status);
     } else if (action == "stop_all") {
-        accepted = c_.stopAll(true);
+        accepted = c_.stopAll(src);
         if (!accepted) fail(c_.status);
     } else if (action == "seek") {
         const auto v = a["time"];
@@ -1776,7 +1785,7 @@ QJsonObject McpServer::transportControlTool(const QJsonObject& a) {
             fail("Provide a valid integer frame time for seek");
         const Frame target = static_cast<Frame>(v.toDouble());
         if (target > c_.project.show.duration) fail("Seek time exceeds project duration");
-        accepted = c_.seek(target, true);
+        accepted = c_.seek(target, src);
         if (!accepted) fail(c_.status);
     } else {
         fail("Unknown transport action: " + action);
@@ -1812,11 +1821,11 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, const QStrin
         if (name == "list_media_files") { listMediaFilesAsync(a, std::move(cancelled), finish); return; }
         if (name == "relink_media") { relinkMediaAsync(a, std::move(cancelled), finish); return; }
         if (name == "history") { finish(historyTool(a)); return; }
-        if (name == "seek_and_select") { finish(seekAndSelectTool(a)); return; }
+        if (name == "seek_and_select") { finish(seekAndSelectTool(a, bearerToken)); return; }
         if (name == "configure_outputs") { finish(configureOutputsTool(a, bearerToken)); return; }
         if (name == "configure_remote") { finish(configureRemoteTool(a)); return; }
         if (name == "project_action") { projectActionAsync(a, std::move(cancelled), finish); return; }
-        if (name == "transport_control") { finish(transportControlTool(a)); return; }
+        if (name == "transport_control") { finish(transportControlTool(a, bearerToken)); return; }
         if (name == "get_import" || name == "commit_import") {
             if (!a["job_id"].isString() || importId_.isEmpty() || a["job_id"].toString() != importId_) fail("Unknown import job");
             if (name == "get_import") { finish(toolResult(importStatus())); return; }
@@ -2108,19 +2117,24 @@ void McpServer::acceptConnection() {
             const bool longFileJob = toolName == "project_action" || toolName == "relink_media";
             timeout->start(longFileJob ? (30 * 60 * 1000) : 60000);
             // Streamable HTTP session management: reject expired/unknown/mismatched Mcp-Session-Id
-            // on non-initialize requests with HTTP 404 so clients reinitialize instead of losing cancellation.
+            // on non-initialize requests with HTTP 404. Clients omitting Mcp-Session-Id are scoped
+            // to their own authenticated bearer so async file jobs remain trackable and cancellable.
             const QString rawSession = QString::fromUtf8(headers.value("mcp-session-id")).trimmed();
             const auto reqId = reqObj["id"];
             QString clientScope;
-            if (!rawSession.isEmpty() && reqMethod != "initialize") {
-                if (issuedSessions_.value(rawSession) != bearer) {
-                    const QJsonObject sessionErr{{"jsonrpc", "2.0"},
-                        {"id", reqId.isUndefined() ? QJsonValue(QJsonValue::Null) : reqId},
-                        {"error", QJsonObject{{"code", -32001}, {"message", "Session not found or expired; reinitialize the MCP session"}}}};
-                    respond(404, "Not Found", QJsonDocument(sessionErr).toJson(QJsonDocument::Compact));
-                    return;
+            if (reqMethod != "initialize") {
+                if (!rawSession.isEmpty()) {
+                    if (issuedSessions_.value(rawSession) != bearer) {
+                        const QJsonObject sessionErr{{"jsonrpc", "2.0"},
+                            {"id", reqId.isUndefined() ? QJsonValue(QJsonValue::Null) : reqId},
+                            {"error", QJsonObject{{"code", -32001}, {"message", "Session not found or expired; reinitialize the MCP session"}}}};
+                        respond(404, "Not Found", QJsonDocument(sessionErr).toJson(QJsonDocument::Compact));
+                        return;
+                    }
+                    clientScope = "sid:" + rawSession;
+                } else {
+                    clientScope = "bearer:" + bearer;
                 }
-                clientScope = rawSession;
             }
             if (!clientScope.isEmpty() && !reqId.isUndefined()) {
                 const QString idPart = reqId.isString() ? ("s:" + reqId.toString())

@@ -13,7 +13,8 @@ inline const char* stateName(State state) noexcept {
     return state == State::Playing ? "playing" : state == State::Held ? "held" : state == State::Paused ? "paused" : state == State::Ended ? "ended" : "stopped";
 }
 enum class Action { Play, Pause, Seek, StopAll };
-struct Command { Action action; Frame position = 0; std::uint64_t agentEpoch = 0; };
+enum class CommandSource : std::uint8_t { Operator = 0, ExternalAgent = 1, ChatAgent = 2 };
+struct Command { Action action; Frame position = 0; CommandSource source = CommandSource::Operator; std::uint64_t sourceEpoch = 0; };
 struct MidiEvent { int marker = -1; Frame time = 0; std::uint64_t epoch = 0; };
 
 class Transport {
@@ -27,10 +28,15 @@ public:
         if (command.action != Action::StopAll && urgentStop_.load(std::memory_order_acquire)) return false;
         return commands_.push(command);
     }
-    // Monotonic epoch stamped on agent-originated transport commands; advancing it atomically
-    // cancels any queued agent commands before the audio callback can execute them.
-    std::uint64_t agentEpoch() const noexcept { return agentEpoch_.load(std::memory_order_acquire); }
-    void invalidateAgentCommands() noexcept { agentEpoch_.fetch_add(1, std::memory_order_acq_rel); }
+    // Independent monotonic epochs for external MCP vs embedded chat transport commands so
+    // revoking chat never cancels an external client's accepted Stop All.
+    std::uint64_t externalAgentEpoch() const noexcept { return externalAgentEpoch_.load(std::memory_order_acquire); }
+    std::uint64_t chatAgentEpoch() const noexcept { return chatAgentEpoch_.load(std::memory_order_acquire); }
+    void invalidateChatAgentCommands() noexcept { chatAgentEpoch_.fetch_add(1, std::memory_order_acq_rel); }
+    void invalidateAllAgentCommands() noexcept {
+        externalAgentEpoch_.fetch_add(1, std::memory_order_acq_rel);
+        chatAgentEpoch_.fetch_add(1, std::memory_order_acq_rel);
+    }
     // Lock-free emergency Stop All that succeeds even when the bounded command queue is full.
     void requestStopAll() noexcept { urgentStop_.store(true, std::memory_order_release); }
     bool stopAllPending() const noexcept { return urgentStop_.load(std::memory_order_acquire); }
@@ -88,10 +94,15 @@ private:
     std::atomic<int> publishedMarker_{-1}, publishedVoices_{0};
     std::atomic<float> publishedPeak_{0};
     std::atomic<bool> clipped_{false}, overflow_{false}, urgentStop_{false};
-    std::atomic<std::uint64_t> epoch_{0}, agentEpoch_{1};
+    std::atomic<std::uint64_t> epoch_{0}, externalAgentEpoch_{1}, chatAgentEpoch_{1};
     std::uint64_t applied_ = 0;
     std::atomic<std::uint64_t> commandsApplied_{0};
-    void apply(Command command) noexcept;
+    static bool isCommandValid(const Command& command, std::uint64_t validExt, std::uint64_t validChat) noexcept {
+        if (command.source == CommandSource::Operator) return true;
+        if (command.source == CommandSource::ExternalAgent) return command.sourceEpoch == validExt;
+        return command.sourceEpoch == validChat;
+    }
+    void apply(Command command, std::uint64_t validExt, std::uint64_t validChat) noexcept;
     void applyStopAll() noexcept;
     void dispatch(int marker) noexcept;
     void publish(float peak) noexcept;

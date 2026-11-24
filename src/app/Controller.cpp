@@ -220,7 +220,7 @@ bool Controller::routesValid() const {
     }
     return true;
 }
-bool Controller::play(bool fromAgent) {
+bool Controller::play(CommandSource source) {
     if (busy) return false;
     cancelPendingTestMidi();
     const State state = transport.state();
@@ -240,14 +240,18 @@ bool Controller::play(bool fromAgent) {
         if (!prepareAudio()) { playbackProblem = status; return false; }
         if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return false; }
     }
+    const std::uint64_t ep = source == CommandSource::ExternalAgent ? transport.externalAgentEpoch()
+        : source == CommandSource::ChatAgent ? transport.chatAgentEpoch() : 0;
     // Always enqueue Action::Play so a Play queued immediately after a Pause is honored in arrival order.
-    return postTransportCommand({Action::Play, 0, fromAgent ? transport.agentEpoch() : 0});
+    return postTransportCommand({Action::Play, 0, source, ep});
 }
-bool Controller::pause(bool fromAgent) {
+bool Controller::pause(CommandSource source) {
     if (busy) return false;
+    const std::uint64_t ep = source == CommandSource::ExternalAgent ? transport.externalAgentEpoch()
+        : source == CommandSource::ChatAgent ? transport.chatAgentEpoch() : 0;
     // Always enqueue Action::Pause (never Play) so a Pause queued behind Play runs in order and
     // a Playing → Held transition can never accidentally resume a hold.
-    if (!postTransportCommand({Action::Pause, 0, fromAgent ? transport.agentEpoch() : 0})) return false;
+    if (!postTransportCommand({Action::Pause, 0, source, ep})) return false;
     if (!device.streamActive()) transport.render(nullptr, 0, 0);
     return true;
 }
@@ -255,18 +259,22 @@ bool Controller::toggle() {
     if (busy) return false;
     return effectiveState() == State::Playing ? pause() : play();
 }
-bool Controller::seek(Frame time, bool fromAgent) {
+bool Controller::seek(Frame time, CommandSource source) {
     if (busy || showMode) { report(showMode ? "Leave show mode to jump on the timeline" : "Media is loading"); return false; }
-    if (!postTransportCommand({Action::Seek, time, fromAgent ? transport.agentEpoch() : 0})) return false;
+    const std::uint64_t ep = source == CommandSource::ExternalAgent ? transport.externalAgentEpoch()
+        : source == CommandSource::ChatAgent ? transport.chatAgentEpoch() : 0;
+    if (!postTransportCommand({Action::Seek, time, source, ep})) return false;
     if (!device.streamActive()) transport.render(nullptr, 0, 0);
     lastComposed_ = -1;
     return true;
 }
-bool Controller::stopAll(bool fromAgent) {
+bool Controller::stopAll(CommandSource source) {
     cancelPendingTestMidi();
-    const Command cmd{Action::StopAll, 0, fromAgent ? transport.agentEpoch() : 0};
+    const std::uint64_t ep = source == CommandSource::ExternalAgent ? transport.externalAgentEpoch()
+        : source == CommandSource::ChatAgent ? transport.chatAgentEpoch() : 0;
+    const Command cmd{Action::StopAll, 0, source, ep};
     if (!postTransportCommand(cmd)) {
-        if (fromAgent) return false;
+        if (source != CommandSource::Operator) return false;
         // Emergency operator Stop All must never be rejected by a full bounded command queue.
         transport.requestStopAll();
         predictedState_ = State::Stopped;
@@ -479,7 +487,7 @@ void Controller::setShowMode(bool enabled) {
     showMode = enabled;
     showModeAtomic_.store(enabled, std::memory_order_release);
     if (enabled) {
-        transport.invalidateAgentCommands();
+        transport.invalidateAllAgentCommands();
         cancelPendingTestMidi();
     }
     emit changed();

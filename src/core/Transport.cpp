@@ -140,8 +140,8 @@ void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
 void Transport::dispatch(int marker) noexcept {
     if (!show_->markers[marker].message.empty() && !midi_.push({marker, position_, epoch_.load()})) overflow_.store(true);
 }
-void Transport::apply(Command command) noexcept {
-    if (command.agentEpoch != 0 && command.agentEpoch != agentEpoch_.load(std::memory_order_acquire)) {
+void Transport::apply(Command command, std::uint64_t validExt, std::uint64_t validChat) noexcept {
+    if (!isCommandValid(command, validExt, validChat)) {
         ++applied_;
         return;
     }
@@ -198,32 +198,41 @@ void Transport::forceStopAll() noexcept {
 void Transport::render(float* output, unsigned count, unsigned channels) noexcept {
     if (output) std::fill(output, output + static_cast<std::size_t>(count) * channels, 0.f);
     if (!show_) return;
+    const std::uint64_t validExt = externalAgentEpoch_.load(std::memory_order_acquire);
+    const std::uint64_t validChat = chatAgentEpoch_.load(std::memory_order_acquire);
     if (urgentStop_.load(std::memory_order_acquire)) {
-        // Emergency Stop All discards queued commands before applying them so a queued Play
-        // cannot fire a hold's resume MIDI cue before stopping.
+        // Emergency Stop All skips queued Play/Pause so no resume MIDI cue can fire,
+        // while preserving any valid queued Seek position before stopping.
         Command discarded;
-        while (commands_.pop(discarded)) ++applied_;
+        while (commands_.pop(discarded)) {
+            if (discarded.action == Action::Seek && isCommandValid(discarded, validExt, validChat))
+                apply(discarded, validExt, validChat);
+            else
+                ++applied_;
+        }
         applyStopAll();
         urgentStop_.store(false, std::memory_order_release);
     } else {
-        // Coalesce up to the last valid StopAll in the pending batch so a queued Continue/Play
-        // preceding StopAll cannot publish a resume MIDI cue before StopAll advances the epoch.
+        // Use one consistent authorization snapshot across scan and execution. When a valid
+        // StopAll is in the batch, skip earlier Play/Pause (so no resume MIDI cue fires before
+        // StopAll) while still applying valid Seek commands so accepted seeks keep their position.
         Command batch[128];
         std::size_t countQueued = 0;
-        const std::uint64_t validAgent = agentEpoch_.load(std::memory_order_acquire);
         int lastStop = -1;
         while (countQueued < 128 && commands_.pop(batch[countQueued])) {
             const auto& c = batch[countQueued];
-            if (c.action == Action::StopAll && (c.agentEpoch == 0 || c.agentEpoch == validAgent))
+            if (c.action == Action::StopAll && isCommandValid(c, validExt, validChat))
                 lastStop = static_cast<int>(countQueued);
             ++countQueued;
         }
-        std::size_t startIndex = 0;
-        if (lastStop >= 0) {
-            applied_ += static_cast<std::uint64_t>(lastStop);
-            startIndex = static_cast<std::size_t>(lastStop);
+        for (std::size_t i = 0; i < countQueued; ++i) {
+            if (static_cast<int>(i) < lastStop &&
+                (batch[i].action == Action::Play || batch[i].action == Action::Pause)) {
+                ++applied_;
+                continue;
+            }
+            apply(batch[i], validExt, validChat);
         }
-        for (std::size_t i = startIndex; i < countQueued; ++i) apply(batch[i]);
     }
     float peak = 0; bool waiting = false;
     for (unsigned f = 0; f < count; ++f) {
