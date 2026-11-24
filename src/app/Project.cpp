@@ -387,13 +387,17 @@ void writeProject(const Project& p, const QString& path, bool allowOverwrite) {
     validate(p);
     for (const auto& a : p.assets)
         if (a.path.isEmpty()) throw std::runtime_error("Use Export demo first to save generated media");
-    const auto root = projectJson(p, QFileInfo(path).absolutePath());
+    const QFileInfo targetInfo(path);
+    const QString resolvedPath = (allowOverwrite && targetInfo.isSymLink() && !targetInfo.canonicalFilePath().isEmpty())
+        ? targetInfo.canonicalFilePath()
+        : path;
+    const auto root = projectJson(p, QFileInfo(resolvedPath).absolutePath());
     QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
     if (bytes.size() > compactThresholdBytes) bytes = QJsonDocument(root).toJson(QJsonDocument::Compact);
     if (bytes.size() > maxProjectFileBytes)
         throw std::runtime_error("Show manifest exceeds the 128 MB save limit");
     if (allowOverwrite) {
-        QSaveFile file(path);
+        QSaveFile file(resolvedPath);
         if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error(file.errorString().toStdString());
         if (file.write(bytes) != bytes.size() || !file.commit()) throw std::runtime_error(file.errorString().toStdString());
         return;

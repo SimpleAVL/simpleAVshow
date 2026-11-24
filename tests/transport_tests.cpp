@@ -470,6 +470,19 @@ int main() {
             expect(t.takeMidi(ev) && ev.source == CommandSource::ExternalAgent && ev.sourceEpoch == extEp &&
                    ev.secondarySource == CommandSource::ChatAgent && ev.secondaryEpoch == chatEp2,
                 "cross-domain play and seek carry both epochs on arrival MIDI");
+            // Revoking a chat Play must not bump the global MIDI epoch or discard an unrelated Operator cue.
+            t.configure(p);
+            t.command({Action::Play, 0, CommandSource::Operator, 0});
+            checkedRender(t, out.data(), 1, 2); // Queues Operator Arrival cue at frame 0.
+            const auto opMidiEpoch = t.epoch();
+            t.command({Action::Pause, 0, CommandSource::Operator, 0});
+            const auto staleChatEp = t.chatAgentEpoch();
+            t.command({Action::Play, 0, CommandSource::ChatAgent, staleChatEp});
+            t.invalidateChatAgentCommands();
+            checkedRender(t, out.data(), 16, 2);
+            expect(t.epoch() == opMidiEpoch, "revoking chat play does not bump global MIDI epoch");
+            expect(t.takeMidi(ev) && ev.epoch == t.epoch() && ev.source == CommandSource::Operator,
+                "earlier operator MIDI cue stays valid after chat play revocation");
         }}
     };
     for (const auto& [name, test] : tests) {

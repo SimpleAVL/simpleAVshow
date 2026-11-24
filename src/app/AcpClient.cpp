@@ -514,6 +514,7 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
     agentName_.clear(); agentVersion_.clear(); sessionId_.clear(); lastError_.clear();
     agentSupportsHttpMcp_ = false; agentSupportsSessionClose_ = false; usedHttpMcp_ = false;
     stdoutBuffer_.clear(); pending_.clear(); pendingPermissions_.clear();
+    knownToolCalls_.clear(); knownToolCallOrder_.clear();
     nextId_ = 1;
 
     process_ = new QProcess(this);
@@ -596,6 +597,8 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
             const bool hadSession = state_ == AcpState::Ready || state_ == AcpState::Prompting || state_ == AcpState::Connecting;
             pending_.clear();
             pendingPermissions_.clear();
+            knownToolCalls_.clear();
+            knownToolCallOrder_.clear();
             sessionId_.clear();
             if (auto tree = std::move(processTree_)) {
 #if defined(Q_OS_UNIX)
@@ -639,6 +642,8 @@ void AcpClient::startNewSession(const QString& cwd, const AcpMcpConfig& mcp) {
     if (state_ == AcpState::Prompting) cancelPrompt();
     else cancelAllPendingPermissions();
     cancelling_ = false;
+    knownToolCalls_.clear();
+    knownToolCallOrder_.clear();
     sessionId_.clear();
     setState(AcpState::Connecting);
     armDeadline(handshakeTimeoutMs_, "Timed out waiting for ACP session creation.");
@@ -691,6 +696,8 @@ void AcpClient::disconnectFromAgent() {
     cancelAllPendingPermissions();
     pending_.clear();
     pendingPermissions_.clear();
+    knownToolCalls_.clear();
+    knownToolCallOrder_.clear();
     stdoutBuffer_.clear();
     sessionId_.clear();
     teardownProcess(false);
@@ -887,6 +894,8 @@ void AcpClient::handleResponse(int id, const QJsonObject& msg) {
         };
         sendRequest("session/new", params, PendingKind::SessionNew);
     } else if (kind == PendingKind::SessionNew) {
+        knownToolCalls_.clear();
+        knownToolCallOrder_.clear();
         sessionId_ = result["sessionId"].toString();
         if (sessionId_.isEmpty()) {
             failConnection("ACP agent returned an empty sessionId.");
@@ -917,14 +926,40 @@ void AcpClient::handleNotification(const QString& method, const QJsonObject& par
         const QString text = extractContentText(update["content"]);
         if (!text.isEmpty()) emit thoughtChunk(text);
     } else if (kind == "tool_call" || kind == "tool_call_update") {
+        constexpr qsizetype maxPermissionDetailChars = 128 * 1024;
+        constexpr int maxTrackedToolCalls = 256;
         AcpToolCallUpdate call;
         call.toolCallId = update["toolCallId"].toString();
         call.title = update["title"].toString();
         call.kind = update["kind"].toString();
         call.status = update["status"].toString();
-        call.detail = extractContentText(update["content"]);
+        const QString contentDetail = extractContentText(update["content"]);
+        const QString rawInputDetail = update.contains("rawInput") ? summarizeJson(update["rawInput"]) : QString();
+        call.detail = contentDetail;
         if (call.detail.isEmpty() && update.contains("rawOutput")) call.detail = summarizeJson(update["rawOutput"]);
-        if (call.detail.isEmpty() && update.contains("rawInput")) call.detail = summarizeJson(update["rawInput"]);
+        if (call.detail.isEmpty() && !rawInputDetail.isEmpty()) call.detail = rawInputDetail;
+        if (!call.toolCallId.isEmpty()) {
+            const bool isNew = !knownToolCalls_.contains(call.toolCallId);
+            auto& tracked = knownToolCalls_[call.toolCallId];
+            if (isNew) {
+                knownToolCallOrder_.append(call.toolCallId);
+                while (knownToolCallOrder_.size() > maxTrackedToolCalls) {
+                    knownToolCalls_.remove(knownToolCallOrder_.takeFirst());
+                }
+            }
+            if (!call.title.isEmpty()) tracked.title = call.title;
+            if (!call.kind.isEmpty()) tracked.kind = call.kind;
+            const QString permDetail = !rawInputDetail.isEmpty() ? rawInputDetail : contentDetail;
+            if (!permDetail.isEmpty()) {
+                if (permDetail.size() > maxPermissionDetailChars) {
+                    tracked.detailTooLarge = true;
+                    tracked.detail.clear();
+                } else if (!rawInputDetail.isEmpty() || (tracked.detail.isEmpty() && !tracked.detailTooLarge)) {
+                    tracked.detailTooLarge = false;
+                    tracked.detail = permDetail;
+                }
+            }
+        }
         emit toolCallUpdated(call);
     } else if (kind == "plan") {
         QStringList items;
@@ -954,20 +989,33 @@ void AcpClient::handleAgentRequest(const QJsonValue& id, const QString& method, 
         };
         constexpr qsizetype maxPermissionDetailChars = 128 * 1024;
         const auto toolCall = params["toolCall"].toObject();
+        const QString rawToolCallId = toolCall["toolCallId"].toString();
+        const auto trackedIt = rawToolCallId.isEmpty() ? knownToolCalls_.cend() : knownToolCalls_.constFind(rawToolCallId);
+        const bool hasTracked = trackedIt != knownToolCalls_.cend();
+        QString resolvedTitle = toolCall["title"].toString();
+        if (resolvedTitle.isEmpty() && hasTracked) resolvedTitle = trackedIt->title;
+        if (resolvedTitle.isEmpty()) resolvedTitle = "Agent permission request";
+        QString resolvedKind = toolCall["kind"].toString();
+        if (resolvedKind.isEmpty() && hasTracked) resolvedKind = trackedIt->kind;
         QString fullDetail = summarizeJson(toolCall["rawInput"]);
         if (fullDetail.isEmpty()) fullDetail = extractContentText(toolCall["content"]);
-        if (fullDetail.size() > maxPermissionDetailChars) {
+        bool detailTooLarge = fullDetail.size() > maxPermissionDetailChars;
+        if (fullDetail.isEmpty() && hasTracked) {
+            if (trackedIt->detailTooLarge) detailTooLarge = true;
+            else fullDetail = trackedIt->detail;
+        }
+        if (detailTooLarge) {
             // Never present a truncated permission request that could hide arguments behind Allow.
             sendResponse(id, {{"outcome", QJsonObject{{"outcome", "cancelled"}}}});
             emit stderrReceived(QString("Auto-cancelled permission request “%1” because its arguments exceeded 128 KB.\n")
-                .arg(clamp(toolCall["title"].toString("Agent permission request"), 128)));
+                .arg(clamp(resolvedTitle, 128)));
             return;
         }
         AcpPermissionRequest request;
         request.requestKey = nextPermissionKey_++;
-        request.toolCallId = clamp(toolCall["toolCallId"].toString(), 128);
-        request.title = clamp(toolCall["title"].toString("Agent permission request"), 256);
-        request.kind = clamp(toolCall["kind"].toString(), 64);
+        request.toolCallId = clamp(rawToolCallId, 128);
+        request.title = clamp(resolvedTitle, 256);
+        request.kind = clamp(resolvedKind, 64);
         request.detail = std::move(fullDetail);
         for (const auto& val : params["options"].toArray()) {
             if (static_cast<int>(request.options.size()) >= maxPermissionOptions) break;
@@ -1032,6 +1080,8 @@ void AcpClient::failConnection(const QString& message) {
     cancelling_ = false;
     pending_.clear();
     pendingPermissions_.clear();
+    knownToolCalls_.clear();
+    knownToolCallOrder_.clear();
     stdoutBuffer_.clear();
     sessionId_.clear();
     teardownProcess(false);

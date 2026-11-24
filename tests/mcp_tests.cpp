@@ -412,6 +412,14 @@ private slots:
         QVERIFY(!call(server, "project_action", {{"action", "save_as"}, {"path", otherShowPath}, {"overwrite", true}})["isError"].toBool());
         QVERIFY(QFileInfo::exists(otherShowPath));
         QVERIFY(!call(server, "project_action", {{"action", "save_as"}, {"path", showPath}, {"overwrite", true}})["isError"].toBool());
+#ifndef Q_OS_WIN
+        // Saving through a symlink in another directory must compute relative media paths against the canonical manifest directory.
+        QVERIFY(QDir(dir.path()).mkpath("shortcuts"));
+        const QString symlinkShowPath = dir.filePath("shortcuts/link.savshow");
+        QVERIFY(QFile::link(showPath, symlinkShowPath));
+        QVERIFY(!call(server, "project_action", {{"action", "save"}, {"path", symlinkShowPath}})["isError"].toBool());
+        QCOMPARE(QFileInfo(window.controller().path).canonicalFilePath(), QFileInfo(showPath).canonicalFilePath());
+#endif
         QVERIFY(!call(server, "project_action", {{"action", "export_package"}, {"path", packPath}})["isError"].toBool());
         QVERIFY(QFileInfo::exists(packPath));
         QVERIFY(call(server, "project_action", {{"action", "export_package"}, {"path", packPath}})["isError"].toBool());

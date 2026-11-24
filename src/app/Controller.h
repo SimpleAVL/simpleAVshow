@@ -11,6 +11,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <atomic>
 
@@ -128,7 +129,7 @@ private:
     std::deque<PendingTransportCommand> pendingCommands_;
     std::pair<State, Frame> predictTransport(bool* hasPendingPlay = nullptr) const;
     bool postTransportCommand(Command cmd);
-    void arm(Frame position);
+    void arm(std::optional<Frame> position = std::nullopt);
     void startMidiThread();
     void watchMidi();
     void stopMidiThread();

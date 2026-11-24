@@ -1,4 +1,5 @@
 #pragma once
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonValue>
@@ -113,6 +114,12 @@ private:
         QJsonValue rpcId;
         QString sessionId;
     };
+    struct KnownToolCall {
+        QString title;
+        QString kind;
+        QString detail;
+        bool detailTooLarge = false;
+    };
 
     struct ProcessTreeHandle;
     struct RetiringProcess {
@@ -140,6 +147,8 @@ private:
     int nextPermissionKey_ = 1;
     QMap<int, PendingRequest> pending_;
     QMap<int, PendingPermission> pendingPermissions_;
+    QHash<QString, KnownToolCall> knownToolCalls_;
+    QStringList knownToolCallOrder_;
     std::vector<RetiringProcess> retiringProcesses_;
     std::vector<std::shared_ptr<ProcessTreeHandle>> retiringTrees_;
     QTimer deadlineTimer_;

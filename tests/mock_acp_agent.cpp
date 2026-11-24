@@ -29,6 +29,7 @@ int main(int argc, char** argv) {
     const bool ignoreCancel = args.contains("--ignore-cancel");
     const bool exitCleanAfterPermission = args.contains("--exit-clean-after-permission");
     const bool noSessionClose = args.contains("--no-session-close");
+    const bool idOnlyPermission = args.contains("--id-only-permission");
 
     int sessionCounter = 0;
     QString sessionId = "mock-session-1";
@@ -155,19 +156,41 @@ int main(int argc, char** argv) {
                 waitingPermission = true;
                 QJsonObject rawInput{{"action", "apply_edits"}};
                 if (longPermission) rawInput.insert("payload", QString(320, 'X') + "TAIL_MARKER_END");
-                send({{"jsonrpc", "2.0"}, {"id", "perm-1"}, {"method", "session/request_permission"}, {"params", QJsonObject{
-                    {"sessionId", pendingPromptSession},
-                    {"toolCall", QJsonObject{
-                        {"toolCallId", "tc-perm"},
-                        {"title", "<b>Apply edits to show</b>"},
-                        {"kind", "edit"},
-                        {"rawInput", rawInput}
-                    }},
-                    {"options", QJsonArray{
-                        QJsonObject{{"optionId", "allow-once"}, {"name", "Allow once"}, {"kind", "allow_once"}},
-                        QJsonObject{{"optionId", "reject-once"}, {"name", "Reject"}, {"kind", "reject_once"}}
-                    }}
-                }}});
+                if (idOnlyPermission) {
+                    send({{"jsonrpc", "2.0"}, {"method", "session/update"}, {"params", QJsonObject{
+                        {"sessionId", pendingPromptSession},
+                        {"update", QJsonObject{
+                            {"sessionUpdate", "tool_call"},
+                            {"toolCallId", "tc-perm"},
+                            {"title", "Apply edits via cached tool_call"},
+                            {"kind", "edit"},
+                            {"status", "pending"},
+                            {"rawInput", rawInput}
+                        }}
+                    }}});
+                    send({{"jsonrpc", "2.0"}, {"id", "perm-1"}, {"method", "session/request_permission"}, {"params", QJsonObject{
+                        {"sessionId", pendingPromptSession},
+                        {"toolCall", QJsonObject{{"toolCallId", "tc-perm"}}},
+                        {"options", QJsonArray{
+                            QJsonObject{{"optionId", "allow-once"}, {"name", "Allow once"}, {"kind", "allow_once"}},
+                            QJsonObject{{"optionId", "reject-once"}, {"name", "Reject"}, {"kind", "reject_once"}}
+                        }}
+                    }}});
+                } else {
+                    send({{"jsonrpc", "2.0"}, {"id", "perm-1"}, {"method", "session/request_permission"}, {"params", QJsonObject{
+                        {"sessionId", pendingPromptSession},
+                        {"toolCall", QJsonObject{
+                            {"toolCallId", "tc-perm"},
+                            {"title", "<b>Apply edits to show</b>"},
+                            {"kind", "edit"},
+                            {"rawInput", rawInput}
+                        }},
+                        {"options", QJsonArray{
+                            QJsonObject{{"optionId", "allow-once"}, {"name", "Allow once"}, {"kind", "allow_once"}},
+                            QJsonObject{{"optionId", "reject-once"}, {"name", "Reject"}, {"kind", "reject_once"}}
+                        }}
+                    }}});
+                }
                 if (exitCleanAfterPermission) return 0;
             } else if (holdPrompt && (!staleOnNewSession || sessionCounter == 1)) {
                 waitingCancel = true;

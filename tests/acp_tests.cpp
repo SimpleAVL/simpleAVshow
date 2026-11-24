@@ -18,6 +18,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTextBrowser>
+#include <QToolButton>
 
 using namespace sav;
 
@@ -835,6 +836,19 @@ private slots:
         QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
         QCOMPARE(window.controller().transport.state(), State::Stopped);
 
+        // Clicking a chat toolbar button (e.g. Logs) while a timeline clip is selected must move
+        // focus into chat so Space/Delete do not start playback or delete the selected clip.
+        auto* logsToggle = panel->findChild<QToolButton*>("agentLogsToggle");
+        QVERIFY(logsToggle);
+        timeline->setFocus();
+        QTest::mouseClick(logsToggle, Qt::LeftButton);
+        QVERIFY(panel->isAncestorOf(QApplication::focusWidget()));
+        window.controller().status.clear();
+        QTest::keyClick(QApplication::focusWidget(), Qt::Key_Delete);
+        QTest::keyClick(QApplication::focusWidget(), Qt::Key_Space);
+        QCOMPARE(window.controller().project.show.clips.size(), clipsBeforeButtonKeys);
+        QCOMPARE(window.controller().transport.state(), State::Stopped);
+
         // Space and Backspace inside the Agent Chat drawer (including read-only transcript/logs)
         // must NOT trigger live playback or delete selected timeline clips.
         const auto clipsBeforeTranscript = window.controller().project.show.clips.size();
@@ -964,6 +978,30 @@ private slots:
         c2.undo();
         QVERIFY(c2.project.assets.contains(pkgAsset.id));
         QVERIFY(QFileInfo::exists(c2.project.assets[pkgAsset.id].path));
+    }
+
+    void permissionMergesCachedToolCallDetails() {
+        AcpClient client;
+        AcpPermissionRequest received;
+        bool gotPermission = false;
+        QObject::connect(&client, &AcpClient::permissionRequested, &client, [&](const AcpPermissionRequest& req) {
+            received = req;
+            gotPermission = true;
+            client.respondPermission(req.requestKey, "allow-once");
+        });
+        QString stopReason;
+        QObject::connect(&client, &AcpClient::promptFinished, &client, [&](const QString& reason) { stopReason = reason; });
+        client.connectToAgent(QString::fromUtf8(SAV_MOCK_ACP_AGENT), {"--http-mcp", "--require-permission", "--id-only-permission"},
+            QDir::tempPath(), {});
+        QTRY_COMPARE(client.state(), AcpState::Ready);
+        client.sendPrompt("test id-only permission");
+        QTRY_VERIFY(gotPermission);
+        QCOMPARE(received.toolCallId, QString("tc-perm"));
+        QCOMPARE(received.title, QString("Apply edits via cached tool_call"));
+        QCOMPARE(received.kind, QString("edit"));
+        QVERIFY(received.detail.contains("apply_edits"));
+        QTRY_COMPARE(stopReason, QString("end_turn"));
+        client.disconnectFromAgent();
     }
 };
 

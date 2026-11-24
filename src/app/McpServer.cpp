@@ -1661,7 +1661,13 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
         // Ordinary `save` may update the current project file; `save_as` (or saving to a different path)
         // requires explicit `overwrite: true` and publishes atomically without replacement by default.
         const bool allowOverwrite = overwrite || (action == "save" && !c_.path.isEmpty() && sameLocalPath(target, c_.path));
-        if (!allowOverwrite) {
+        if (allowOverwrite) {
+            // When saving through a symlink to an existing show, resolve to the canonical manifest path so
+            // relative media paths and sibling .media staging match the actual manifest directory.
+            const QFileInfo targetInfo(target);
+            if (targetInfo.isSymLink() && !targetInfo.canonicalFilePath().isEmpty())
+                target = targetInfo.canonicalFilePath();
+        } else {
             if (QFileInfo::exists(target) || QFileInfo(target).isSymLink())
                 fail("Destination file already exists; pass overwrite: true to replace it");
             const QString targetAutosave = target + ".autosave";

@@ -128,7 +128,7 @@ QString markdownToHtml(const QString& markdown) {
 QPushButton* compactButton(const QString& text, QLayout* layout = nullptr) {
     auto* btn = new QPushButton(text);
     btn->setCursor(Qt::PointingHandCursor);
-    btn->setFocusPolicy(Qt::TabFocus);
+    btn->setFocusPolicy(Qt::StrongFocus);
     btn->setStyleSheet("padding: 5px 9px;");
     if (layout) layout->addWidget(btn);
     return btn;
@@ -139,6 +139,7 @@ QPushButton* compactButton(const QString& text, QLayout* layout = nullptr) {
 AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* parent)
     : QWidget(parent), c_(controller), mcp_(mcp), acp_(this) {
     setObjectName("agentChatPanel");
+    setFocusPolicy(Qt::ClickFocus);
     setMinimumWidth(320);
     setStyleSheet("QWidget#agentChatPanel { background: #161f2c; border-left: 1px solid #2a3647; }");
 
@@ -201,6 +202,7 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
     guardRow->setSpacing(6);
     allowEditing_ = new QCheckBox("Allow edits & controls");
     allowEditing_->setObjectName("agentChatAllowEditing");
+    allowEditing_->setFocusPolicy(Qt::StrongFocus);
     allowEditing_->setToolTip("Allow the agent to edit this show, import/relink media, configure outputs/remote, save/export, and run rehearsal playback. Locked in Show mode.");
     guardRow->addWidget(allowEditing_);
     guardRow->addStretch();
@@ -211,15 +213,16 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
     auto* mcpBtn = new QToolButton;
     mcpBtn->setText("MCP…");
     mcpBtn->setToolTip("Open external MCP server settings");
-    mcpBtn->setFocusPolicy(Qt::TabFocus);
+    mcpBtn->setFocusPolicy(Qt::StrongFocus);
     mcpBtn->setStyleSheet("padding: 4px 7px;");
     connect(mcpBtn, &QToolButton::clicked, this, &AgentChatPanel::mcpSettingsRequested);
     guardRow->addWidget(mcpBtn);
     logsToggle_ = new QToolButton;
+    logsToggle_->setObjectName("agentLogsToggle");
     logsToggle_->setText("Logs");
     logsToggle_->setCheckable(true);
     logsToggle_->setToolTip("Show raw ACP agent diagnostics (stderr)");
-    logsToggle_->setFocusPolicy(Qt::TabFocus);
+    logsToggle_->setFocusPolicy(Qt::StrongFocus);
     logsToggle_->setStyleSheet("padding: 4px 7px;");
     guardRow->addWidget(logsToggle_);
     root->addLayout(guardRow);
@@ -903,6 +906,7 @@ void AgentChatPanel::addPermissionCard(const AcpPermissionRequest& request) {
         if (isLong) {
             auto* expand = new QToolButton;
             expand->setObjectName("permissionDetailToggle");
+            expand->setFocusPolicy(Qt::StrongFocus);
             expand->setText("Expand full request");
             expand->setCheckable(true);
             expand->setStyleSheet("padding: 2px 6px; font-size: 11px; color: #f2d38b; background: #332a1d; border: 1px solid #6b532c;");

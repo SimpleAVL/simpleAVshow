@@ -142,10 +142,9 @@ bool Controller::edit(const std::function<void(Project&)>& mutation) {
     if (!canEdit()) return false;
     try {
         Project next = project; mutation(next); bindAudio(next); validate(next);
-        const Frame time = std::min(position(), next.show.duration);
         // The previous state moves into history rather than being copied again.
         undo_.push_back(std::move(project)); if (undo_.size() > 32) undo_.pop_front(); redo_.clear();
-        project = std::move(next); dirty = true; ++projectRevision_; arm(time); emit changed(); return true;
+        project = std::move(next); dirty = true; ++projectRevision_; arm(); emit changed(); return true;
     } catch (const std::exception& e) { report(QString::fromUtf8(e.what())); return false; }
 }
 void Controller::replace(Project next, QString projectPath, bool markDirty) {
@@ -159,18 +158,21 @@ void Controller::replace(Project next, QString projectPath, bool markDirty) {
 void Controller::undo() {
     if (!canEdit() || undo_.empty()) return;
     redo_.push_back(std::move(project)); project = std::move(undo_.back()); undo_.pop_back(); dirty = true; ++projectRevision_;
-    arm(std::min(position(), project.show.duration)); emit changed();
+    arm(); emit changed();
 }
 void Controller::redo() {
     if (!canEdit() || redo_.empty()) return;
     undo_.push_back(std::move(project)); project = std::move(redo_.back()); redo_.pop_back(); dirty = true; ++projectRevision_;
-    arm(std::min(position(), project.show.duration)); emit changed();
+    arm(); emit changed();
 }
-void Controller::arm(Frame position) {
+void Controller::arm(std::optional<Frame> position) {
     stopMidiThread();
     // The callback must be stopped before configure; a healthy stream only pauses.
     const bool keep = configured_ && device.running();
     if (keep) device.pause(); else device.close();
+    // Resolve the target position AFTER pausing the audio callback so any queued valid Seek
+    // (whether already applied by a racing callback or still pending in pendingCommands_) is preserved.
+    const Frame targetPosition = position ? *position : std::min(effectivePosition(), project.show.duration);
     videos_.clear(); videoErrors_.clear(); lastPicture_ = {}; lastComposed_ = -1; lateFrames = 0;
     auto armed = std::make_shared<Show>(project.show);
     for (auto& clip : armed->clips) {
@@ -178,7 +180,7 @@ void Controller::arm(Frame position) {
         const auto asset = project.assets.constFind(QString::fromStdString(clip.assetId));
         if (asset != project.assets.cend() && asset->video && !asset->offline) clip.videoLength = frames(asset->duration);
     }
-    armed_ = std::move(armed); transport.configure(armed_, position);
+    armed_ = std::move(armed); transport.configure(armed_, targetPosition);
     commandsPosted_ = 0; operatorStopSeq_ = 0; pendingCommands_.clear();
     if (keep && device.resume()) stall_.restart();
     else if (configured_) {
@@ -296,7 +298,7 @@ bool Controller::play(CommandSource source) {
     if (state != State::Playing) {
         playbackProblem.clear();
         // Re-arming retries sources that were briefly unavailable; changed sources still need reopening.
-        if (transport.audioReadFailed() && state != State::Held && !transport.asyncVoices()) arm(position());
+        if (transport.audioReadFailed() && state != State::Held && !transport.asyncVoices()) arm();
         if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and press Play to retry, or reopen the project to rebuild changed or damaged caches."); playbackProblem = status; return false; }
         // Resuming a live show never blocks on picture or MIDI; it warns and continues.
         const bool resuming = state == State::Held || transport.asyncVoices() || (state == State::Paused && device.running());
@@ -780,7 +782,7 @@ bool Controller::commitSave(Project candidate, QString target, bool allowOverwri
             if (!extracted) snapshot.packageDirectory.reset();
             bindAudio(snapshot);
         }
-        if (sourceDirectory) arm(position());
+        if (sourceDirectory) arm();
         // The edits now live in target; a sidecar left next to the previous file would offer them again.
         // Only remove target's sidecar when overwriting or saving back to the same project path.
         if (allowOverwrite || sameTarget) QFile::remove(target + ".autosave");

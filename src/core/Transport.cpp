@@ -178,7 +178,6 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
         // rendered sample and defer hold-resume MIDI until the command batch settles.
         if (command.source != CommandSource::Operator && !isSourceValid(command.source, command.sourceEpoch)) {
             state_ = prevState; heldMarker_ = prevHeldMarker;
-            epoch_.fetch_add(1);
             break;
         }
         pendingStart.active = true;
@@ -372,11 +371,13 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             applyUrgentStop(countQueued);
             pendingStart = {};
         } else {
+            // Do not bump the global MIDI epoch_ on revoked agent rollback: any MIDI emitted by the
+            // revoked agent already carries its own source/sourceEpoch and is rejected by the MIDI worker,
+            // while unrelated earlier Operator cues in midi_ must remain valid.
             if (pendingStart.active && pendingStart.source != CommandSource::Operator &&
                 !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
                 state_ = pendingStart.prevState;
                 heldMarker_ = pendingStart.prevHeldMarker;
-                epoch_.fetch_add(1);
                 pendingStart.active = false;
             }
             if (pendingStart.wasHeld && (state_ == State::Playing || state_ == State::Paused)) {
@@ -384,7 +385,6 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                     !isSourceValid(pendingStart.resumeSource, pendingStart.resumeEpoch)) {
                     state_ = pendingStart.resumePrevState;
                     heldMarker_ = pendingStart.resumePrevHeldMarker;
-                    epoch_.fetch_add(1);
                     pendingStart.wasHeld = false;
                     pendingStart.active = false;
                 } else {
@@ -399,7 +399,6 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                         !isSourceValid(pendingStart.resumeSource, pendingStart.resumeEpoch)) {
                         state_ = pendingStart.resumePrevState;
                         heldMarker_ = pendingStart.resumePrevHeldMarker;
-                        epoch_.fetch_add(1);
                         pendingStart.wasHeld = false;
                         pendingStart.active = false;
                     }
@@ -417,7 +416,6 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
                 state_ = pendingStart.prevState;
                 heldMarker_ = pendingStart.prevHeldMarker;
-                epoch_.fetch_add(1);
                 pendingStart.active = false;
             }
             bool advancingAtBoundary = state_ == State::Playing;
@@ -464,7 +462,6 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                     active_.resize(savedActiveSize);
                     state_ = pendingStart.prevState;
                     heldMarker_ = pendingStart.prevHeldMarker;
-                    epoch_.fetch_add(1);
                     pendingStart.active = false;
                     advancingAtBoundary = false;
                 }
