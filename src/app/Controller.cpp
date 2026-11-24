@@ -204,11 +204,16 @@ void Controller::startMidiThread() {
     midiThread_ = std::thread([this, snapshot] {
         while (!midiStop_.load()) {
             MidiEvent event;
-            while (transport.takeMidi(event)) {
+            while (!midiStop_.load(std::memory_order_acquire) && transport.takeMidi(event)) {
                 if (event.epoch != transport.epoch() || event.marker < 0 || static_cast<std::size_t>(event.marker) >= snapshot->markers.size()) continue;
                 if (!transport.isSourceValid(event.source, event.sourceEpoch)) continue;
                 const auto& marker = snapshot->markers[event.marker]; QString error;
-                if (!midi.send(marker.message, error)) {
+                auto allowCueSubmit = [&]() -> bool {
+                    return !midiStop_.load(std::memory_order_acquire) &&
+                        event.epoch == transport.epoch() &&
+                        transport.isSourceValid(event.source, event.sourceEpoch);
+                };
+                if (!midi.send(marker.message, error, allowCueSubmit) && !midiStop_.load(std::memory_order_acquire)) {
                     QMetaObject::invokeMethod(this, [this, error] { report(error); }, Qt::QueuedConnection);
                 }
             }

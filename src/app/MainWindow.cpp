@@ -113,8 +113,9 @@ struct MediaResult { std::vector<MediaAsset> assets; QStringList errors; };
 class PackageProgress : public QProgressDialog {
 public:
     using QProgressDialog::QProgressDialog;
-    // Keep the modal wait alive until the worker completes, including Escape/window close.
+    // Keep the modal wait alive until the worker completes, including Escape and window close.
     void reject() override {}
+    void closeEvent(QCloseEvent* event) override { event->ignore(); }
 };
 }
 
@@ -1115,37 +1116,42 @@ void MainWindow::outputSettings() {
 }
 void MainWindow::openOutput(int index, bool confirmEditorCover) {
     const auto screens = QGuiApplication::screens(); if (index < 0 || index >= screens.size()) return;
+    QPointer<QScreen> target(screens[index]);
     if (!outputWindow_) {
         outputWindow_ = new QWidget(this, Qt::Window | Qt::FramelessWindowHint); outputWindow_->setWindowTitle("SimpleAVShow — Program"); outputWindow_->setStyleSheet("background: black;");
         auto* layout = new QVBoxLayout(outputWindow_); layout->setContentsMargins(0, 0, 0, 0); output_ = new ProgramView; layout->addWidget(output_);
         outputWindow_->setCursor(Qt::BlankCursor);
         auto* close = new QShortcut(QKeySequence::Close, outputWindow_); connect(close, &QShortcut::activated, this, [this] { outputLost_ = false; outputTargetScreen_.clear(); if (outputWindow_) outputWindow_->hide(); });
     }
-    if (confirmEditorCover && screens[index] == screen() && QMessageBox::question(this, "Cover the editor?",
+    if (confirmEditorCover && target == screen() && QMessageBox::question(this, "Cover the editor?",
             "This display shows the editor. The program output will cover it until you press " + QKeySequence(QKeySequence::Close).toString(QKeySequence::NativeText) + " on the output.",
             QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Ok) return;
-    QScreen* target = screens[index];
+    // Revalidate the target screen after the confirmation dialog's nested event loop in case it was unplugged.
+    if (!target || !QGuiApplication::screens().contains(target.data())) {
+        c_.report("Selected program display is no longer connected.");
+        return;
+    }
     outputLost_ = false;
     outputTargetScreen_ = target;
     outputScreen_ = target->name();
     outputScreenManufacturer_ = target->manufacturer();
     outputScreenModel_ = target->model();
     outputScreenSerial_ = target->serialNumber();
-    outputWasNonEditor_ = (target != screen());
+    outputWasNonEditor_ = (target.data() != screen());
     QSettings().setValue("display/screen", outputScreen_);
     openingOutput_ = true;
     output_->setPicture(c_.compose()); outputWindow_->hide(); outputWindow_->winId();
     if (auto* handle = outputWindow_->windowHandle()) {
         disconnect(outputScreenConn_);
         outputScreenConn_ = connect(handle, &QWindow::screenChanged, this, &MainWindow::onOutputWindowScreenChanged);
-        handle->setScreen(target);
+        handle->setScreen(target.data());
     }
     outputWindow_->setGeometry(target->geometry()); outputWindow_->showFullScreen();
 #ifdef Q_OS_WIN
     // Windows can choose the primary monitor during the fullscreen transition.
     // Apply the selected screen and native geometry after that transition too.
     if (auto* handle = outputWindow_->windowHandle()) {
-        handle->setScreen(target);
+        handle->setScreen(target.data());
         handle->setGeometry(target->geometry());
     }
 #endif
@@ -1291,20 +1297,29 @@ void MainWindow::save(bool as) {
     if (!lease) { c_.report("Wait for the current file operation to finish"); return; }
     const quint64 expectedRev = initialRev;
     updatePlayback();
-    QProgressDialog progress("Copying media next to the show…", QString(), 0, 0, this);
+    PackageProgress progress("Copying media next to the show…", QString(), 0, 0, this);
     progress.setWindowTitle("Saving show"); progress.setWindowModality(Qt::WindowModal); progress.setMinimumDuration(0);
-    progress.setAutoClose(false); progress.setAutoReset(false);
+    progress.setAutoClose(false); progress.setAutoReset(false); progress.setCancelButton(nullptr);
     QFutureWatcher<ProjectResult> watcher;
-    connect(&watcher, &QFutureWatcher<ProjectResult>::finished, &progress, &QDialog::accept);
+    QEventLoop loop;
+    bool completed = false;
+    ProjectResult result;
+    connect(&watcher, &QFutureWatcher<ProjectResult>::finished, &loop, [&] {
+        result = watcher.result();
+        completed = true;
+        c_.releaseBusy(lease);
+        progress.hide();
+        loop.quit();
+    });
     const QString directory = Controller::mediaDirectory(target);
     watcher.setFuture(QtConcurrent::run([candidate = c_.project, directory]() mutable {
-        ProjectResult result;
-        try { materializeProjectMedia(candidate, directory); result.project = std::move(candidate); }
-        catch (const std::exception& e) { result.error = QString::fromUtf8(e.what()); }
-        return result;
+        ProjectResult res;
+        try { materializeProjectMedia(candidate, directory); res.project = std::move(candidate); }
+        catch (const std::exception& e) { res.error = QString::fromUtf8(e.what()); }
+        return res;
     }));
-    progress.exec();
-    auto result = watcher.result(); c_.releaseBusy(lease);
+    progress.show();
+    if (!completed) loop.exec();
     if (!result.error.isEmpty()) { c_.report("Save failed: " + result.error); QMessageBox::warning(this, "Could not save", result.error); refresh(); return; }
     if (!c_.canEdit() || c_.projectRevision() != expectedRev) { c_.report("Save cancelled because the show changed."); refresh(); return; }
     c_.commitSave(std::move(result.project), target);
@@ -1333,16 +1348,25 @@ void MainWindow::writePackage(const QString& path) {
     PackageProgress progress("Collecting show and media into a package…", QString(), 0, 0, this);
     progress.setWindowTitle("Exporting show package");
     progress.setWindowModality(Qt::WindowModal); progress.setMinimumDuration(0);
-    progress.setAutoClose(false); progress.setAutoReset(false);
+    progress.setAutoClose(false); progress.setAutoReset(false); progress.setCancelButton(nullptr);
     QFutureWatcher<QString> watcher;
-    connect(&watcher, &QFutureWatcher<QString>::finished, &progress, &QDialog::accept);
+    QEventLoop loop;
+    bool completed = false;
+    QString error;
+    connect(&watcher, &QFutureWatcher<QString>::finished, &loop, [&] {
+        error = watcher.result();
+        completed = true;
+        c_.releaseBusy(lease);
+        progress.hide();
+        loop.quit();
+    });
     const Project snapshot = c_.project;
     watcher.setFuture(QtConcurrent::run([snapshot, path] {
         try { writeProjectPackage(snapshot, path); return QString(); }
         catch (const std::exception& e) { return QString::fromUtf8(e.what()); }
     }));
-    progress.exec();
-    const auto error = watcher.result(); c_.releaseBusy(lease);
+    progress.show();
+    if (!completed) loop.exec();
     if (!error.isEmpty()) {
         c_.report("Package failed: " + error);
         QMessageBox::warning(this, "Could not write package", error);

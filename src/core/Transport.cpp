@@ -264,26 +264,52 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
         int lastChatStop = -1;
         for (std::size_t i = 0; i < countQueued; ++i) {
             const auto& c = batch[i];
-            if (c.action == Action::StopAll && isCommandValid(c, validExt, validChat)) {
+            if (c.action == Action::StopAll) {
                 if (c.source == CommandSource::Operator) lastOpStop = static_cast<int>(i);
-                else if (c.source == CommandSource::ExternalAgent) lastExtStop = static_cast<int>(i);
-                else lastChatStop = static_cast<int>(i);
+                else if (c.source == CommandSource::ExternalAgent && isCommandValid(c, validExt, validChat)) lastExtStop = static_cast<int>(i);
+                else if (c.source == CommandSource::ChatAgent && isCommandValid(c, validExt, validChat)) lastChatStop = static_cast<int>(i);
             }
         }
-        for (std::size_t i = 0; i < countQueued; ++i) {
+        std::size_t startIndex = 0;
+        if (lastOpStop >= 0) {
+            // Give queued Operator StopAll O(1) priority even when the queue is not full:
+            // coalesce any preceding valid seeks to the final seek position and stop once.
+            bool hasFinalSeek = false;
+            Frame finalSeekPos = 0;
+            for (std::size_t i = 0; i <= static_cast<std::size_t>(lastOpStop); ++i) {
+                const auto& c = batch[i];
+                if (c.action == Action::Seek && isSourceValid(c.source, c.sourceEpoch)) {
+                    hasFinalSeek = true;
+                    finalSeekPos = c.position;
+                }
+                ++applied_;
+            }
+            if (hasFinalSeek) {
+                position_ = std::clamp(finalSeekPos, Frame{0}, show_->duration);
+                locate(position_);
+            }
+            applyStopAll();
+            startIndex = static_cast<std::size_t>(lastOpStop + 1);
+        }
+        auto cutoffValid = [&](int idx) noexcept {
+            return idx >= static_cast<int>(startIndex) && isSourceValid(batch[idx].source, batch[idx].sourceEpoch);
+        };
+        for (std::size_t i = startIndex; i < countQueued; ++i) {
             if (urgentStop_.load(std::memory_order_acquire)) {
                 applyUrgentStop(i);
                 break;
             }
             const auto& c = batch[i];
             // Never allow a lower-privilege or revocable StopAll domain to suppress a command from
-            // a higher-privilege or independent domain (e.g. a revoked chat StopAll can never drop
-            // an external MCP command). Seeks are always preserved.
+            // a higher-privilege or independent domain, and recheck live epochs so a StopAll
+            // revoked mid-batch never suppresses an earlier valid command. Seeks are always preserved.
+            const int validExtStop = cutoffValid(lastExtStop) ? lastExtStop : -1;
+            const int validChatStop = cutoffValid(lastChatStop) ? lastChatStop : -1;
             const int stopCutoff = c.source == CommandSource::Operator
-                ? lastOpStop
+                ? -1
                 : c.source == CommandSource::ExternalAgent
-                    ? std::max(lastOpStop, lastExtStop)
-                    : std::max({lastOpStop, lastExtStop, lastChatStop});
+                    ? validExtStop
+                    : std::max(validExtStop, validChatStop);
             if (static_cast<int>(i) < stopCutoff && (c.action == Action::Play || c.action == Action::Pause)) {
                 ++applied_;
                 continue;

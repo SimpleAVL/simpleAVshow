@@ -1955,6 +1955,15 @@ void McpServer::dispatch(const QJsonObject& request, const QString& bearerToken,
     auto error = [&](int code, const QString& message) {
         finish(QJsonObject{{"jsonrpc", "2.0"}, {"id", id.isUndefined() ? QJsonValue(QJsonValue::Null) : id}, {"error", QJsonObject{{"code", code}, {"message", message}}}}, {});
     };
+    const bool hasMethod = request.contains("method");
+    const bool isClientResponse = request["jsonrpc"] == "2.0" && !hasMethod &&
+        !id.isUndefined() && (id.isString() || id.isDouble() || id.isNull()) &&
+        (request.contains("result") != request.contains("error"));
+    if (isClientResponse) {
+        // Per MCP Streamable HTTP 2025-11-25, accepted JSON-RPC client responses receive HTTP 202 with empty body.
+        finish({}, {});
+        return;
+    }
     if (request["jsonrpc"] != "2.0" || !request["method"].isString() ||
         (!id.isUndefined() && !id.isString() && (!id.isDouble() || std::floor(id.toDouble()) != id.toDouble()))) { error(-32600, "Invalid JSON-RPC request"); return; }
     if (request.contains("params") && !request["params"].isObject()) { error(-32602, "Parameters must be an object"); return; }
@@ -2162,7 +2171,7 @@ void McpServer::acceptConnection() {
                     clientScope = "bearer:" + bearer;
                 }
             }
-            if (!clientScope.isEmpty() && !reqId.isUndefined()) {
+            if (!clientScope.isEmpty() && reqObj.contains("method") && !reqId.isUndefined()) {
                 const QString idPart = reqId.isString() ? ("s:" + reqId.toString())
                     : (reqId.isDouble() && std::floor(reqId.toDouble()) == reqId.toDouble() ? ("n:" + QString::number(reqId.toDouble(), 'f', 0)) : QString());
                 if (!idPart.isEmpty()) *trackedKey = clientScope + "|" + idPart;

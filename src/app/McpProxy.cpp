@@ -73,6 +73,8 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
     QByteArray initPayload;
     QByteArray protocolVersion = "2025-11-25";
     QNetworkAccessManager network;
+    // Never follow HTTP redirects so Bearer/session credentials cannot be forwarded off loopback.
+    network.setRedirectPolicy(QNetworkRequest::ManualRedirectPolicy);
     int inFlight = 0;
     bool eof = false;
     struct InflightEntry {

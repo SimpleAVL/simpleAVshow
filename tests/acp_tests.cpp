@@ -453,22 +453,66 @@ private slots:
         QVERIFY(sawInvalidReq);
         QCOMPARE(controlOrder, QStringList({"play-start", "play-done", "stop_all"}));
 
-        // 9. Verify --mcp-proxy rejects non-loopback URLs (token exfiltration guard), rejects id:null requests,
-        //    and forwards client JSON-RPC responses cleanly without echoing -32600.
+        // 9. Verify --mcp-proxy rejects non-loopback URLs (token exfiltration guard), refuses redirects,
+        //    rejects id:null requests, and forwards client JSON-RPC responses cleanly without echoing -32600.
         QProcess remoteProxy;
         remoteProxy.start(SAV_APP_EXECUTABLE, {"--mcp-proxy", "https://example.com/mcp"});
         QVERIFY(remoteProxy.waitForStarted(5000));
         QTRY_VERIFY_WITH_TIMEOUT(remoteProxy.state() == QProcess::NotRunning, 5000);
         QCOMPARE(remoteProxy.exitCode(), 2);
 
+        bool sawRedirectTarget = false;
+        QTcpServer redirectTarget;
+        QVERIFY(redirectTarget.listen(QHostAddress::LocalHost, 0));
+        connect(&redirectTarget, &QTcpServer::newConnection, &redirectTarget, [&redirectTarget, &sawRedirectTarget] {
+            auto* s = redirectTarget.nextPendingConnection();
+            sawRedirectTarget = true;
+            s->disconnectFromHost();
+        });
+        QTcpServer redirectServer;
+        QVERIFY(redirectServer.listen(QHostAddress::LocalHost, 0));
+        connect(&redirectServer, &QTcpServer::newConnection, &redirectServer, [&redirectServer, &redirectTarget] {
+            auto* s = redirectServer.nextPendingConnection();
+            auto buf = std::make_shared<QByteArray>();
+            connect(s, &QTcpSocket::readyRead, s, [s, buf, port = redirectTarget.serverPort()] {
+                buf->append(s->readAll());
+                const qsizetype sep = buf->indexOf("\r\n\r\n");
+                if (sep < 0) return;
+                const QByteArray loc = QString("http://127.0.0.1:%1/stolen").arg(port).toUtf8();
+                s->write("HTTP/1.1 302 Found\r\nLocation: " + loc + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                s->disconnectFromHost();
+            });
+        });
+        QProcess redirProxy;
+        redirProxy.start(SAV_APP_EXECUTABLE, {"--mcp-proxy", QString("http://127.0.0.1:%1/mcp").arg(redirectServer.serverPort())});
+        QVERIFY(redirProxy.waitForStarted(5000));
+        redirProxy.write("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n");
+        redirProxy.closeWriteChannel();
+        QTRY_VERIFY_WITH_TIMEOUT(redirProxy.state() == QProcess::NotRunning, 8000);
+        QVERIFY(!sawRedirectTarget);
+
         bool sawClientResp = false;
         QTcpServer respServer;
         QVERIFY(respServer.listen(QHostAddress::LocalHost, 0));
         connect(&respServer, &QTcpServer::newConnection, &respServer, [&respServer, &sawClientResp] {
             auto* s = respServer.nextPendingConnection();
-            connect(s, &QTcpSocket::readyRead, s, [s, &sawClientResp] {
-                const QByteArray raw = s->readAll();
-                if (raw.contains("\"result\":{}")) {
+            auto buf = std::make_shared<QByteArray>();
+            auto replied = std::make_shared<bool>(false);
+            connect(s, &QTcpSocket::readyRead, s, [s, buf, replied, &sawClientResp] {
+                if (*replied) return;
+                buf->append(s->readAll());
+                const qsizetype sep = buf->indexOf("\r\n\r\n");
+                if (sep < 0) return;
+                qint64 contentLength = 0;
+                for (const auto& hdr : buf->left(sep).split('\n')) {
+                    const qsizetype colon = hdr.indexOf(':');
+                    if (colon > 0 && hdr.left(colon).trimmed().toLower() == "content-length")
+                        contentLength = hdr.mid(colon + 1).trimmed().toLongLong();
+                }
+                if (buf->size() - sep - 4 < contentLength) return;
+                *replied = true;
+                const QByteArray payload = buf->mid(sep + 4, contentLength);
+                if (payload.contains("\"result\":{}")) {
                     sawClientResp = true;
                     s->write("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                 } else {

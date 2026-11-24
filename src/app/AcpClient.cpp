@@ -34,37 +34,51 @@ struct AcpClient::ProcessTreeHandle {
     }
 
 #ifdef Q_OS_WIN
-    bool attachAndResume(qint64 childPid, QString& warning) {
+    bool attachAndResume(qint64 childPid, QString& error) {
         pid = childPid;
-        if (pid <= 0) return false;
+        if (pid <= 0) {
+            error = "Invalid ACP agent process ID.";
+            return false;
+        }
+        auto terminateSuspended = [this] {
+            if (HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid))) {
+                TerminateProcess(h, 1);
+                CloseHandle(h);
+            }
+        };
         if (!job) {
             HANDLE hJob = CreateJobObjectW(nullptr, nullptr);
             if (!hJob) {
-                warning = QString("Warning: could not create Windows Job Object for ACP agent (error %1).").arg(GetLastError());
-            } else {
-                JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
-                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-                if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &info, sizeof(info))) {
-                    warning = QString("Warning: could not configure Windows Job Object for ACP agent (error %1).").arg(GetLastError());
-                    CloseHandle(hJob);
-                } else {
-                    HANDLE hProc = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid));
-                    if (!hProc) {
-                        warning = QString("Warning: could not open ACP agent process for Job Object assignment (error %1).").arg(GetLastError());
-                        CloseHandle(hJob);
-                    } else {
-                        const BOOL assigned = AssignProcessToJobObject(hJob, hProc);
-                        const DWORD err = assigned ? 0 : GetLastError();
-                        CloseHandle(hProc);
-                        if (!assigned) {
-                            warning = QString("Warning: could not assign ACP agent to Windows Job Object (error %1); helper processes may survive disconnect.").arg(err);
-                            CloseHandle(hJob);
-                        } else {
-                            job = hJob;
-                        }
-                    }
-                }
+                error = QString("Could not create Windows Job Object for ACP agent (error %1).").arg(GetLastError());
+                terminateSuspended();
+                return false;
             }
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &info, sizeof(info))) {
+                error = QString("Could not configure Windows Job Object for ACP agent (error %1).").arg(GetLastError());
+                CloseHandle(hJob);
+                terminateSuspended();
+                return false;
+            }
+            HANDLE hProc = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid));
+            if (!hProc) {
+                error = QString("Could not open ACP agent process for Job Object assignment (error %1).").arg(GetLastError());
+                CloseHandle(hJob);
+                terminateSuspended();
+                return false;
+            }
+            const BOOL assigned = AssignProcessToJobObject(hJob, hProc);
+            const DWORD err = assigned ? 0 : GetLastError();
+            if (!assigned) {
+                TerminateProcess(hProc, 1);
+                CloseHandle(hProc);
+                CloseHandle(hJob);
+                error = QString("Could not assign ACP agent to Windows Job Object (error %1).").arg(err);
+                return false;
+            }
+            CloseHandle(hProc);
+            job = hJob;
         }
         // Child was spawned with CREATE_SUSPENDED so it cannot spawn helpers before job assignment.
         int resumed = 0;
@@ -88,6 +102,7 @@ struct AcpClient::ProcessTreeHandle {
             CloseHandle(snap);
         }
         if (resumed == 0) {
+            error = "Could not resume suspended ACP agent process.";
             killTree();
             close();
             return false;
@@ -518,13 +533,12 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
     connect(process_, &QProcess::started, this, [this] {
         if (!process_) return;
 #ifdef Q_OS_WIN
-        QString jobWarning;
-        if (!processTree_ || !processTree_->attachAndResume(process_->processId(), jobWarning)) {
-            if (!jobWarning.isEmpty()) emit stderrReceived(jobWarning + "\n");
-            failConnection("Failed to start ACP agent process.");
+        QString jobError;
+        if (!processTree_ || !processTree_->attachAndResume(process_->processId(), jobError)) {
+            if (!jobError.isEmpty()) emit stderrReceived(jobError + "\n");
+            failConnection(jobError.isEmpty() ? QString("Failed to start ACP agent process.") : jobError);
             return;
         }
-        if (!jobWarning.isEmpty()) emit stderrReceived(jobWarning + "\n");
 #else
         if (processTree_) processTree_->attach(process_->processId());
 #endif
