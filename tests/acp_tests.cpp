@@ -344,6 +344,54 @@ private slots:
         eofProxy.closeWriteChannel();
         QTRY_VERIFY_WITH_TIMEOUT(eofProxy.state() == QProcess::NotRunning, 8000);
         QVERIFY(!sawReplayedWrite);
+
+        // 7. Verify --mcp-proxy refuses further non-initialize requests when 404 reinitialization
+        //    fails at notifications/initialized instead of falling back to sessionless requests.
+        int failStep = 0;
+        bool sawPostFailureCall = false;
+        QTcpServer failServer;
+        QVERIFY(failServer.listen(QHostAddress::LocalHost, 0));
+        connect(&failServer, &QTcpServer::newConnection, &failServer, [&failServer, &failStep, &sawPostFailureCall] {
+            auto* s = failServer.nextPendingConnection();
+            connect(s, &QTcpSocket::readyRead, s, [s, &failStep, &sawPostFailureCall] {
+                const QByteArray raw = s->readAll();
+                const int step = failStep++;
+                if (step == 0) {
+                    const QByteArray body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"t\",\"version\":\"1\"}}}";
+                    s->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: sid-x\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                } else if (step == 1) {
+                    const QByteArray body = "{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32001,\"message\":\"Session expired\"}}";
+                    s->write("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                } else if (step == 2) {
+                    const QByteArray body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"t\",\"version\":\"1\"}}}";
+                    s->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: sid-y\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                } else if (step == 3 && raw.contains("notifications/initialized")) {
+                    s->write("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                } else {
+                    sawPostFailureCall = true;
+                    s->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+                }
+                s->disconnectFromHost();
+            });
+        });
+        QProcess failProxy;
+        failProxy.start(SAV_APP_EXECUTABLE, {"--mcp-proxy", QString("http://127.0.0.1:%1/mcp").arg(failServer.serverPort())});
+        QVERIFY(failProxy.waitForStarted(5000));
+        failProxy.write("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}\n");
+        QTRY_VERIFY_WITH_TIMEOUT(failProxy.bytesAvailable() > 0, 5000);
+        failProxy.readAllStandardOutput();
+        failProxy.write("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n");
+        QTRY_VERIFY_WITH_TIMEOUT(failProxy.bytesAvailable() > 0, 5000);
+        const auto err2 = QJsonDocument::fromJson(failProxy.readAllStandardOutput().trimmed()).object();
+        QCOMPARE(err2["id"].toInt(), 2);
+        QCOMPARE(err2["error"].toObject()["code"].toInt(), -32001);
+        failProxy.write("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"project_action\",\"arguments\":{\"action\":\"new_show\"}}}\n");
+        failProxy.closeWriteChannel();
+        QTRY_VERIFY_WITH_TIMEOUT(failProxy.state() == QProcess::NotRunning, 8000);
+        const auto err3 = QJsonDocument::fromJson(failProxy.readAllStandardOutput().trimmed()).object();
+        QCOMPARE(err3["id"].toInt(), 3);
+        QCOMPARE(err3["error"].toObject()["code"].toInt(), -32001);
+        QVERIFY(!sawPostFailureCall);
     }
 
     void acpPermissionAndCancel() {

@@ -15,7 +15,13 @@ inline const char* stateName(State state) noexcept {
 enum class Action { Play, Pause, Seek, StopAll };
 enum class CommandSource : std::uint8_t { Operator = 0, ExternalAgent = 1, ChatAgent = 2 };
 struct Command { Action action; Frame position = 0; CommandSource source = CommandSource::Operator; std::uint64_t sourceEpoch = 0; };
-struct MidiEvent { int marker = -1; Frame time = 0; std::uint64_t epoch = 0; };
+struct MidiEvent {
+    int marker = -1;
+    Frame time = 0;
+    std::uint64_t epoch = 0;
+    CommandSource source = CommandSource::Operator;
+    std::uint64_t sourceEpoch = 0;
+};
 
 class Transport {
 public:
@@ -36,6 +42,11 @@ public:
     void invalidateAllAgentCommands() noexcept {
         externalAgentEpoch_.fetch_add(1, std::memory_order_acq_rel);
         chatAgentEpoch_.fetch_add(1, std::memory_order_acq_rel);
+    }
+    bool isSourceValid(CommandSource source, std::uint64_t sourceEpoch) const noexcept {
+        if (source == CommandSource::Operator) return true;
+        if (source == CommandSource::ExternalAgent) return sourceEpoch == externalAgentEpoch_.load(std::memory_order_acquire);
+        return sourceEpoch == chatAgentEpoch_.load(std::memory_order_acquire);
     }
     // Lock-free emergency Stop All that succeeds even when the bounded command queue is full.
     void requestStopAll() noexcept { urgentStop_.store(true, std::memory_order_release); }
@@ -102,9 +113,9 @@ private:
         if (command.source == CommandSource::ExternalAgent) return command.sourceEpoch == validExt;
         return command.sourceEpoch == validChat;
     }
-    void apply(Command command, std::uint64_t validExt, std::uint64_t validChat) noexcept;
+    void apply(Command command) noexcept;
     void applyStopAll() noexcept;
-    void dispatch(int marker) noexcept;
+    void dispatch(int marker, CommandSource source = CommandSource::Operator, std::uint64_t sourceEpoch = 0) noexcept;
     void publish(float peak) noexcept;
     void stopAudioWorker();
     void locate(Frame position) noexcept;

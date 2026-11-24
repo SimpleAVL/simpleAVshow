@@ -6,8 +6,79 @@
 #include <QProcessEnvironment>
 #include <QStandardPaths>
 #include <cmath>
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#elif defined(Q_OS_UNIX)
+#include <csignal>
+#include <unistd.h>
+#endif
 
 namespace sav {
+
+struct AcpClient::ProcessTreeHandle {
+    qint64 pid = 0;
+#ifdef Q_OS_WIN
+    HANDLE job = nullptr;
+#endif
+    bool closed = false;
+
+    void attach(qint64 childPid) {
+        pid = childPid;
+#ifdef Q_OS_WIN
+        if (pid <= 0 || job) return;
+        HANDLE hJob = CreateJobObjectW(nullptr, nullptr);
+        if (!hJob) return;
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &info, sizeof(info))) {
+            CloseHandle(hJob);
+            return;
+        }
+        HANDLE hProc = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid));
+        if (!hProc) {
+            CloseHandle(hJob);
+            return;
+        }
+        const BOOL assigned = AssignProcessToJobObject(hJob, hProc);
+        CloseHandle(hProc);
+        if (!assigned) {
+            CloseHandle(hJob);
+            return;
+        }
+        job = hJob;
+#endif
+    }
+
+    void terminateTree() {
+#if defined(Q_OS_UNIX)
+        if (!closed && pid > 0) ::kill(-static_cast<pid_t>(pid), SIGTERM);
+#endif
+    }
+
+    void killTree() {
+#ifdef Q_OS_WIN
+        if (job && !closed) TerminateJobObject(job, 1);
+#elif defined(Q_OS_UNIX)
+        if (!closed && pid > 0) ::kill(-static_cast<pid_t>(pid), SIGKILL);
+#endif
+    }
+
+    void close() {
+        if (closed) return;
+        closed = true;
+#ifdef Q_OS_WIN
+        if (job) {
+            CloseHandle(job);
+            job = nullptr;
+        }
+#endif
+    }
+
+    ~ProcessTreeHandle() { close(); }
+};
 namespace {
 QStringList extraSearchPaths() {
     QStringList dirs;
@@ -173,48 +244,70 @@ AcpClient::~AcpClient() {
     deadlineTimer_.stop();
     cancelTimer_.stop();
     teardownProcess(true);
-    for (const auto& proc : retiringProcesses_) {
-        if (!proc) continue;
-        if (proc->state() != QProcess::NotRunning) {
-            proc->kill();
-            proc->waitForFinished(400);
+    for (auto& entry : retiringProcesses_) {
+        if (entry.process && entry.process->state() != QProcess::NotRunning) {
+            if (entry.tree) entry.tree->killTree();
+            entry.process->kill();
+            entry.process->waitForFinished(400);
         }
-        delete proc.data();
+        if (entry.tree) entry.tree->close();
+        if (entry.process) delete entry.process.data();
     }
     retiringProcesses_.clear();
 }
 
 void AcpClient::teardownProcess(bool blocking) {
-    if (!process_) return;
+    auto tree = std::move(processTree_);
+    if (!process_) {
+        if (tree) tree->close();
+        return;
+    }
     QProcess* proc = process_;
     process_ = nullptr;
     proc->disconnect(this);
     if (proc->state() == QProcess::NotRunning) {
+        if (tree) tree->close();
         proc->deleteLater();
         return;
     }
+    if (tree && tree->pid <= 0) tree->attach(proc->processId());
     proc->closeWriteChannel();
+    if (tree) tree->terminateTree();
     proc->terminate();
     if (blocking) {
         if (!proc->waitForFinished(400)) {
+            if (tree) tree->killTree();
             proc->kill();
             proc->waitForFinished(400);
         }
+        if (tree) tree->close();
         proc->deleteLater();
         return;
     }
     // Never block the GUI thread during live performances: escalate to kill asynchronously.
     proc->setParent(nullptr);
     retiringProcesses_.erase(
-        std::remove_if(retiringProcesses_.begin(), retiringProcesses_.end(), [](const QPointer<QProcess>& p) { return p.isNull(); }),
+        std::remove_if(retiringProcesses_.begin(), retiringProcesses_.end(),
+            [](const RetiringProcess& entry) { return entry.process.isNull(); }),
         retiringProcesses_.end());
-    retiringProcesses_.emplace_back(proc);
-    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), proc, &QObject::deleteLater);
-    QTimer::singleShot(400, proc, [p = QPointer<QProcess>(proc)] {
-        if (!p) return;
-        if (p->state() != QProcess::NotRunning) p->kill();
+    retiringProcesses_.push_back({proc, tree});
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), proc, [proc, tree] {
+        if (tree) tree->close();
+        proc->deleteLater();
     });
-    QTimer::singleShot(2000, proc, [p = QPointer<QProcess>(proc)] {
+    QTimer::singleShot(400, proc, [p = QPointer<QProcess>(proc), tree] {
+        if (!p) return;
+        if (p->state() != QProcess::NotRunning) {
+            if (tree) tree->killTree();
+            p->kill();
+        }
+    });
+    QTimer::singleShot(2000, proc, [p = QPointer<QProcess>(proc), tree] {
+        if (p && p->state() != QProcess::NotRunning) {
+            if (tree) tree->killTree();
+            p->kill();
+        }
+        if (tree) tree->close();
         if (p) p->deleteLater();
     });
 }
@@ -260,7 +353,12 @@ void AcpClient::connectToAgent(const QString& program, const QStringList& args, 
     nextId_ = 1;
 
     process_ = new QProcess(this);
+    processTree_ = std::make_shared<ProcessTreeHandle>();
     process_->setProcessChannelMode(QProcess::SeparateChannels);
+#if defined(Q_OS_UNIX)
+    // Put the agent in its own process group so Disconnect/shutdown tears down wrapper/grandchild processes too.
+    process_->setChildProcessModifier([] { ::setpgid(0, 0); });
+#endif
     // Launch the agent executable from a trusted application directory so Windows .cmd shims
     // cannot resolve runtimes from an untrusted show folder; pass the show directory via ACP session/new cwd.
     const QString launchDir = QCoreApplication::applicationDirPath().isEmpty()
@@ -280,6 +378,7 @@ void AcpClient::connectToAgent(const QString& program, const QStringList& args, 
 
     connect(process_, &QProcess::started, this, [this] {
         if (stopping_ || !process_ || state_ != AcpState::Connecting) return;
+        if (processTree_) processTree_->attach(process_->processId());
         armDeadline(handshakeTimeoutMs_, "Timed out waiting for ACP agent handshake.");
         QJsonObject clientCaps{
             {"fs", QJsonObject{{"readTextFile", false}, {"writeTextFile", false}}},
@@ -318,6 +417,7 @@ void AcpClient::connectToAgent(const QString& program, const QStringList& args, 
             pending_.clear();
             pendingPermissions_.clear();
             sessionId_.clear();
+            if (processTree_) { processTree_->close(); processTree_.reset(); }
             if (process_) { process_->deleteLater(); process_ = nullptr; }
             if (hadSession && exitCode != 0) failConnection(reason);
             else setState(AcpState::Disconnected);

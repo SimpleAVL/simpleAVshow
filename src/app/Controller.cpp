@@ -179,7 +179,9 @@ void Controller::startMidiThread() {
             MidiEvent event;
             while (transport.takeMidi(event)) {
                 if (event.epoch != transport.epoch() || event.marker < 0 || static_cast<std::size_t>(event.marker) >= snapshot->markers.size()) continue;
+                if (!transport.isSourceValid(event.source, event.sourceEpoch)) continue;
                 const auto& marker = snapshot->markers[event.marker]; QString error;
+                if (!midiStop_.load()) midi.clearAbortSend();
                 if (!midi.send(marker.message, error)) {
                     QMetaObject::invokeMethod(this, [this, error] { report(error); }, Qt::QueuedConnection);
                 }
@@ -187,27 +189,32 @@ void Controller::startMidiThread() {
             for (;;) {
                 if (midiStop_.load()) break;
                 PendingTestMidi item;
+                bool authorized = false;
                 {
                     std::lock_guard lock(testMidiMutex_);
                     if (testMidiQueue_.empty()) break;
                     item = std::move(testMidiQueue_.front());
                     testMidiQueue_.pop_front();
+                    authorized = !midiStop_.load() &&
+                        !showModeAtomic_.load(std::memory_order_acquire) &&
+                        !(item.ownerCancelled && item.ownerCancelled->load(std::memory_order_acquire)) &&
+                        item.epoch == transport.epoch() &&
+                        item.gen == testMidiGen_.load(std::memory_order_acquire) &&
+                        transport.state() != State::Playing && transport.state() != State::Held;
+                    if (authorized) {
+                        activeTestMidi_ = true;
+                        activeTestMidiOwner_ = item.owner;
+                        midi.clearAbortSend();
+                    }
                 }
-                // Hold testMidiSendMutex_ across the final authorization check and midi.send() so
-                // Show-mode entry, Play, Stop All, and chat bearer revocation synchronize cleanly
-                // before returning and can abort any in-flight SysEx test immediately.
-                std::lock_guard sendLock(testMidiSendMutex_);
-                if (midiStop_.load() ||
-                    showModeAtomic_.load(std::memory_order_acquire) ||
-                    (item.ownerCancelled && item.ownerCancelled->load(std::memory_order_acquire)) ||
-                    item.epoch != transport.epoch() ||
-                    item.gen != testMidiGen_.load(std::memory_order_acquire) ||
-                    transport.state() == State::Playing || transport.state() == State::Held)
-                    continue;
-                testMidiActive_.store(true, std::memory_order_release);
+                if (!authorized) continue;
                 QString error;
                 const bool sent = midi.send(item.bytes, error);
-                testMidiActive_.store(false, std::memory_order_release);
+                {
+                    std::lock_guard lock(testMidiMutex_);
+                    activeTestMidi_ = false;
+                    activeTestMidiOwner_.clear();
+                }
                 if (!sent) {
                     QMetaObject::invokeMethod(this, [this, error] { report(error); }, Qt::QueuedConnection);
                 }
@@ -277,7 +284,7 @@ bool Controller::seek(Frame time, CommandSource source) {
     return true;
 }
 bool Controller::stopAll(CommandSource source) {
-    cancelPendingTestMidi();
+    // Post Stop All to the transport FIRST so operator Stop All is never delayed by MIDI work.
     const std::uint64_t ep = source == CommandSource::ExternalAgent ? transport.externalAgentEpoch()
         : source == CommandSource::ChatAgent ? transport.chatAgentEpoch() : 0;
     const Command cmd{Action::StopAll, 0, source, ep};
@@ -289,6 +296,7 @@ bool Controller::stopAll(CommandSource source) {
         lastPlaySeq_ = 0;
     }
     if (!device.streamActive()) transport.render(nullptr, 0, 0);
+    cancelPendingTestMidi();
     return true;
 }
 bool Controller::configureAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer) {
@@ -460,20 +468,17 @@ bool Controller::prepareAudio() {
     } catch (const std::exception& error) { report("Cannot prepare audio. Open Outputs to choose a device. " + QString::fromUtf8(error.what())); return false; }
 }
 void Controller::cancelPendingTestMidi(const QString& owner) {
-    {
-        std::lock_guard lock(testMidiMutex_);
-        if (owner.isEmpty()) {
-            testMidiGen_.fetch_add(1, std::memory_order_release);
-            testMidiQueue_.clear();
-        } else {
-            std::erase_if(testMidiQueue_, [&](const PendingTestMidi& item) { return item.owner == owner; });
-        }
+    // Non-blocking: never stall Stop All, Play, Show-mode entry, or chat revocation waiting on a MIDI driver.
+    // Only request abort on an in-flight WinMM SysEx when it belongs to the target owner (or all owners).
+    std::lock_guard lock(testMidiMutex_);
+    if (owner.isEmpty()) {
+        testMidiGen_.fetch_add(1, std::memory_order_release);
+        testMidiQueue_.clear();
+        if (activeTestMidi_) midi.requestAbortSend();
+    } else {
+        std::erase_if(testMidiQueue_, [&](const PendingTestMidi& item) { return item.owner == owner; });
+        if (activeTestMidi_ && activeTestMidiOwner_ == owner) midi.requestAbortSend();
     }
-    // Synchronize with any in-flight test MIDI send (aborting a blocking WinMM SysEx if active)
-    // so no test message can reach hardware after Show-mode entry, Play, Stop All, or revocation returns.
-    if (testMidiActive_.load(std::memory_order_acquire)) midi.requestAbortSend();
-    { std::lock_guard sendLock(testMidiSendMutex_); }
-    if (!midiStop_.load()) midi.clearAbortSend();
 }
 bool Controller::testMidi(const std::vector<unsigned char>& bytes, const QString& owner,
                           std::shared_ptr<std::atomic<bool>> ownerCancelled) {

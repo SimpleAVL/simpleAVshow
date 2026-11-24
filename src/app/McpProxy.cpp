@@ -71,6 +71,7 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
     QMap<QString, InflightEntry> inflightReplies;
     QSet<QString> locallyCancelled;
     bool reinitializing = false;
+    bool sessionInvalid = false;
     struct PendingRequest {
         QByteArray trimmed;
         QJsonObject msgObj;
@@ -104,8 +105,16 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
             const QByteArray reinitBody = reinitReply->readAll().trimmed();
             reinitReply->deleteLater();
             --inFlight;
-            auto finishReinit = [&](bool ok) {
+            auto finishReinit = [&](bool ok, const QByteArray& establishedSid = {}, const QByteArray& establishedProto = {}) {
                 reinitializing = false;
+                if (ok) {
+                    sessionId = establishedSid;
+                    if (!establishedProto.isEmpty()) protocolVersion = establishedProto;
+                    sessionInvalid = false;
+                } else {
+                    sessionId.clear();
+                    sessionInvalid = true;
+                }
                 auto queued = std::move(deferredQueue);
                 deferredQueue.clear();
                 for (auto& item : queued) {
@@ -119,24 +128,24 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
             if (reinitStatus >= 200 && reinitStatus < 300 && !newSid.isEmpty()) {
                 const auto reinitDoc = QJsonDocument::fromJson(reinitBody);
                 const QString negotiated = reinitDoc.object()["result"].toObject()["protocolVersion"].toString().trimmed();
-                if (!negotiated.isEmpty()) protocolVersion = negotiated.toUtf8();
-                sessionId = newSid;
-                // Complete the MCP lifecycle handshake with notifications/initialized before draining queued work.
+                const QByteArray nextProto = negotiated.isEmpty() ? protocolVersion : negotiated.toUtf8();
+                // Complete the MCP lifecycle handshake with notifications/initialized BEFORE publishing
+                // newSid to sessionId so a failed notification never leaves a half-initialized session active.
                 QNetworkRequest notifReq(url);
                 notifReq.setTransferTimeout(15000);
                 notifReq.setRawHeader("Content-Type", "application/json");
                 notifReq.setRawHeader("Accept", "application/json, text/event-stream");
-                notifReq.setRawHeader("MCP-Protocol-Version", protocolVersion);
+                notifReq.setRawHeader("MCP-Protocol-Version", nextProto);
                 notifReq.setRawHeader("Mcp-Session-Id", newSid);
                 if (!token.isEmpty()) notifReq.setRawHeader("Authorization", "Bearer " + token);
                 ++inFlight;
                 auto* notifReply = network.post(notifReq, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
-                QObject::connect(notifReply, &QNetworkReply::finished, &app, [&, notifReply, finishReinit] {
+                QObject::connect(notifReply, &QNetworkReply::finished, &app, [&, notifReply, finishReinit, newSid, nextProto] {
                     const int notifStatus = notifReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
                     const auto notifErr = notifReply->error();
                     notifReply->deleteLater();
                     --inFlight;
-                    finishReinit(notifErr == QNetworkReply::NoError && notifStatus >= 200 && notifStatus < 300);
+                    finishReinit(notifErr == QNetworkReply::NoError && notifStatus >= 200 && notifStatus < 300, newSid, nextProto);
                 });
             } else {
                 finishReinit(false);
@@ -161,13 +170,14 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
         QObject::connect(reply, &QNetworkReply::finished, &app, [&, reply, trimmed, msgObj, requestId, idKey, sentSession, isRetry] {
             if (!idKey.isEmpty() && inflightReplies.value(idKey).reply == reply) inflightReplies.remove(idKey);
             const QByteArray serverSession = reply->rawHeader("Mcp-Session-Id").trimmed();
-            if (!serverSession.isEmpty()) sessionId = serverSession;
             const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             const QByteArray body = reply->readAll().trimmed();
             const auto netError = reply->error();
             const QString errorText = reply->errorString();
             reply->deleteLater();
             --inFlight;
+            if (netError == QNetworkReply::NoError && status >= 200 && status < 300 && !serverSession.isEmpty())
+                sessionId = serverSession;
 
             if (!idKey.isEmpty() && locallyCancelled.remove(idKey)) {
                 maybeQuit();
@@ -184,7 +194,8 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
                 if (!isRetry && !initPayload.isEmpty()) {
                     if (mutating) {
                         if (!eof) startReinit();
-                        writeError(requestId, -32001, "MCP session expired; session reinitialized — retry after checking current state");
+                        else sessionInvalid = true;
+                        writeError(requestId, -32001, "MCP session expired; reinitializing session — retry after checking current state");
                         maybeQuit();
                         return;
                     }
@@ -192,6 +203,7 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
                     startReinit();
                     return;
                 }
+                sessionInvalid = true;
             }
 
             const bool isRequest = !requestId.isUndefined();
@@ -209,9 +221,10 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
                         (obj.contains("result") != obj.contains("error")) &&
                         (!isRequest || obj["id"] == requestId);
                     if (validEnvelope) {
-                        if (msgObj["method"].toString() == "initialize") {
+                        if (msgObj["method"].toString() == "initialize" && obj.contains("result")) {
                             const QString negotiated = obj["result"].toObject()["protocolVersion"].toString().trimmed();
                             if (!negotiated.isEmpty()) protocolVersion = negotiated.toUtf8();
+                            sessionInvalid = false;
                         }
                         writeLine(responseDoc.toJson(QJsonDocument::Compact));
                         maybeQuit();
@@ -244,7 +257,13 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
             ? doc.object() : QJsonObject{};
         const QJsonValue requestId = msgObj.contains("id") ? msgObj.value("id") : QJsonValue(QJsonValue::Undefined);
         const QString idKey = requestIdKey(requestId);
-        if (msgObj["method"].toString() == "initialize") initPayload = trimmed;
+        if (msgObj["method"].toString() == "initialize") {
+            initPayload = trimmed;
+        } else if (sessionInvalid) {
+            writeError(requestId, -32001, "MCP session expired and reinitialization failed; reinitialize before sending further requests");
+            maybeQuit();
+            return;
+        }
 
         // Honor MCP notifications/cancelled locally as well as forwarding it to the server so
         // the original HTTP socket closes immediately and in-flight workers abort before publishing.

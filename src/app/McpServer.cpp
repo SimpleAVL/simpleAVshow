@@ -662,7 +662,12 @@ QJsonObject McpServer::preflightReport() const {
     for (const auto& item : problems) problemList.append(item);
     for (const auto& item : missing) missingList.append(item);
     std::set<std::string> usedAssets;
-    for (const auto& clip : c_.project.show.clips) if (!clip.assetId.empty()) usedAssets.insert(clip.assetId);
+    std::vector<int> clipsPerTrack(c_.project.show.tracks.size(), 0);
+    for (const auto& clip : c_.project.show.clips) {
+        if (!clip.assetId.empty()) usedAssets.insert(clip.assetId);
+        if (clip.track >= 0 && static_cast<std::size_t>(clip.track) < clipsPerTrack.size())
+            ++clipsPerTrack[static_cast<std::size_t>(clip.track)];
+    }
     for (const auto& asset : c_.project.assets) {
         if (!usedAssets.contains(asset.id.toStdString()))
             unusedAssets.append(QJsonObject{{"id", asset.id}, {"name", asset.name}});
@@ -670,8 +675,7 @@ QJsonObject McpServer::preflightReport() const {
     for (std::size_t i = 0; i < c_.project.show.tracks.size(); ++i) {
         const auto& track = c_.project.show.tracks[i];
         if (track.visual || track.muted || track.left >= 0 || track.right >= 0) continue;
-        int clipCount = 0;
-        for (const auto& clip : c_.project.show.clips) if (clip.track == static_cast<int>(i)) ++clipCount;
+        const int clipCount = clipsPerTrack[i];
         if (clipCount > 0) {
             disconnectedTracks.append(QJsonObject{{"index", static_cast<int>(i)}, {"id", QString::fromStdString(track.id)},
                 {"name", QString::fromStdString(track.name)}, {"clip_count", clipCount}});
@@ -752,7 +756,7 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::shared_ptr
                             else if (asyncSrc >= 0) t = seconds(asyncSrc);
                         }
                         t = std::min(t, std::max(0., asset->duration - 1. / std::max(1., asset->fps)));
-                        const QString cacheKey = QString("%1@%2").arg(asset->path).arg(std::llround(t * 1000.0));
+                        const QString cacheKey = QString("%1@%2").arg(asset->path).arg(t, 0, 'g', 17);
                         if (!uniqueVideoKeys.contains(cacheKey)) {
                             if (uniqueVideoKeys.size() >= maxPreviewVideoDecodes)
                                 fail("Too many distinct active video layers at this time for a single preview frame (maximum 16)");

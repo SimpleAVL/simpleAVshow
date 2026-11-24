@@ -137,28 +137,46 @@ void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
     publish(0);
 }
 
-void Transport::dispatch(int marker) noexcept {
-    if (!show_->markers[marker].message.empty() && !midi_.push({marker, position_, epoch_.load()})) overflow_.store(true);
+void Transport::dispatch(int marker, CommandSource source, std::uint64_t sourceEpoch) noexcept {
+    if (!show_->markers[marker].message.empty() &&
+        !midi_.push({marker, position_, epoch_.load(), source, sourceEpoch}))
+        overflow_.store(true);
 }
-void Transport::apply(Command command, std::uint64_t validExt, std::uint64_t validChat) noexcept {
-    if (!isCommandValid(command, validExt, validChat)) {
+void Transport::apply(Command command) noexcept {
+    if (!isSourceValid(command.source, command.sourceEpoch)) {
         ++applied_;
         return;
     }
     switch (command.action) {
-    case Action::Play:
+    case Action::Play: {
         if (state_ == State::Playing || (position_ >= show_->duration && state_ != State::Held)) break;
-        if (state_ == State::Held) {
+        const State prevState = state_;
+        const int prevHeldMarker = heldMarker_;
+        const bool wasHeld = state_ == State::Held;
+        state_ = State::Playing; heldMarker_ = -1;
+        // Re-verify agent authorization after state transition before dispatching resume MIDI
+        // so a Show-mode entry or Disconnect cannot be bypassed by callback preemption.
+        if (command.source != CommandSource::Operator && !isSourceValid(command.source, command.sourceEpoch)) {
+            state_ = prevState; heldMarker_ = prevHeldMarker;
+            epoch_.fetch_add(1);
+            break;
+        }
+        if (wasHeld) {
             // Only the consumed group at this hold can send resume messages.
             auto begin = nextMarker_;
             while (begin > 0 && show_->markers[markers_[begin - 1]].time == position_) --begin;
             for (auto m = begin; m < nextMarker_; ++m) {
                 const auto i = markers_[m]; const auto& marker = show_->markers[i];
-                if (marker.hold && marker.timing == MidiTiming::Resume) dispatch(static_cast<int>(i));
+                if (marker.hold && marker.timing == MidiTiming::Resume)
+                    dispatch(static_cast<int>(i), command.source, command.sourceEpoch);
             }
         }
-        state_ = State::Playing; heldMarker_ = -1;
+        if (command.source != CommandSource::Operator && !isSourceValid(command.source, command.sourceEpoch)) {
+            state_ = prevState; heldMarker_ = prevHeldMarker;
+            epoch_.fetch_add(1);
+        }
         break;
+    }
     case Action::Pause:
         if (state_ == State::Playing) state_ = State::Paused;
         break;
@@ -212,21 +230,17 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
     auto applyUrgentStop = [&](std::size_t fromIndex) noexcept {
         for (std::size_t i = fromIndex; i < countQueued; ++i) {
             const auto& c = batch[i];
-            if (c.action == Action::Seek &&
-                isCommandValid(c, externalAgentEpoch_.load(std::memory_order_acquire), chatAgentEpoch_.load(std::memory_order_acquire))) {
-                apply(c, externalAgentEpoch_.load(std::memory_order_acquire), chatAgentEpoch_.load(std::memory_order_acquire));
-            } else {
+            if (c.action == Action::Seek && isSourceValid(c.source, c.sourceEpoch))
+                apply(c);
+            else
                 ++applied_;
-            }
         }
         Command residual;
         while (commands_.pop(residual)) {
-            if (residual.action == Action::Seek &&
-                isCommandValid(residual, externalAgentEpoch_.load(std::memory_order_acquire), chatAgentEpoch_.load(std::memory_order_acquire))) {
-                apply(residual, externalAgentEpoch_.load(std::memory_order_acquire), chatAgentEpoch_.load(std::memory_order_acquire));
-            } else {
+            if (residual.action == Action::Seek && isSourceValid(residual.source, residual.sourceEpoch))
+                apply(residual);
+            else
                 ++applied_;
-            }
         }
         applyStopAll();
         urgentStop_.store(false, std::memory_order_release);
@@ -264,10 +278,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 ++applied_;
                 continue;
             }
-            // Re-sample authorization epochs right before executing agent commands to close late revocations.
-            const std::uint64_t liveExt = externalAgentEpoch_.load(std::memory_order_acquire);
-            const std::uint64_t liveChat = chatAgentEpoch_.load(std::memory_order_acquire);
-            apply(c, liveExt, liveChat);
+            apply(c);
         }
     }
     float peak = 0; bool waiting = false;

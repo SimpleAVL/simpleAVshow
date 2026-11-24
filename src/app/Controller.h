@@ -99,7 +99,7 @@ private:
     std::map<std::string, std::unique_ptr<VideoReader>> videos_;
     std::shared_ptr<const Show> armed_;
     std::thread midiThread_;
-    std::atomic<bool> midiStop_{true}, showModeAtomic_{false}, testMidiActive_{false};
+    std::atomic<bool> midiStop_{true}, showModeAtomic_{false};
     std::atomic<std::uint64_t> testMidiGen_{1};
     struct PendingTestMidi {
         std::vector<unsigned char> bytes;
@@ -108,7 +108,9 @@ private:
         QString owner;
         std::shared_ptr<std::atomic<bool>> ownerCancelled;
     };
-    std::mutex testMidiMutex_, testMidiSendMutex_;
+    std::mutex testMidiMutex_;
+    bool activeTestMidi_ = false;
+    QString activeTestMidiOwner_;
     std::deque<PendingTestMidi> testMidiQueue_;
     QElapsedTimer midiWatch_, stall_;
     std::uint64_t heartbeat_ = 0;

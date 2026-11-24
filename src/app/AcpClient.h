@@ -9,6 +9,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTimer>
+#include <memory>
 #include <vector>
 
 namespace sav {
@@ -113,7 +114,14 @@ private:
         QString sessionId;
     };
 
+    struct ProcessTreeHandle;
+    struct RetiringProcess {
+        QPointer<QProcess> process;
+        std::shared_ptr<ProcessTreeHandle> tree;
+    };
+
     QProcess* process_ = nullptr;
+    std::shared_ptr<ProcessTreeHandle> processTree_;
     AcpState state_ = AcpState::Disconnected;
     QString agentName_, agentVersion_, sessionId_, lastError_;
     QString cwd_;
@@ -127,7 +135,7 @@ private:
     int nextPermissionKey_ = 1;
     QMap<int, PendingRequest> pending_;
     QMap<int, PendingPermission> pendingPermissions_;
-    std::vector<QPointer<QProcess>> retiringProcesses_;
+    std::vector<RetiringProcess> retiringProcesses_;
     QTimer deadlineTimer_;
     QTimer cancelTimer_;
     QString deadlineReason_;

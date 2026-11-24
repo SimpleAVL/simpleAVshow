@@ -1119,6 +1119,8 @@ void MainWindow::openOutput(int index, bool confirmEditorCover) {
     if (confirmEditorCover && screens[index] == screen() && QMessageBox::question(this, "Cover the editor?",
             "This display shows the editor. The program output will cover it until you press " + QKeySequence(QKeySequence::Close).toString(QKeySequence::NativeText) + " on the output.",
             QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Ok) return;
+    outputLost_ = false;
+    outputScreen_ = screens[index]->name(); QSettings().setValue("display/screen", outputScreen_);
     output_->setPicture(c_.compose()); outputWindow_->hide(); outputWindow_->winId(); outputWindow_->windowHandle()->setScreen(screens[index]);
     outputWindow_->setGeometry(screens[index]->geometry()); outputWindow_->showFullScreen();
 #ifdef Q_OS_WIN
@@ -1128,13 +1130,23 @@ void MainWindow::openOutput(int index, bool confirmEditorCover) {
     outputWindow_->windowHandle()->setGeometry(screens[index]->geometry());
 #endif
     activateWindow();
-    outputScreen_ = screens[index]->name(); QSettings().setValue("display/screen", outputScreen_);
 }
 void MainWindow::screensChanged() {
     // A display that drops out must not leave a frameless fullscreen window over the editor; it returns with the display.
-    if (outputWindow_ && outputWindow_->isVisible() && !QGuiApplication::screens().contains(outputWindow_->screen())) {
-        outputWindow_->hide(); outputLost_ = true;
-        c_.report("Program display “" + outputScreen_ + "” disconnected. The output reopens when it returns."); c_.playbackProblem = c_.status;
+    // Check by target display name because Qt may already have relocated outputWindow_ onto the primary/editor screen.
+    if (outputWindow_ && outputWindow_->isVisible()) {
+        const auto screens = QGuiApplication::screens();
+        const bool targetPresent = outputScreen_.isEmpty()
+            ? (outputWindow_->screen() && screens.contains(outputWindow_->screen()))
+            : std::any_of(screens.cbegin(), screens.cend(),
+                  [this](QScreen* s) { return s->name() == outputScreen_; });
+        const bool onTarget = outputWindow_->screen() && screens.contains(outputWindow_->screen()) &&
+            (outputScreen_.isEmpty() || outputWindow_->screen()->name() == outputScreen_);
+        if (!targetPresent || !onTarget) {
+            outputWindow_->hide(); outputLost_ = true;
+            c_.report("Program display “" + outputScreen_ + "” disconnected. The output reopens when it returns."); c_.playbackProblem = c_.status;
+            return;
+        }
     } else if (outputLost_) {
         const auto screens = QGuiApplication::screens();
         for (int i = 0; i < screens.size(); ++i) if (screens[i]->name() == outputScreen_ && screens[i] != screen()) {
