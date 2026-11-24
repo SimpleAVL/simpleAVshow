@@ -10,6 +10,8 @@ class MidiOutput {
 public:
     QStringList ports();
     bool open(int port, QString& error);
+    // Resolves and opens a port by name on the same RtMidi instance to avoid hot-plug index races.
+    bool openByName(const QString& name, QString& error);
     bool send(const std::vector<unsigned char>& message, QString& error);
     void close();
     // A failed send marks the port lost; the controller reconnects it by name.

@@ -2,7 +2,9 @@
 #include "app/Controller.h"
 #include <QTcpServer>
 #include <QJsonArray>
+#include <atomic>
 #include <functional>
+#include <memory>
 
 namespace sav {
 // Optional UI/window hooks supplied by MainWindow so MCP tools can inspect and control
@@ -44,22 +46,24 @@ private:
     QString token_;
     bool editing_ = false;
     quint64 revision_ = 0;
+    quint64 generation_ = 0;
+    int activeAsyncJobs_ = 0;
     QString importId_, importState_, importError_;
     std::vector<MediaAsset> imported_;
     void acceptConnection();
-    void dispatch(const QJsonObject& request, std::function<void(QJsonObject)> finish);
-    void callTool(const QString& name, const QJsonObject& arguments, std::function<void(QJsonObject)> finish);
+    void dispatch(const QJsonObject& request, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish);
+    void callTool(const QString& name, const QJsonObject& arguments, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish);
     QJsonObject snapshot() const;
     QJsonObject environmentReport() const;
     QJsonObject preflightReport() const;
-    void renderPreviewAsync(const QJsonObject& arguments, std::function<void(QJsonObject)> finish) const;
+    void renderPreviewAsync(const QJsonObject& arguments, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish);
     QJsonObject appGuide(const QJsonObject& arguments) const;
     QJsonObject encodeMidiTool(const QJsonObject& arguments) const;
-    void listMediaFilesAsync(const QJsonObject& arguments, std::function<void(QJsonObject)> finish);
-    QJsonObject relinkMediaTool(const QJsonObject& arguments);
+    void listMediaFilesAsync(const QJsonObject& arguments, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish);
+    void relinkMediaAsync(const QJsonObject& arguments, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish);
     QJsonObject configureOutputsTool(const QJsonObject& arguments);
     QJsonObject configureRemoteTool(const QJsonObject& arguments);
-    QJsonObject projectActionTool(const QJsonObject& arguments);
+    void projectActionAsync(const QJsonObject& arguments, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish);
     QJsonObject transportControlTool(const QJsonObject& arguments);
     QJsonObject historyTool(const QJsonObject& arguments);
     QJsonObject seekAndSelectTool(const QJsonObject& arguments);

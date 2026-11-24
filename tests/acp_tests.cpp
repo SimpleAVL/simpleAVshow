@@ -15,6 +15,8 @@
 #include <QPushButton>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTextBrowser>
 
 using namespace sav;
@@ -45,11 +47,15 @@ private slots:
         QCOMPARE(splitCommandLine("opencode acp"), QStringList({"opencode", "acp"}));
         QCOMPARE(splitCommandLine("\"/path/with spaces/agent\" --flag 'hello world'"),
                  QStringList({"/path/with spaces/agent", "--flag", "hello world"}));
-        // Windows paths with backslashes must stay intact both quoted and unquoted.
+        // Windows paths with backslashes (including escaped trailing separator before closing quote) must stay intact.
         QCOMPARE(splitCommandLine("\"C:\\Program Files\\Agent\\agent.exe\" --cwd C:\\Shows\\Act1"),
                  QStringList({"C:\\Program Files\\Agent\\agent.exe", "--cwd", "C:\\Shows\\Act1"}));
+        QCOMPARE(splitCommandLine("\"C:\\Shows\\\\\" --flag"),
+                 QStringList({"C:\\Shows\\", "--flag"}));
         QCOMPARE(splitCommandLine("agent --msg \"say \\\"hi\\\"\""),
                  QStringList({"agent", "--msg", "say \"hi\""}));
+        // Unclosed quotes are rejected.
+        QCOMPARE(splitCommandLine("\"C:\\Unclosed"), QStringList());
         QCOMPARE(splitCommandLine("  "), QStringList());
     }
 
@@ -173,6 +179,28 @@ private slots:
                  QString("The opening scene"));
         QVERIFY(replies[3]["result"].toObject()["structuredContent"].toObject()["content"].toString().contains("Seven rules"));
         server.stop();
+
+        // 3. Verify --mcp-proxy returns an ID-correlated JSON-RPC error on an empty 200 OK body instead of dropping the reply.
+        QTcpServer emptyServer;
+        QVERIFY(emptyServer.listen(QHostAddress::LocalHost, 0));
+        connect(&emptyServer, &QTcpServer::newConnection, &emptyServer, [&emptyServer] {
+            auto* s = emptyServer.nextPendingConnection();
+            connect(s, &QTcpSocket::readyRead, s, [s] {
+                s->readAll();
+                s->write("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                s->disconnectFromHost();
+            });
+        });
+        QProcess emptyProxy;
+        emptyProxy.start(SAV_APP_EXECUTABLE, {"--mcp-proxy", QString("http://127.0.0.1:%1/mcp").arg(emptyServer.serverPort())});
+        QVERIFY(emptyProxy.waitForStarted(5000));
+        emptyProxy.write("{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\n");
+        emptyProxy.closeWriteChannel();
+        QTRY_VERIFY_WITH_TIMEOUT(emptyProxy.state() == QProcess::NotRunning, 8000);
+        const auto errLine = emptyProxy.readAllStandardOutput().trimmed();
+        const auto errDoc = QJsonDocument::fromJson(errLine).object();
+        QCOMPARE(errDoc["id"].toInt(), 7);
+        QVERIFY(errDoc["error"].isObject());
     }
 
     void acpPermissionAndCancel() {
@@ -333,6 +361,19 @@ private slots:
         connectButton->click();
         QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
         QVERIFY(!window.mcpServer().running());
+
+        // Unexpected protocol error on a chat-owned connection must also stop the auto-started MCP server.
+        customCommand->setText(QString("\"%1\" --bad-protocol").arg(SAV_MOCK_ACP_AGENT));
+        connectButton->click();
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Error);
+        QVERIFY(!window.mcpServer().running());
+
+        // Read-only chat transcript must NOT intercept Space (Space should reach Controller::toggle).
+        transcript->setFocus();
+        window.controller().status.clear();
+        QTest::keyClick(transcript, Qt::Key_Space);
+        QVERIFY(!window.controller().status.isEmpty() || window.controller().transport.state() == State::Playing);
+        window.controller().stopAll();
         window.controller().dirty = false;
     }
 

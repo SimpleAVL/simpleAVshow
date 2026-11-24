@@ -254,6 +254,11 @@ private slots:
         QCOMPARE(right->alpha.points.front().value, .5);
         c.undo();
         QCOMPARE(c.project.show.clips.size(), size_t(2));
+        // Splitting strictly inside a shaped S-curve segment must be rejected rather than distorting the curve.
+        QVERIFY(!edits(server, {
+            operation("clip", "p1", {{"alpha", QJsonArray{QJsonArray{0, 0, "scurve", 0.5}, QJsonArray{frameJson(10), 1}}}})
+        })["isError"].toBool());
+        QVERIFY(edits(server, {operation("split_clip", "p1", {{"time", frameJson(7)}})})["isError"].toBool());
 
         // 4. delete_track removes clips on that track, re-indexes higher tracks, and rejects deleting last track.
         const QString bgTrackId = QString::fromStdString(c.project.show.tracks[0].id);
@@ -352,7 +357,16 @@ private slots:
         QCOMPARE(nav["structuredContent"].toObject()["selection"].toObject()["selected_clip"].toString(), firstClipId);
         QVERIFY(!call(server, "transport_control", {{"action", "seek"}, {"time", frameJson(2)}})["isError"].toBool());
         QCOMPARE(window.controller().position(), frames(2));
+        // Explicit pause on a Held transport must never resume the hold.
+        float samples[2]{};
+        window.controller().seek(frames(12)); window.controller().transport.render(samples, 1, 2);
+        window.controller().transport.command({Action::Play}); window.controller().transport.render(samples, 1, 2);
+        QCOMPARE(window.controller().transport.state(), State::Held);
+        QVERIFY(!call(server, "transport_control", {{"action", "pause"}})["isError"].toBool());
+        window.controller().transport.render(samples, 1, 2);
+        QCOMPARE(window.controller().transport.state(), State::Held);
         QVERIFY(!call(server, "transport_control", {{"action", "stop_all"}})["isError"].toBool());
+        window.controller().transport.render(samples, 1, 2);
 
         // 7. list_media_files, relink_media, and project_action (save_as, export_package, open_project, new_show)
         QTemporaryDir dir;
@@ -385,26 +399,49 @@ private slots:
         QVERIFY(!call(server, "project_action", {{"action", "open_project"}, {"path", showPath}})["isError"].toBool());
         QCOMPARE(window.controller().project.title, QString("The opening scene"));
 
-        // Simulate an offline asset matching stage.png and relink via MCP
+        // Simulate colliding basenames: unique relative suffix relinks, ambiguous stays offline and is reported.
+        QVERIFY(QDir(dir.path()).mkpath("act1"));
+        QVERIFY(QDir(dir.path()).mkpath("act2"));
+        QVERIFY(img.save(dir.filePath("act1/dup.png")));
+        QVERIFY(img.save(dir.filePath("act2/dup.png")));
         QVERIFY(window.controller().edit([&](Project& p) {
-            MediaAsset offline; offline.id = "off-1"; offline.name = "stage.png"; offline.path = "/missing/stage.png"; offline.offline = true; offline.problem = "Missing";
-            p.assets.insert(offline.id, offline);
+            MediaAsset off1; off1.id = "off-1"; off1.name = "stage.png"; off1.path = "/missing/stage.png"; off1.offline = true; off1.problem = "Missing";
+            MediaAsset off2; off2.id = "off-2"; off2.name = "act1-dup"; off2.path = "/missing/act1/dup.png"; off2.offline = true; off2.problem = "Missing";
+            MediaAsset off3; off3.id = "off-3"; off3.name = "other-dup"; off3.path = "/missing/other/dup.png"; off3.offline = true; off3.problem = "Missing";
+            p.assets.insert(off1.id, off1);
+            p.assets.insert(off2.id, off2);
+            p.assets.insert(off3.id, off3);
         }));
         QVERIFY(call(server, "project_action", {{"action", "new_show"}})["isError"].toBool()); // Dirty without discard_unsaved
         const auto relinked = call(server, "relink_media", {{"expected_revision", revision(server)}, {"directory", dir.path()}});
         QVERIFY(!relinked["isError"].toBool());
-        QCOMPARE(relinked["structuredContent"].toObject()["relink"].toObject()["relinked"].toInt(), 1);
+        const auto relinkInfo = relinked["structuredContent"].toObject()["relink"].toObject();
+        QCOMPARE(relinkInfo["relinked"].toInt(), 2);
+        QCOMPARE(relinkInfo["remaining_offline"].toInt(), 1);
+        QCOMPARE(relinkInfo["ambiguous"].toArray().size(), 1);
         QVERIFY(!window.controller().project.assets["off-1"].offline);
+        QVERIFY(!window.controller().project.assets["off-2"].offline);
+        QVERIFY(window.controller().project.assets["off-2"].path.endsWith("act1/dup.png"));
+        QVERIFY(window.controller().project.assets["off-3"].offline);
 
-        // 8. configure_remote toggles the phone remote cleanly, validates types, and never exposes keyed links
-        QTcpServer probe;
+        // 8. configure_remote toggles cleanly, keeps existing listener & key alive on failed port change, and never leaks links
+        QTcpServer probe, blocker;
         QVERIFY(probe.listen(QHostAddress::LocalHost, 0));
         const int freeRemotePort = probe.serverPort();
         probe.close();
+        QVERIFY(blocker.listen(QHostAddress::AnyIPv4, 0));
+        const int occupiedPort = blocker.serverPort();
         const auto remOn = call(server, "configure_remote", {{"enabled", true}, {"port", freeRemotePort}});
         QVERIFY(!remOn["isError"].toBool());
         QVERIFY(window.remoteServer().running());
+        const QString originalKey = window.remoteServer().key();
         QVERIFY(!remOn["structuredContent"].toObject().contains("links"));
+        // Failed port change + rotate must leave existing remote running with its original port and key.
+        QVERIFY(call(server, "configure_remote", {{"enabled", true}, {"port", occupiedPort}, {"change_key", true}})["isError"].toBool());
+        QVERIFY(window.remoteServer().running());
+        QCOMPARE(static_cast<int>(window.remoteServer().port()), freeRemotePort);
+        QCOMPARE(window.remoteServer().key(), originalKey);
+        blocker.close();
         // Malformed enabled type must fail without stopping the running remote
         QVERIFY(call(server, "configure_remote", {{"enabled", "false"}})["isError"].toBool());
         QVERIFY(window.remoteServer().running());

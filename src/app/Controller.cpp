@@ -139,27 +139,37 @@ bool Controller::routesValid() const {
     }
     return true;
 }
+bool Controller::play() {
+    if (busy) return false;
+    const State state = transport.state();
+    if (state == State::Playing) return true;
+    playbackProblem.clear();
+    // Re-arming retries sources that were briefly unavailable; changed sources still need reopening.
+    if (transport.audioReadFailed() && state != State::Held && !transport.asyncVoices()) arm(position());
+    if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and press Play to retry, or reopen the project to rebuild changed or damaged caches."); playbackProblem = status; return false; }
+    // Resuming a live show never blocks on picture or MIDI; it warns and continues.
+    const bool resuming = state == State::Held || transport.asyncVoices() || (state == State::Paused && device.running());
+    if (const auto missing = missingMedia(); !missing.isEmpty()) {
+        report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
+        playbackProblem = status;
+        if (!resuming) return false;
+    }
+    if (needsMidi() && !prepareMidi()) { playbackProblem = status; if (!resuming) return false; }
+    if (!prepareAudio()) { playbackProblem = status; return false; }
+    if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return false; }
+    if (!transport.command({Action::Play})) { report("Transport command queue is full"); return false; }
+    return true;
+}
+bool Controller::pause() {
+    if (busy) return false;
+    if (transport.state() != State::Playing) return true;
+    // Always sends Pause (never Play), so a Playing → Held transition cannot accidentally resume a hold.
+    if (!transport.command({Action::Pause})) { report("Transport command queue is full"); return false; }
+    return true;
+}
 bool Controller::toggle() {
     if (busy) return false;
-    const State state = transport.state(); const bool playing = state == State::Playing;
-    if (!playing) {
-        playbackProblem.clear();
-        // Re-arming retries sources that were briefly unavailable; changed sources still need reopening.
-        if (transport.audioReadFailed() && state != State::Held && !transport.asyncVoices()) arm(position());
-        if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and press Play to retry, or reopen the project to rebuild changed or damaged caches."); playbackProblem = status; return false; }
-        // Resuming a live show never blocks on picture or MIDI; it warns and continues.
-        const bool resuming = state == State::Held || transport.asyncVoices() || (state == State::Paused && device.running());
-        if (const auto missing = missingMedia(); !missing.isEmpty()) {
-            report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
-            playbackProblem = status;
-            if (!resuming) return false;
-        }
-        if (needsMidi() && !prepareMidi()) { playbackProblem = status; if (!resuming) return false; }
-        if (!prepareAudio()) { playbackProblem = status; return false; }
-        if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return false; }
-    }
-    if (!transport.command({playing ? Action::Pause : Action::Play})) { report("Transport command queue is full"); return false; }
-    return true;
+    return transport.state() == State::Playing ? pause() : play();
 }
 bool Controller::seek(Frame time) {
     if (busy || showMode) { report(showMode ? "Leave show mode to jump on the timeline" : "Media is loading"); return false; }
@@ -193,6 +203,19 @@ bool Controller::openAudio(RtAudio::Api api, unsigned id, QString name, unsigned
 bool Controller::configureMidi(int port) {
     if (!canEdit()) return false;
     return openMidi(port);
+}
+bool Controller::configureMidiByName(const QString& portName) {
+    if (!canEdit()) return false;
+    const QString trimmed = portName.trimmed();
+    if (trimmed.isEmpty() || trimmed.compare("none", Qt::CaseInsensitive) == 0 || trimmed.compare("off", Qt::CaseInsensitive) == 0)
+        return openMidi(-1);
+    stopMidiThread();
+    QString error;
+    const bool ok = midi.openByName(trimmed, error);
+    startMidiThread();
+    if (ok) { midiName_ = midi.name(); QSettings().setValue("midi/port", midiName_); playbackProblem.clear(); }
+    report(ok ? ("MIDI output: " + midi.name()) : error);
+    return ok;
 }
 bool Controller::openMidi(int port) {
     stopMidiThread();

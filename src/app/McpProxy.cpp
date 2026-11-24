@@ -51,6 +51,7 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
             ? doc.object().value("id") : QJsonValue(QJsonValue::Undefined);
 
         QNetworkRequest request(url);
+        request.setTransferTimeout(30000);
         request.setRawHeader("Content-Type", "application/json");
         request.setRawHeader("Accept", "application/json, text/event-stream");
         request.setRawHeader("MCP-Protocol-Version", "2025-11-25");
@@ -83,6 +84,10 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
                 writeError(requestId, -32000, status > 0
                     ? QString("MCP HTTP error %1: %2").arg(status).arg(errorText)
                     : QString("MCP proxy error: %1").arg(errorText));
+            } else {
+                writeError(requestId, -32000, body.isEmpty()
+                    ? QString("MCP server returned an empty response (HTTP %1)").arg(status)
+                    : QString("MCP server returned invalid JSON (HTTP %1)").arg(status));
             }
             maybeQuit();
         });

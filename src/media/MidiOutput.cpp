@@ -25,6 +25,34 @@ bool MidiOutput::open(int port, QString& error) {
         return true;
     } catch (const RtMidiError& e) { error = QString::fromStdString(e.getMessage()); close(); return false; }
 }
+bool MidiOutput::openByName(const QString& wanted, QString& error) {
+    try {
+        auto candidate = std::make_unique<RtMidiOut>();
+        candidate->setErrorCallback(&MidiOutput::onError, this);
+        const unsigned count = candidate->getPortCount();
+        int matched = -1;
+        QString matchedName;
+        for (unsigned i = 0; i < count; ++i) {
+            const QString portName = QString::fromStdString(candidate->getPortName(i));
+            if (portName == wanted) { matched = static_cast<int>(i); matchedName = portName; break; }
+            if (matched < 0 && portName.compare(wanted, Qt::CaseInsensitive) == 0) { matched = static_cast<int>(i); matchedName = portName; }
+        }
+        if (matched < 0) { error = "MIDI port not found: " + wanted; return false; }
+        close();
+        output_ = std::move(candidate);
+        output_->setErrorCallback(&MidiOutput::onError, this);
+        if (static_cast<unsigned>(matched) >= output_->getPortCount() ||
+            QString::fromStdString(output_->getPortName(static_cast<unsigned>(matched))) != matchedName) {
+            error = "MIDI port list changed before opening " + matchedName;
+            close();
+            return false;
+        }
+        name_ = matchedName;
+        output_->openPort(static_cast<unsigned>(matched), "SimpleAVShow");
+        if (!error_.empty() || !output_->isPortOpen()) { error = error_.empty() ? "Cannot open MIDI port" : QString::fromStdString(error_); close(); return false; }
+        return true;
+    } catch (const RtMidiError& e) { error = QString::fromStdString(e.getMessage()); close(); return false; }
+}
 bool MidiOutput::send(const std::vector<unsigned char>& message, QString& error) {
     if (message.empty()) return true;
     if (!connected()) { error = "MIDI cue not sent: no output port is connected"; return false; }

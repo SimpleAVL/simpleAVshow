@@ -117,6 +117,7 @@ private:
     bool agentSupportsHttpMcp_ = false;
     bool usedHttpMcp_ = false;
     bool stopping_ = false;
+    bool cancelling_ = false;
     QByteArray stdoutBuffer_;
     int nextId_ = 1;
     int nextPermissionKey_ = 1;

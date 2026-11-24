@@ -53,13 +53,28 @@ std::vector<std::string> linkedClips(const Project& p, const std::string& id) {
     if (!link.empty()) for (const auto& c : p.show.clips) if (c.link == link && c.id != id) ids.push_back(c.id);
     return ids;
 }
-std::string splitLinked(Project& p, const std::string& id, Frame time, const std::string& tailId) {
+std::string splitLinked(Project& p, const std::string& id, Frame time, const std::string& tailId, bool rejectShapedCut) {
     const auto primary = std::find_if(p.show.clips.begin(), p.show.clips.end(), [&](const Clip& c) { return c.id == id; });
     if (primary == p.show.clips.end()) throw std::runtime_error("Unknown clip ID");
     if (time <= primary->start || time >= primary->end()) throw std::runtime_error("Split time must fall strictly inside the clip");
     const auto ids = linkedClips(p, id);
-    for (const auto& c : p.show.clips) if (c.loop && std::find(ids.begin(), ids.end(), c.id) != ids.end())
-        throw std::runtime_error("Looping clips cannot be split; their loop starts at the clip's source in");
+    for (const auto& c : p.show.clips) {
+        if (std::find(ids.begin(), ids.end(), c.id) == ids.end()) continue;
+        if (c.loop) throw std::runtime_error("Looping clips cannot be split; their loop starts at the clip's source in");
+        if (rejectShapedCut && time > c.start && time < c.end()) {
+            const Frame cut = time - c.start;
+            for (int property = 0; property < 6; ++property) {
+                const auto* e = envelope(c, property);
+                const auto right = std::upper_bound(e->points.begin(), e->points.end(), cut,
+                    [](Frame t, const Keyframe& k) { return t < k.time; });
+                if (right != e->points.begin() && right != e->points.end()) {
+                    const auto& prev = *(right - 1);
+                    if (prev.time < cut && (prev.shape == CurveShape::SCurve || prev.shape == CurveShape::Curve) && prev.bend != 0)
+                        throw std::runtime_error("Cannot split inside a shaped Curve or S-curve automation segment without altering its curve; adjust or flatten that segment first");
+                }
+            }
+        }
+    }
     const auto link = primary->link.empty() ? std::string() : newId().toStdString();
     std::string second;
     std::vector<Clip> tails;

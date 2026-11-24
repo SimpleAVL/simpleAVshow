@@ -15,10 +15,10 @@ The quickest way to collaborate with an AI agent is directly inside SimpleAVShow
 1. Click **Agent chat** in the top bar (or choose **Project → Agent chat**, `Ctrl+Shift+A`).
 2. Pick an installed ACP-compatible agent from the dropdown — such as **OpenCode** (`opencode acp`), **Claude Code (ACP)** (`claude-agent-acp`), **Codex (ACP)** (`codex-acp`), **Antigravity (agy)** (`agy acp`), **Pi** (`pi-acp`), or **Custom ACP command…**.
 3. Click **Connect**. SimpleAVShow automatically starts its local MCP server and attaches it to the agent session—no JSON configuration or bearer tokens to copy. *(For agents that only support stdio MCP servers, SimpleAVShow automatically bridges the connection using its built-in `--mcp-proxy` mode.)*
-4. Ask the agent to inspect the show, run preflight checks, preview a frame, or check **Allow show edits** to let it build and modify the show together with you.
-5. Any permission requests from the agent appear directly as **Allow / Reject / Cancel** cards above the prompt box. Click **Undo edit** (or **Edit → Undo**) at any time to revert an agent batch in one step.
+4. Ask the agent to inspect the show, run preflight checks, preview a frame, or check **Allow edits & controls** to let it edit the show, manage media/files, configure outputs or phone remote, and run rehearsal playback.
+5. Any permission requests from the agent appear directly as **Allow / Reject / Cancel** cards above the prompt box. Click **Undo edit** (or **Edit → Undo**) at any time to revert a project edit batch in one step.
 
-> **Keyboard safety:** Typing `Space`, `Backspace`, or `Delete` inside the chat prompt box edits your prompt as expected and never triggers playback or deletes timeline clips.
+> **Keyboard safety:** Typing `Space`, `Backspace`, or `Delete` inside the writable prompt box edits your prompt as expected and never triggers playback or deletes timeline clips. Focusing the read-only transcript or logs never blocks `Space` from pausing playback.
 
 ---
 
@@ -27,7 +27,7 @@ The quickest way to collaborate with an AI agent is directly inside SimpleAVShow
 1. Open **Project → Agent collaboration…**, or click **Agent · off** in the top bar.
 2. Check **Enable local MCP server**. It starts in **read-only** mode at `http://127.0.0.1:48123/mcp`. *(If port `48123` is already in use, pick a different port before enabling.)*
 3. Click **Copy connection configuration** and paste it into your MCP client's settings. If your client asks for a transport, choose **Streamable HTTP**; if it uses separate fields, paste the **MCP URL** and copy the **bearer token** individually.
-4. When you're ready to co-edit, check **Allow the agent to edit this show and import media**. Close the dialog—the server keeps running in the background.
+4. When you're ready to grant full editing and control, check **Allow agent edits and controls (show, media, outputs, remote, files, rehearsal)**. Close the dialog—the server keeps running in the background.
 5. Prompt your agent to inspect and edit the open show—for example: *"Read the current show, then add opening titles, a hold at 12 seconds for the actor, and a closing cue at 45 seconds. Keep existing media and routing intact."*
 
 The copied configuration looks like this (using the live URL and token from the dialog):
@@ -66,7 +66,7 @@ The top-bar button always tells you what the agent can do right now: **Agent · 
 ### Built-in guardrails
 
 - **Atomic validation:** Every edit batch must leave the show completely valid—no overlapping pictures on one layer, all clips inside project duration, valid track/asset IDs, and valid MIDI/automation data—or the entire batch is rejected cleanly.
-- **Single-step undo:** Changes stay unsaved until you choose **File → Save**, and **Edit → Undo** reverts an agent's whole batch at once.
+- **Single-step undo for project edits:** Timeline, track, clip, cue, import, and relink edits can be reverted in one step via **Edit → Undo**. Note that file actions (`project_action` save/export/open/new) and hardware/remote settings (`configure_outputs`, `configure_remote`) affect disk or device state directly, and opening/replacing a project clears the current undo history.
 - **Same locks as the operator:** Agent edits are blocked during Show mode, playback, active async voices, or busy operations. Background media preparation can run while you edit or rehearse, though committing the prepared assets still waits until the editor is unlocked.
 - **Optimistic revision checks:** If you edit the show (or even have uncommitted typing in an inspector field, which commits automatically first) after the agent last read it, the agent's write fails with a revision conflict instead of overwriting your work. The agent simply reads the latest show and retries.
 - **Linked clips stay linked:** Moving, trimming, or deleting one clip in a linked video/audio pair updates its partner automatically. To detach them, the agent patches the clip with an empty `link` first.

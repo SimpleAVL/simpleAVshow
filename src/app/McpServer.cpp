@@ -256,7 +256,7 @@ void applyOperations(Project& p, const QJsonArray& operations) {
                 if (!patch["new_id"].isString() || patch["new_id"].toString().isEmpty()) fail("Invalid new_id");
                 tailId = patch["new_id"].toString();
             }
-            splitLinked(p, id.toStdString(), static_cast<Frame>(t.toDouble()), tailId.toStdString());
+            splitLinked(p, id.toStdString(), static_cast<Frame>(t.toDouble()), tailId.toStdString(), true);
             continue;
         }
         if (kind == "move_track") {
@@ -335,6 +335,7 @@ bool McpServer::start(quint16 port) {
     emit stateChanged(); return true;
 }
 void McpServer::stop() {
+    ++generation_;
     server_.close(); token_.clear(); editing_ = false;
     // Invalidate outstanding connections as well as the credential.
     for (auto* socket : findChildren<QTcpSocket*>()) socket->abort();
@@ -515,9 +516,12 @@ QJsonObject McpServer::preflightReport() const {
             {"markers", static_cast<int>(c_.project.show.markers.size())}, {"assets", c_.project.assets.size()}}}};
 }
 
-void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::function<void(QJsonObject)> finish) const {
+void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish) {
+    constexpr int maxAsyncJobs = 8;
+    if (activeAsyncJobs_ >= maxAsyncJobs) fail("Too many concurrent async MCP operations; wait for in-flight requests to finish");
+    const bool liveCursor = !arguments.contains("time");
     Frame time = c_.position();
-    if (arguments.contains("time")) {
+    if (!liveCursor) {
         const auto v = arguments["time"];
         if (!v.isDouble() || !std::isfinite(v.toDouble()) || v.toDouble() < 0 || v.toDouble() > maxFrame || std::floor(v.toDouble()) != v.toDouble())
             fail("Invalid preview time");
@@ -535,11 +539,13 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::function<v
     const QSize targetSize(maxWidth, maxHeight);
     const Project projectSnapshot = c_.project;
     const quint64 rev = revision_;
+    const quint64 jobGen = generation_;
 
     struct VideoRequest { std::string clipId; QString path; double sourceTime; };
     std::vector<VideoRequest> videoRequests;
     QJsonArray activeClips, activeMarkers;
-    for (const auto& clip : projectSnapshot.show.clips) {
+    for (std::size_t index = 0; index < projectSnapshot.show.clips.size(); ++index) {
+        const auto& clip = projectSnapshot.show.clips[index];
         if (!clip.contains(time)) continue;
         const auto& track = projectSnapshot.show.tracks[clip.track];
         activeClips.append(QJsonObject{{"id", QString::fromStdString(clip.id)}, {"track", clip.track},
@@ -553,6 +559,12 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::function<v
                 if (asset != projectSnapshot.assets.cend() && asset->video && !asset->offline) {
                     double t = seconds(clip.offset + local);
                     if (clip.loop) t = seconds(clip.offset) + std::fmod(seconds(local), std::max(.001, asset->duration - seconds(clip.offset)));
+                    // For default live-position previews, match the audience display's advancing async video cursor.
+                    if (liveCursor && track.async) {
+                        const Frame asyncSrc = c_.transport.asyncSource(index);
+                        if (asyncSrc == Transport::finishedSource) t = asset->duration;
+                        else if (asyncSrc >= 0) t = seconds(asyncSrc);
+                    }
                     t = std::min(t, std::max(0., asset->duration - 1. / std::max(1., asset->fps)));
                     videoRequests.push_back({clip.id, asset->path, t});
                 }
@@ -565,13 +577,21 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::function<v
             {"name", QString::fromStdString(marker.name)}, {"hold", marker.hold}});
     }
 
+    ++activeAsyncJobs_;
+    auto releaseJob = [this]() { activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1); };
     auto sharedFinish = std::make_shared<std::function<void(QJsonObject)>>(std::move(finish));
-    auto encodeAndFinish = [this, time, projectSnapshot, activeClips, activeMarkers, rev, sharedFinish](QImage image) {
+    auto encodeAndFinish = [this, time, projectSnapshot, activeClips, activeMarkers, rev, jobGen, cancelled, sharedFinish, releaseJob](QImage image) {
+        if (cancelled->load() || generation_ != jobGen) {
+            releaseJob();
+            return;
+        }
         struct Encoded { QByteArray png; QString error; int width = 0, height = 0; };
-        auto* watcher = new QFutureWatcher<Encoded>(const_cast<McpServer*>(this));
-        connect(watcher, &QFutureWatcher<Encoded>::finished, const_cast<McpServer*>(this),
-            [watcher, time, projectSnapshot, activeClips, activeMarkers, rev, sharedFinish]() {
+        auto* watcher = new QFutureWatcher<Encoded>(this);
+        connect(watcher, &QFutureWatcher<Encoded>::finished, this,
+            [this, watcher, time, projectSnapshot, activeClips, activeMarkers, rev, jobGen, cancelled, sharedFinish, releaseJob]() {
                 const auto encoded = watcher->result(); watcher->deleteLater();
+                releaseJob();
+                if (cancelled->load() || generation_ != jobGen) return;
                 if (!encoded.error.isEmpty()) {
                     (*sharedFinish)(toolResult({{"error", encoded.error}, {"revision", static_cast<double>(rev)}}, true));
                     return;
@@ -586,8 +606,9 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::function<v
                         QJsonObject{{"type", "text"}, {"text", QString::fromUtf8(QJsonDocument(meta).toJson(QJsonDocument::Compact))}}}},
                     {"structuredContent", meta}, {"isError", false}});
             });
-        watcher->setFuture(QtConcurrent::run([image = std::move(image)] {
+        watcher->setFuture(QtConcurrent::run([image = std::move(image), cancelled] {
             Encoded out; out.width = image.width(); out.height = image.height();
+            if (cancelled->load()) return out;
             QBuffer buffer(&out.png);
             buffer.open(QIODevice::WriteOnly);
             if (!image.save(&buffer, "PNG")) out.error = "Failed to encode preview PNG";
@@ -596,26 +617,31 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::function<v
     };
 
     if (videoRequests.empty()) {
-        // Text and still composition at targetSize is sub-millisecond on the GUI thread; PNG encoding stays off-thread.
         QMap<std::string, QImage> emptyVideos;
         encodeAndFinish(Controller::composeProjectAt(projectSnapshot, time, targetSize, &emptyVideos));
         return;
     }
 
     struct DecodedVideos { QMap<std::string, QImage> frames; QString error; };
-    auto* watcher = new QFutureWatcher<DecodedVideos>(const_cast<McpServer*>(this));
-    connect(watcher, &QFutureWatcher<DecodedVideos>::finished, const_cast<McpServer*>(this),
-        [watcher, projectSnapshot, time, targetSize, rev, sharedFinish, encodeAndFinish = std::move(encodeAndFinish)]() mutable {
+    auto* watcher = new QFutureWatcher<DecodedVideos>(this);
+    connect(watcher, &QFutureWatcher<DecodedVideos>::finished, this,
+        [this, watcher, projectSnapshot, time, targetSize, rev, jobGen, cancelled, sharedFinish, releaseJob, encodeAndFinish = std::move(encodeAndFinish)]() mutable {
             const auto decoded = watcher->result(); watcher->deleteLater();
+            if (cancelled->load() || generation_ != jobGen) {
+                releaseJob();
+                return;
+            }
             if (!decoded.error.isEmpty()) {
+                releaseJob();
                 (*sharedFinish)(toolResult({{"error", decoded.error}, {"revision", static_cast<double>(rev)}}, true));
                 return;
             }
             encodeAndFinish(Controller::composeProjectAt(projectSnapshot, time, targetSize, &decoded.frames));
         });
-    watcher->setFuture(QtConcurrent::run([videoRequests = std::move(videoRequests), targetSize] {
+    watcher->setFuture(QtConcurrent::run([videoRequests = std::move(videoRequests), targetSize, cancelled] {
         DecodedVideos result;
         for (const auto& req : videoRequests) {
+            if (cancelled->load()) return result;
             QString err;
             QImage frame = videoFrameAt(req.path, req.sourceTime, targetSize, &err);
             if (frame.isNull()) {
@@ -733,8 +759,10 @@ QJsonObject McpServer::encodeMidiTool(const QJsonObject& a) const {
     return toolResult({{"bytes", jsonBytes}, {"hex", midiHex(bytes)}, {"summary", midiSummary(bytes)}});
 }
 
-void McpServer::listMediaFilesAsync(const QJsonObject& a, std::function<void(QJsonObject)> finish) {
+void McpServer::listMediaFilesAsync(const QJsonObject& a, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish) {
     checkEnabledAndUnlocked(true);
+    constexpr int maxAsyncJobs = 8;
+    if (activeAsyncJobs_ >= maxAsyncJobs) fail("Too many concurrent async MCP operations; wait for in-flight requests to finish");
     QString dirPath;
     if (a.contains("directory")) {
         if (!a["directory"].isString()) fail("directory must be a string");
@@ -750,27 +778,37 @@ void McpServer::listMediaFilesAsync(const QJsonObject& a, std::function<void(QJs
     if (!dirInfo.isAbsolute() || !dirInfo.exists() || !dirInfo.isDir())
         fail("Directory must be an existing absolute local folder");
     const QString rootPath = dirInfo.absoluteFilePath();
+    const quint64 jobGen = generation_;
 
+    ++activeAsyncJobs_;
     struct ScanResult { QJsonArray files; bool truncated = false; };
     auto* watcher = new QFutureWatcher<ScanResult>(this);
-    connect(watcher, &QFutureWatcher<ScanResult>::finished, this, [watcher, rootPath, recursive, finish = std::move(finish)]() mutable {
-        const auto res = watcher->result(); watcher->deleteLater();
-        finish(toolResult({{"directory", rootPath}, {"recursive", recursive},
-            {"files", res.files}, {"count", res.files.size()}, {"truncated", res.truncated}}));
-    });
-    watcher->setFuture(QtConcurrent::run([rootPath, recursive] {
+    connect(watcher, &QFutureWatcher<ScanResult>::finished, this,
+        [this, watcher, rootPath, recursive, jobGen, cancelled, finish = std::move(finish)]() mutable {
+            const auto res = watcher->result(); watcher->deleteLater();
+            activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1);
+            if (cancelled->load() || generation_ != jobGen) return;
+            finish(toolResult({{"directory", rootPath}, {"recursive", recursive},
+                {"files", res.files}, {"count", res.files.size()}, {"truncated", res.truncated}}));
+        });
+    watcher->setFuture(QtConcurrent::run([rootPath, recursive, cancelled] {
         constexpr int maxMatches = 256;
         constexpr int maxScanned = 4096;
         QStringList paths;
         bool truncated = false;
         int scanned = 0;
-        QDirIterator it(rootPath, QDir::Files, recursive ? QDirIterator::Subdirectories : QDirIterator::NoIteratorFlags);
+        // Include directories in iteration so empty directory trees still count toward the scan budget.
+        QDirIterator it(rootPath, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot,
+                        recursive ? QDirIterator::Subdirectories : QDirIterator::NoIteratorFlags);
         while (it.hasNext()) {
-            const QString file = it.next();
+            if (cancelled->load()) break;
+            const QString entry = it.next();
             if (++scanned > maxScanned) { truncated = true; break; }
-            if (mediaKindForSuffix(QFileInfo(file).suffix()).isEmpty()) continue;
+            const QFileInfo info(entry);
+            if (!info.isFile()) continue;
+            if (mediaKindForSuffix(info.suffix()).isEmpty()) continue;
             if (paths.size() >= maxMatches) { truncated = true; break; }
-            paths << file;
+            paths << entry;
         }
         paths.sort(Qt::CaseInsensitive);
         ScanResult result;
@@ -784,52 +822,142 @@ void McpServer::listMediaFilesAsync(const QJsonObject& a, std::function<void(QJs
     }));
 }
 
-QJsonObject McpServer::relinkMediaTool(const QJsonObject& a) {
+void McpServer::relinkMediaAsync(const QJsonObject& a, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish) {
     checkWrite(a, true);
+    if (activeAsyncJobs_ >= 8) fail("Too many concurrent async MCP operations; wait for in-flight requests to finish");
+    if (!a["directory"].isString()) fail("directory must be a string");
     const QString folder = a["directory"].toString().trimmed();
     const QFileInfo dirInfo(folder);
     if (!dirInfo.isAbsolute() || !dirInfo.exists() || !dirInfo.isDir())
         fail("Directory must be an existing absolute local folder");
 
-    QMap<QString, QString> wanted;
-    for (const auto& asset : c_.project.assets)
-        if (asset.offline) wanted.insert(QFileInfo(asset.path).fileName().toLower(), asset.id);
-    if (wanted.isEmpty()) {
+    struct OfflineItem { QString id, name, originalPath, baseName; };
+    std::vector<OfflineItem> offlineItems;
+    for (const auto& asset : c_.project.assets) {
+        if (asset.offline)
+            offlineItems.push_back({asset.id, asset.name, asset.path, QFileInfo(asset.path).fileName().toLower()});
+    }
+    if (offlineItems.empty()) {
         auto result = snapshot();
-        result.insert("relink", QJsonObject{{"relinked", 0}, {"remaining_offline", 0}, {"errors", QJsonArray{}}});
-        return toolResult(result);
+        result.insert("relink", QJsonObject{{"relinked", 0}, {"remaining_offline", 0}, {"ambiguous", QJsonArray{}}, {"errors", QJsonArray{}}});
+        finish(toolResult(result));
+        return;
     }
 
-    std::vector<MediaAsset> loaded;
-    QJsonArray errors;
-    QSet<QString> found;
-    for (QDirIterator it(dirInfo.absoluteFilePath(), QDir::Files, QDirIterator::Subdirectories); it.hasNext();) {
-        const QString path = it.next();
-        const QString key = QFileInfo(path).fileName().toLower();
-        if (!wanted.contains(key) || found.contains(key)) continue;
-        found.insert(key);
-        try {
-            auto asset = loadMedia(path);
-            const auto& existing = c_.project.assets[wanted.value(key)];
-            asset.id = existing.id; asset.name = existing.name;
-            loaded.push_back(std::move(asset));
-        } catch (const std::exception& e) {
-            errors.append(QFileInfo(path).fileName() + ": " + QString::fromUtf8(e.what()));
+    const QString rootPath = dirInfo.absoluteFilePath();
+    const quint64 expectedRev = revision_;
+    const quint64 jobGen = generation_;
+    c_.busy = true;
+    ++activeAsyncJobs_;
+
+    struct RelinkResult {
+        std::vector<MediaAsset> loaded;
+        QJsonArray ambiguous;
+        QJsonArray errors;
+        bool truncated = false;
+    };
+    auto* watcher = new QFutureWatcher<RelinkResult>(this);
+    connect(watcher, &QFutureWatcher<RelinkResult>::finished, this,
+        [this, watcher, expectedRev, jobGen, cancelled, finish = std::move(finish)]() mutable {
+            const auto res = watcher->result(); watcher->deleteLater();
+            c_.busy = false;
+            activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1);
+            if (cancelled->load() || generation_ != jobGen) return;
+            if (!running() || !editing_ || c_.showMode || !c_.canEdit(false)) {
+                finish(toolResult({{"error", "Relink finished, but editing is no longer permitted or is locked"},
+                    {"revision", static_cast<double>(revision_)}}, true));
+                return;
+            }
+            if (revision_ != expectedRev) {
+                finish(toolResult({{"error", "Revision conflict during relink; read get_show and retry"},
+                    {"revision", static_cast<double>(revision_)}}, true));
+                return;
+            }
+            if (!res.loaded.empty()) {
+                if (!c_.edit([&](Project& p) { for (const auto& asset : res.loaded) p.assets.insert(asset.id, asset); })) {
+                    finish(toolResult({{"error", c_.status}, {"revision", static_cast<double>(revision_)}}, true));
+                    return;
+                }
+                const QString summary = QString("Agent relinked %1 media file%2.").arg(res.loaded.size()).arg(res.loaded.size() == 1 ? "" : "s");
+                c_.report(summary);
+                emit showModified(summary);
+            }
+            int remaining = 0;
+            for (const auto& asset : c_.project.assets) if (asset.offline) ++remaining;
+            if (remaining == 0) c_.playbackProblem.clear();
+            auto result = snapshot();
+            result.insert("relink", QJsonObject{{"relinked", static_cast<int>(res.loaded.size())},
+                {"remaining_offline", remaining}, {"ambiguous", res.ambiguous},
+                {"errors", res.errors}, {"truncated", res.truncated}});
+            finish(toolResult(result));
+        });
+
+    watcher->setFuture(QtConcurrent::run([rootPath, offlineItems = std::move(offlineItems), cancelled] {
+        auto normalizedParts = [](const QString& path) {
+            QString clean = path;
+            clean.replace('\\', '/');
+            return clean.toLower().split('/', Qt::SkipEmptyParts);
+        };
+        auto trailingMatchCount = [](const QStringList& a, const QStringList& b) {
+            int n = 0;
+            while (n < a.size() && n < b.size() && a[a.size() - 1 - n] == b[b.size() - 1 - n]) ++n;
+            return n;
+        };
+
+        QSet<QString> wantedNames;
+        for (const auto& item : offlineItems) wantedNames.insert(item.baseName);
+
+        constexpr int maxScanned = 32768;
+        int scanned = 0;
+        QMap<QString, QStringList> candidatesByName;
+        RelinkResult out;
+        QDirIterator it(rootPath, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            if (cancelled->load()) return out;
+            const QString entry = it.next();
+            if (++scanned > maxScanned) { out.truncated = true; break; }
+            const QFileInfo info(entry);
+            if (!info.isFile()) continue;
+            const QString key = info.fileName().toLower();
+            if (wantedNames.contains(key)) candidatesByName[key].append(info.absoluteFilePath());
         }
-    }
-    if (!loaded.empty()) {
-        if (!c_.edit([&](Project& p) { for (const auto& asset : loaded) p.assets.insert(asset.id, asset); }))
-            fail(c_.status);
-        const QString summary = QString("Agent relinked %1 media file%2.").arg(loaded.size()).arg(loaded.size() == 1 ? "" : "s");
-        c_.report(summary);
-        emit showModified(summary);
-    }
-    int remaining = 0;
-    for (const auto& asset : c_.project.assets) if (asset.offline) ++remaining;
-    if (remaining == 0) c_.playbackProblem.clear();
-    auto result = snapshot();
-    result.insert("relink", QJsonObject{{"relinked", static_cast<int>(loaded.size())}, {"remaining_offline", remaining}, {"errors", errors}});
-    return toolResult(result);
+
+        for (const auto& item : offlineItems) {
+            if (cancelled->load()) return out;
+            const QStringList candidates = candidatesByName.value(item.baseName);
+            if (candidates.isEmpty()) continue;
+            QString chosen;
+            if (candidates.size() == 1) {
+                chosen = candidates.front();
+            } else {
+                const QStringList origParts = normalizedParts(item.originalPath);
+                int bestScore = -1;
+                QStringList bestMatches;
+                for (const auto& cand : candidates) {
+                    const int score = trailingMatchCount(origParts, normalizedParts(cand));
+                    if (score > bestScore) { bestScore = score; bestMatches = {cand}; }
+                    else if (score == bestScore) bestMatches << cand;
+                }
+                if (bestMatches.size() == 1) {
+                    chosen = bestMatches.front();
+                } else {
+                    QJsonArray candArr;
+                    for (const auto& cPath : bestMatches) candArr.append(cPath);
+                    out.ambiguous.append(QJsonObject{{"id", item.id}, {"name", item.name},
+                        {"original_path", item.originalPath}, {"candidates", candArr}});
+                    continue;
+                }
+            }
+            try {
+                auto asset = loadMedia(chosen);
+                asset.id = item.id; asset.name = item.name;
+                out.loaded.push_back(std::move(asset));
+            } catch (const std::exception& e) {
+                out.errors.append(QFileInfo(chosen).fileName() + ": " + QString::fromUtf8(e.what()));
+            }
+        }
+        return out;
+    }));
 }
 
 QJsonObject McpServer::historyTool(const QJsonObject& a) {
@@ -912,7 +1040,7 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
     // Phase 1: Validate every nested field and resolve targets before mutating any real outputs.
     struct PlannedAudio { RtAudio::Api api; unsigned deviceId; QString name; unsigned channels; unsigned buffer; };
     std::optional<PlannedAudio> plannedAudio;
-    std::optional<int> plannedMidiPort;
+    std::optional<QString> plannedMidiName;
     struct PlannedDisplay { bool open = false; int screen = 0; bool allowCover = false; };
     std::optional<PlannedDisplay> plannedDisplay;
     std::optional<std::vector<unsigned char>> plannedTestMidi;
@@ -976,16 +1104,14 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
         if (!cfg.contains("port") || !cfg["port"].isString()) fail("midi.port must be a string");
         const QString portName = cfg["port"].toString().trimmed();
         if (portName.isEmpty() || portName.compare("none", Qt::CaseInsensitive) == 0 || portName.compare("off", Qt::CaseInsensitive) == 0) {
-            plannedMidiPort = -1;
+            plannedMidiName = QString();
         } else {
             const auto ports = c_.midi.ports();
-            int index = ports.indexOf(portName);
-            if (index < 0) {
-                for (int i = 0; i < ports.size(); ++i)
-                    if (ports[i].compare(portName, Qt::CaseInsensitive) == 0) { index = i; break; }
-            }
-            if (index < 0) fail("MIDI port not found: " + portName);
-            plannedMidiPort = index;
+            QString resolved;
+            for (const auto& p : ports) if (p == portName) { resolved = p; break; }
+            if (resolved.isEmpty()) for (const auto& p : ports) if (p.compare(portName, Qt::CaseInsensitive) == 0) { resolved = p; break; }
+            if (resolved.isEmpty()) fail("MIDI port not found: " + portName);
+            plannedMidiName = resolved;
         }
     }
 
@@ -1006,7 +1132,13 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
             if (!disp["allow_cover_editor"].isBool()) fail("display.allow_cover_editor must be a boolean");
             d.allowCover = disp["allow_cover_editor"].toBool();
         }
-        if (d.open && !host_.openDisplay) fail("Audience display control is unavailable without a main window");
+        if (d.open) {
+            if (!host_.openDisplay || !host_.displayStatus) fail("Audience display control is unavailable without a main window");
+            const auto screens = host_.displayStatus()["screens"].toArray();
+            if (d.screen < 0 || d.screen >= screens.size()) fail("Display index out of range");
+            if (screens[d.screen].toObject()["is_editor"].toBool(false) && !d.allowCover)
+                fail("That screen currently shows the editor. Choose another display or pass allow_cover_editor: true.");
+        }
         plannedDisplay = d;
     }
 
@@ -1025,13 +1157,20 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
         plannedTestMidi = std::move(bytes);
     }
 
-    // Phase 2: Apply validated changes.
+    // Phase 2: Apply validated changes, reporting any partial state if a later hardware step fails.
+    QStringList applied;
+    auto failPartial = [&](const QString& reason) {
+        if (applied.isEmpty()) fail(reason);
+        fail(reason + " (already applied: " + applied.join(", ") + ")");
+    };
     if (plannedAudio) {
         if (!c_.configureAudio(plannedAudio->api, plannedAudio->deviceId, plannedAudio->name, plannedAudio->channels, plannedAudio->buffer))
-            fail(c_.status);
+            failPartial(c_.status);
+        applied << "audio";
     }
-    if (plannedMidiPort) {
-        if (!c_.configureMidi(*plannedMidiPort)) fail(c_.status);
+    if (plannedMidiName) {
+        if (!c_.configureMidiByName(*plannedMidiName)) failPartial(c_.status);
+        applied << "midi";
     }
     if (plannedDisplay) {
         if (!plannedDisplay->open) {
@@ -1039,11 +1178,12 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a) {
         } else {
             QString error;
             if (!host_.openDisplay(plannedDisplay->screen, plannedDisplay->allowCover, error))
-                fail(error.isEmpty() ? "Could not open audience display" : error);
+                failPartial(error.isEmpty() ? "Could not open audience display" : error);
         }
+        applied << "display";
     }
     if (plannedTestMidi) {
-        if (!c_.testMidi(*plannedTestMidi)) fail(c_.status);
+        if (!c_.testMidi(*plannedTestMidi)) failPartial(c_.status);
     }
 
     return toolResult(environmentReport());
@@ -1070,8 +1210,9 @@ QJsonObject McpServer::configureRemoteTool(const QJsonObject& a) {
     return toolResult(status);
 }
 
-QJsonObject McpServer::projectActionTool(const QJsonObject& a) {
+void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish) {
     checkEnabledAndUnlocked(true);
+    if (activeAsyncJobs_ >= 8) fail("Too many concurrent async MCP operations; wait for in-flight requests to finish");
     if (!a["action"].isString()) fail("action must be a string");
     const QString action = a["action"].toString();
     QString path;
@@ -1081,63 +1222,148 @@ QJsonObject McpServer::projectActionTool(const QJsonObject& a) {
     }
     if (a.contains("discard_unsaved") && !a["discard_unsaved"].isBool()) fail("discard_unsaved must be a boolean");
     const bool discard = a["discard_unsaved"].toBool(false);
+    const quint64 jobGen = generation_;
+
+    if (action == "new_show" || action == "open_demo") {
+        if (c_.dirty && !discard) fail("Current show has unsaved changes. Save first or pass discard_unsaved: true");
+        if (action == "new_show") {
+            c_.replace(newProject());
+            emit showModified("Agent created a new show.");
+        } else {
+            c_.replace(demoProject());
+            c_.dirty = true;
+            emit showModified("Agent opened the demonstration show.");
+        }
+        auto result = snapshot(); result.insert("action", action);
+        finish(toolResult(result));
+        return;
+    }
 
     if (action == "save" || action == "save_as") {
         QString target = (action == "save" && path.isEmpty()) ? c_.path : path;
         if (target.isEmpty()) fail("Provide an absolute path to save an untitled show");
         if (!QFileInfo(target).isAbsolute()) fail("Save path must be an absolute local file path");
         if (!target.endsWith(".savshow", Qt::CaseInsensitive)) target += ".savshow";
-        if (!c_.save(target)) fail(c_.status);
-        path = target;
-    } else if (action == "export_package") {
-        if (path.isEmpty() || !QFileInfo(path).isAbsolute()) fail("Provide an absolute local path for .savpack export");
-        if (!isProjectPackage(path)) path += ".savpack";
-        writeProjectPackage(c_.project, path);
-        c_.report("Agent exported " + QFileInfo(path).fileName());
-    } else if (action == "new_show" || action == "open_demo" || action == "open_project") {
-        if (c_.dirty && !discard) fail("Current show has unsaved changes. Save first or pass discard_unsaved: true");
-        if (action == "new_show") {
-            c_.replace(newProject());
-            emit showModified("Agent created a new show.");
-        } else if (action == "open_demo") {
-            c_.replace(demoProject());
-            c_.dirty = true;
-            emit showModified("Agent opened the demonstration show.");
-        } else {
-            if (path.isEmpty() || !QFileInfo(path).isAbsolute() || !QFileInfo(path).isFile())
-                fail("Provide an existing absolute .savshow or .savpack file path");
-            const bool pkg = isProjectPackage(path);
-            auto loaded = readProject(path);
-            c_.replace(std::move(loaded), pkg ? QString() : path);
-            if (pkg) c_.dirty = true;
-            emit showModified("Agent opened " + QFileInfo(path).fileName() + ".");
-        }
-    } else {
-        fail("Unknown project action: " + action);
+        const quint64 expectedRev = revision_;
+        c_.busy = true;
+        ++activeAsyncJobs_;
+        struct SavePrep { Project candidate; QString error; };
+        auto* watcher = new QFutureWatcher<SavePrep>(this);
+        connect(watcher, &QFutureWatcher<SavePrep>::finished, this,
+            [this, watcher, action, target, expectedRev, jobGen, cancelled, finish = std::move(finish)]() mutable {
+                auto prep = watcher->result(); watcher->deleteLater();
+                c_.busy = false;
+                activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1);
+                if (cancelled->load() || generation_ != jobGen) return;
+                if (!prep.error.isEmpty()) {
+                    finish(toolResult({{"error", prep.error}, {"revision", static_cast<double>(revision_)}}, true));
+                    return;
+                }
+                if (!running() || !editing_ || c_.showMode || !c_.canEdit(false) || revision_ != expectedRev) {
+                    finish(toolResult({{"error", "Save could not complete because show state or permissions changed"},
+                        {"revision", static_cast<double>(revision_)}}, true));
+                    return;
+                }
+                if (!c_.commitSave(std::move(prep.candidate), target)) {
+                    finish(toolResult({{"error", c_.status}, {"revision", static_cast<double>(revision_)}}, true));
+                    return;
+                }
+                auto result = snapshot(); result.insert("action", action); result.insert("target_path", target);
+                finish(toolResult(result));
+            });
+        const QString mediaDir = Controller::mediaDirectory(target);
+        watcher->setFuture(QtConcurrent::run([candidate = c_.project, mediaDir]() mutable {
+            SavePrep out;
+            try { materializeProjectMedia(candidate, mediaDir); out.candidate = std::move(candidate); }
+            catch (const std::exception& e) { out.error = QString::fromUtf8(e.what()); }
+            return out;
+        }));
+        return;
     }
 
-    auto result = snapshot();
-    result.insert("action", action);
-    if (!path.isEmpty()) result.insert("target_path", path);
-    return toolResult(result);
+    if (action == "export_package") {
+        if (path.isEmpty() || !QFileInfo(path).isAbsolute()) fail("Provide an absolute local path for .savpack export");
+        if (!isProjectPackage(path)) path += ".savpack";
+        c_.busy = true;
+        ++activeAsyncJobs_;
+        auto* watcher = new QFutureWatcher<QString>(this);
+        connect(watcher, &QFutureWatcher<QString>::finished, this,
+            [this, watcher, action, path, jobGen, cancelled, finish = std::move(finish)]() mutable {
+                const QString err = watcher->result(); watcher->deleteLater();
+                c_.busy = false;
+                activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1);
+                if (cancelled->load() || generation_ != jobGen) return;
+                if (!err.isEmpty()) {
+                    finish(toolResult({{"error", err}, {"revision", static_cast<double>(revision_)}}, true));
+                    return;
+                }
+                c_.report("Agent exported " + QFileInfo(path).fileName());
+                auto result = snapshot(); result.insert("action", action); result.insert("target_path", path);
+                finish(toolResult(result));
+            });
+        watcher->setFuture(QtConcurrent::run([projectSnapshot = c_.project, path] {
+            try { writeProjectPackage(projectSnapshot, path); return QString(); }
+            catch (const std::exception& e) { return QString::fromUtf8(e.what()); }
+        }));
+        return;
+    }
+
+    if (action == "open_project") {
+        if (c_.dirty && !discard) fail("Current show has unsaved changes. Save first or pass discard_unsaved: true");
+        if (path.isEmpty() || !QFileInfo(path).isAbsolute() || !QFileInfo(path).isFile())
+            fail("Provide an existing absolute .savshow or .savpack file path");
+        const bool pkg = isProjectPackage(path);
+        const quint64 expectedRev = revision_;
+        c_.busy = true;
+        ++activeAsyncJobs_;
+        struct LoadResult { Project project; QString error; };
+        auto* watcher = new QFutureWatcher<LoadResult>(this);
+        connect(watcher, &QFutureWatcher<LoadResult>::finished, this,
+            [this, watcher, action, path, pkg, discard, expectedRev, jobGen, cancelled, finish = std::move(finish)]() mutable {
+                auto loaded = watcher->result(); watcher->deleteLater();
+                c_.busy = false;
+                activeAsyncJobs_ = std::max(0, activeAsyncJobs_ - 1);
+                if (cancelled->load() || generation_ != jobGen) return;
+                if (!loaded.error.isEmpty()) {
+                    finish(toolResult({{"error", loaded.error}, {"revision", static_cast<double>(revision_)}}, true));
+                    return;
+                }
+                if (!running() || !editing_ || c_.showMode || !c_.canEdit(false) || revision_ != expectedRev || (c_.dirty && !discard)) {
+                    finish(toolResult({{"error", "Open could not complete because show state or permissions changed"},
+                        {"revision", static_cast<double>(revision_)}}, true));
+                    return;
+                }
+                c_.replace(std::move(loaded.project), pkg ? QString() : path);
+                if (pkg) c_.dirty = true;
+                emit showModified("Agent opened " + QFileInfo(path).fileName() + ".");
+                auto result = snapshot(); result.insert("action", action); result.insert("target_path", path);
+                finish(toolResult(result));
+            });
+        watcher->setFuture(QtConcurrent::run([path] {
+            LoadResult out;
+            try { out.project = readProject(path); }
+            catch (const std::exception& e) { out.error = QString::fromUtf8(e.what()); }
+            return out;
+        }));
+        return;
+    }
+
+    fail("Unknown project action: " + action);
 }
 
 QJsonObject McpServer::transportControlTool(const QJsonObject& a) {
     checkEnabledAndUnlocked(false);
     if (!a["action"].isString()) fail("action must be a string");
     const QString action = a["action"].toString();
-    const State state = c_.transport.state();
     bool accepted = true;
     if (action == "play" || action == "continue") {
-        if (state != State::Playing) {
-            accepted = c_.toggle();
-            if (!accepted) fail(c_.playbackProblem.isEmpty() ? c_.status : c_.playbackProblem);
-        }
+        // Explicit play/continue never toggles a Playing show into Pause.
+        accepted = c_.play();
+        if (!accepted) fail(c_.playbackProblem.isEmpty() ? c_.status : c_.playbackProblem);
     } else if (action == "pause") {
-        if (state == State::Playing) {
-            accepted = c_.toggle();
-            if (!accepted) fail(c_.status);
-        }
+        // Explicit pause never queues Play, even if the audio callback just entered Held.
+        accepted = c_.pause();
+        if (!accepted) fail(c_.status);
     } else if (action == "stop_all") {
         accepted = c_.stopAll();
         if (!accepted) fail(c_.status);
@@ -1165,7 +1391,7 @@ QJsonObject McpServer::importStatus() const {
     return {{"job_id", importId_}, {"state", importState_}, {"error", importError_}, {"assets", assets}};
 }
 
-void McpServer::callTool(const QString& name, const QJsonObject& a, std::function<void(QJsonObject)> finish) {
+void McpServer::callTool(const QString& name, const QJsonObject& a, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish) {
     try {
         QJsonObject schema;
         for (const auto& t : tools()) if (t.toObject()["name"] == name) schema = t.toObject()["inputSchema"].toObject();
@@ -1174,17 +1400,17 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, std::functio
         for (const auto& key : schema["required"].toArray()) if (!a.contains(key.toString())) fail("Missing argument: " + key.toString());
         if (name == "get_show") { finish(toolResult(snapshot())); return; }
         if (name == "get_preflight") { finish(toolResult(preflightReport())); return; }
-        if (name == "render_preview") { renderPreviewAsync(a, finish); return; }
+        if (name == "render_preview") { renderPreviewAsync(a, std::move(cancelled), finish); return; }
         if (name == "get_environment") { finish(toolResult(environmentReport())); return; }
         if (name == "get_app_guide") { finish(appGuide(a)); return; }
         if (name == "encode_midi") { finish(encodeMidiTool(a)); return; }
-        if (name == "list_media_files") { listMediaFilesAsync(a, finish); return; }
-        if (name == "relink_media") { finish(relinkMediaTool(a)); return; }
+        if (name == "list_media_files") { listMediaFilesAsync(a, std::move(cancelled), finish); return; }
+        if (name == "relink_media") { relinkMediaAsync(a, std::move(cancelled), finish); return; }
         if (name == "history") { finish(historyTool(a)); return; }
         if (name == "seek_and_select") { finish(seekAndSelectTool(a)); return; }
         if (name == "configure_outputs") { finish(configureOutputsTool(a)); return; }
         if (name == "configure_remote") { finish(configureRemoteTool(a)); return; }
-        if (name == "project_action") { finish(projectActionTool(a)); return; }
+        if (name == "project_action") { projectActionAsync(a, std::move(cancelled), finish); return; }
         if (name == "transport_control") { finish(transportControlTool(a)); return; }
         if (name == "get_import" || name == "commit_import") {
             if (!a["job_id"].isString() || importId_.isEmpty() || a["job_id"].toString() != importId_) fail("Unknown import job");
@@ -1236,7 +1462,7 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, std::functio
     }
 }
 
-void McpServer::dispatch(const QJsonObject& request, std::function<void(QJsonObject)> finish) {
+void McpServer::dispatch(const QJsonObject& request, std::shared_ptr<std::atomic<bool>> cancelled, std::function<void(QJsonObject)> finish) {
     const auto id = request["id"];
     auto error = [&](int code, const QString& message) {
         finish(QJsonObject{{"jsonrpc", "2.0"}, {"id", id.isUndefined() ? QJsonValue(QJsonValue::Null) : id}, {"error", QJsonObject{{"code", code}, {"message", message}}}});
@@ -1259,7 +1485,7 @@ void McpServer::dispatch(const QJsonObject& request, std::function<void(QJsonObj
         if (!params["name"].isString() || (params.contains("arguments") && !params["arguments"].isObject())) { error(-32602, "Invalid tool call"); return; }
         bool found = false; for (const auto& t : tools()) found |= t.toObject()["name"] == params["name"];
         if (!found) { error(-32602, "Unknown tool"); return; }
-        callTool(params["name"].toString(), params["arguments"].toObject(), [id, finish = std::move(finish)](QJsonObject toolRes) {
+        callTool(params["name"].toString(), params["arguments"].toObject(), std::move(cancelled), [id, finish = std::move(finish)](QJsonObject toolRes) {
             finish({{"jsonrpc", "2.0"}, {"id", id}, {"result", toolRes}});
         });
         return;
@@ -1303,7 +1529,10 @@ void McpServer::acceptConnection() {
         auto* timeout = new QTimer(socket); timeout->setSingleShot(true); timeout->start(10000);
         connect(timeout, &QTimer::timeout, socket, &QTcpSocket::abort);
         auto buffer = std::make_shared<QByteArray>(); auto done = std::make_shared<bool>(false);
-        connect(socket, &QTcpSocket::readyRead, this, [this, socket, timeout, buffer, done] {
+        auto cancelled = std::make_shared<std::atomic<bool>>(false);
+        connect(socket, &QTcpSocket::disconnected, socket, [cancelled] { cancelled->store(true); });
+        connect(timeout, &QTimer::timeout, socket, [cancelled] { cancelled->store(true); });
+        connect(socket, &QTcpSocket::readyRead, this, [this, socket, timeout, buffer, done, cancelled] {
             if (*done) return;
             auto respond = [socket = QPointer<QTcpSocket>(socket), done](int status, const QByteArray& reason, const QByteArray& body = QByteArray(), const QByteArray& extra = QByteArray()) {
                 *done = true;
@@ -1354,8 +1583,8 @@ void McpServer::acceptConnection() {
                 respond(400, "Bad Request", QJsonDocument(error).toJson(QJsonDocument::Compact)); return;
             }
             *done = true;
-            timeout->start(15000);
-            dispatch(doc.object(), [respond](QJsonObject result) {
+            timeout->start(60000);
+            dispatch(doc.object(), cancelled, [respond](QJsonObject result) {
                 if (result.isEmpty()) respond(202, "Accepted");
                 else respond(200, "OK", QJsonDocument(result).toJson(QJsonDocument::Compact));
             });

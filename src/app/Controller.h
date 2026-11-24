@@ -37,10 +37,13 @@ public:
     std::size_t redoCount() const { return redo_.size(); }
     void replace(Project next, QString projectPath = {});
     bool toggle();
+    bool play();
+    bool pause();
     bool seek(Frame position);
     bool stopAll();
     bool configureAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer);
     bool configureMidi(int port);
+    bool configureMidiByName(const QString& portName);
     bool testMidi(const std::vector<unsigned char>& message);
     bool needsMidi() const;
     // Offline sources and vanished videos used on the timeline.

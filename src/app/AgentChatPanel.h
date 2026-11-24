@@ -51,6 +51,7 @@ private:
     std::vector<AcpAgentPreset> presets_;
     std::vector<ChatEntry> entries_;
     bool autoStartedMcp_ = false;
+    bool connecting_ = false;
     bool sentContextPreamble_ = false;
     bool hasAgentEdit_ = false;
     bool lastCanEdit_ = true;

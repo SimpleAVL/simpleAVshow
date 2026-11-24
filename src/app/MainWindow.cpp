@@ -150,17 +150,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
             {"clients", remote_.clients()}, {"has_network", !remote_.links().isEmpty()}};
     };
     host.configureRemote = [this](bool enable, int port, bool changeKey, QString& error) {
-        if (changeKey) remote_.changeKey();
-        if (!enable) {
-            if (remote_.running()) { remote_.stop(); c_.report("Phone remote disabled."); }
-            return true;
-        }
         const quint16 targetPort = port >= 1024 && port <= 65535
             ? static_cast<quint16>(port)
             : static_cast<quint16>(remote_.running() ? remote_.port() : QSettings().value("remote/port", 48124).toInt());
-        if (remote_.running() && remote_.port() != targetPort) remote_.stop();
-        if (!remote_.running() && !remote_.start(targetPort)) { error = remote_.errorString(); return false; }
-        return true;
+        return remote_.reconfigure(enable, targetPort, changeKey, error);
     };
     host.selectItem = [this](int track, const QString& clipId, const QString& markerId) {
         if (!timeline_) return;
@@ -1236,8 +1229,11 @@ bool MainWindow::eventFilter(QObject* object, QEvent* event) {
     if (event->type() != QEvent::KeyPress || !isVisible()) return QMainWindow::eventFilter(object, event);
     auto* key = static_cast<QKeyEvent*>(event); auto* widget = qobject_cast<QWidget*>(object);
     if (!widget || (widget->window() != this && widget->window() != outputWindow_)) return QMainWindow::eventFilter(object, event);
-    const bool editing = qobject_cast<QLineEdit*>(widget) || qobject_cast<QTextEdit*>(widget) ||
-        qobject_cast<QPlainTextEdit*>(widget) || qobject_cast<QAbstractSpinBox*>(widget) || qobject_cast<QComboBox*>(widget);
+    auto* lineEdit = qobject_cast<QLineEdit*>(widget);
+    auto* textEdit = qobject_cast<QTextEdit*>(widget);
+    auto* plainEdit = qobject_cast<QPlainTextEdit*>(widget);
+    const bool editing = (lineEdit && !lineEdit->isReadOnly()) || (textEdit && !textEdit->isReadOnly()) ||
+        (plainEdit && !plainEdit->isReadOnly()) || qobject_cast<QAbstractSpinBox*>(widget) || qobject_cast<QComboBox*>(widget);
     // Outside Show mode Escape is Stop All unless it cancels a field edit. In Show mode a stray press
     // must not end the performance: two presses within 600 ms stop everything (the button still takes one click).
     if (key->key() == Qt::Key_Escape && !key->isAutoRepeat() && (c_.showMode || !editing)) {

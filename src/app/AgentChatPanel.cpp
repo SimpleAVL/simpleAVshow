@@ -297,8 +297,12 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
     connect(newSessionButton_, &QPushButton::clicked, this, &AgentChatPanel::startNewSession);
     connect(input, &PromptInput::submitted, this, &AgentChatPanel::sendCurrentPrompt);
     connect(sendButton_, &QPushButton::clicked, this, [this] {
-        if (acp_.state() == AcpState::Prompting) acp_.cancelPrompt();
-        else sendCurrentPrompt();
+        if (acp_.state() == AcpState::Prompting) {
+            clearPermissionCards();
+            acp_.cancelPrompt();
+        } else {
+            sendCurrentPrompt();
+        }
     });
     connect(undoButton_, &QPushButton::clicked, this, [this] {
         if (!c_.canEdit()) return;
@@ -315,7 +319,14 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
     });
 
     // ACP client signals
-    connect(&acp_, &AcpClient::stateChanged, this, [this](AcpState) { updateControls(); });
+    connect(&acp_, &AcpClient::stateChanged, this, [this](AcpState st) {
+        // If an unexpected exit or protocol error ends a chat-owned session, revoke its auto-started MCP server.
+        if (!connecting_ && (st == AcpState::Disconnected || st == AcpState::Error) && autoStartedMcp_ && mcp_.running()) {
+            autoStartedMcp_ = false;
+            mcp_.stop();
+        }
+        updateControls();
+    });
     connect(&acp_, &AcpClient::connected, this, [this](const QString& name, const QString&) {
         sentContextPreamble_ = false;
         const QString transport = acp_.usedHttpMcp() ? "HTTP MCP" : "stdio MCP bridge";
@@ -372,7 +383,8 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
 
     // Sync with MCP server and controller state
     connect(&mcp_, &McpServer::stateChanged, this, [this] {
-        if (!mcp_.running() && acp_.state() != AcpState::Disconnected) {
+        const AcpState st = acp_.state();
+        if (!mcp_.running() && (st == AcpState::Connecting || st == AcpState::Ready || st == AcpState::Prompting)) {
             autoStartedMcp_ = false;
             acp_.disconnectFromAgent();
             appendEntry({ChatEntry::Kind::System, {}, {}, {}, "Disconnected because the local MCP server was stopped.", {}, {}});
@@ -537,7 +549,9 @@ void AgentChatPanel::toggleConnection() {
         QSettings().setValue("agent/customCommand", cmd);
         const QStringList parts = splitCommandLine(cmd);
         if (parts.isEmpty()) {
-            appendEntry({ChatEntry::Kind::Error, {}, {}, {}, "Enter an ACP command first (for example: opencode acp).", {}, {}});
+            appendEntry({ChatEntry::Kind::Error, {}, {}, {},
+                cmd.isEmpty() ? QString("Enter an ACP command first (for example: opencode acp).")
+                              : QString("Invalid ACP command (check for unclosed quotes)."), {}, {}});
             return;
         }
         program = parts.front();
@@ -565,7 +579,13 @@ void AgentChatPanel::toggleConnection() {
     mcpConfig.proxyExecutable = QCoreApplication::applicationFilePath();
 
     logsView_->clear();
+    connecting_ = true;
     acp_.connectToAgent(program, args, currentWorkingDirectory(), mcpConfig);
+    connecting_ = false;
+    if ((acp_.state() == AcpState::Disconnected || acp_.state() == AcpState::Error) && autoStartedMcp_ && mcp_.running()) {
+        autoStartedMcp_ = false;
+        mcp_.stop();
+    }
     updateControls();
 }
 
