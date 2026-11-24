@@ -5,10 +5,19 @@
 #include <QImageReader>
 #include <QTemporaryFile>
 #include <atomic>
+#include <cerrno>
+#include <cstring>
 #include <limits>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -34,19 +43,75 @@ double mediaOrigin(const AVFormatContext* format) {
 }
 // Local files only: no format may reach the network on its own (an .sdp or HLS playlist would).
 AVDictionary* localOnly() { AVDictionary* options = nullptr; av_dict_set(&options, "protocol_whitelist", "file", 0); return options; }
+// A media file opened by the app for FFmpeg rather than through FFmpeg's file protocol. On Windows that
+// protocol's C runtime open denies deleting or renaming the file while it is open, and a show streams
+// from its originals for hours (and video readers hold theirs), so this opens with read, write and
+// delete sharing like other readers: replacing or removing a playing file then surfaces as a changed or
+// missing source, and package extractions can be cleaned up. Other systems read through POSIX calls.
+class SourceFile {
+public:
+    explicit SourceFile(const QString& path) {
+#ifdef Q_OS_WIN
+        handle_ = CreateFileW(reinterpret_cast<const wchar_t*>(path.utf16()), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle_ == INVALID_HANDLE_VALUE) throw std::runtime_error("Open media: cannot open " + path.toStdString());
+#else
+        fd_ = ::open(QFile::encodeName(path).constData(), O_RDONLY | O_CLOEXEC);
+        if (fd_ < 0) throw std::runtime_error("Open media: " + std::string(std::strerror(errno)));
+#endif
+        constexpr int size = 64 * 1024;
+        auto* buffer = static_cast<unsigned char*>(av_malloc(size));
+        if (buffer) io_ = avio_alloc_context(buffer, size, 0, this, &SourceFile::read, nullptr, &SourceFile::seek);
+        if (!io_) { av_free(buffer); close(); throw std::bad_alloc(); }
+    }
+    ~SourceFile() { av_freep(&io_->buffer); avio_context_free(&io_); close(); }
+    SourceFile(const SourceFile&) = delete;
+    SourceFile& operator=(const SourceFile&) = delete;
+    AVIOContext* io() const noexcept { return io_; }
+private:
+#ifdef Q_OS_WIN
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+    void close() noexcept { if (handle_ != INVALID_HANDLE_VALUE) CloseHandle(handle_); }
+#else
+    int fd_ = -1;
+    void close() noexcept { if (fd_ >= 0) ::close(fd_); }
+#endif
+    AVIOContext* io_ = nullptr;
+    static int read(void* opaque, std::uint8_t* buffer, int size) {
+        const auto* self = static_cast<const SourceFile*>(opaque);
+#ifdef Q_OS_WIN
+        DWORD got = 0;
+        if (!ReadFile(self->handle_, buffer, static_cast<DWORD>(size), &got, nullptr)) return AVERROR(EIO);
+#else
+        const auto got = ::read(self->fd_, buffer, static_cast<std::size_t>(size));
+        if (got < 0) return AVERROR(errno);
+#endif
+        return got ? static_cast<int>(got) : AVERROR_EOF;
+    }
+    static std::int64_t seek(void* opaque, std::int64_t offset, int whence) {
+        const auto* self = static_cast<const SourceFile*>(opaque);
+        whence &= ~AVSEEK_FORCE;
+#ifdef Q_OS_WIN
+        if (whence == AVSEEK_SIZE) { LARGE_INTEGER size; return GetFileSizeEx(self->handle_, &size) ? size.QuadPart : AVERROR(EIO); }
+        LARGE_INTEGER to, at; to.QuadPart = offset;
+        const DWORD method = whence == SEEK_SET ? FILE_BEGIN : whence == SEEK_CUR ? FILE_CURRENT : FILE_END;
+        return SetFilePointerEx(self->handle_, to, &at, method) ? at.QuadPart : AVERROR(EIO);
+#else
+        if (whence == AVSEEK_SIZE) { struct stat info{}; return ::fstat(self->fd_, &info) ? AVERROR(errno) : static_cast<std::int64_t>(info.st_size); }
+        const auto at = ::lseek(self->fd_, offset, whence);
+        return at < 0 ? AVERROR(errno) : static_cast<std::int64_t>(at);
+#endif
+    }
+};
 // The demuxer for path, from its bytes and name alone. Formats that play other files (playlists,
 // manifests, split recordings, scripts) depend on files that change, move and vanish independently,
 // so neither caches keyed by this file's bytes nor change detection could follow them. Opening runs
 // a format's header reader (which would already fetch segments or evaluate a script), so they are
 // refused here, and the format found is forced on open.
 const AVInputFormat* identify(const QString& path) {
-    const QByteArray encoded = path.toUtf8();
     const AVInputFormat* detected = nullptr;
-    AVIOContext* probe = nullptr; AVDictionary* options = localOnly();
-    const int opened = avio_open2(&probe, encoded.constData(), AVIO_FLAG_READ, nullptr, &options); av_dict_free(&options);
-    checked(opened, "Open media");
-    const int probed = av_probe_input_buffer2(probe, &detected, encoded.constData(), nullptr, 0, 0); avio_closep(&probe);
-    checked(probed, "Identify media");
+    const SourceFile probe(path);
+    checked(av_probe_input_buffer2(probe.io(), &detected, path.toUtf8().constData(), nullptr, 0, 0), "Identify media");
     for (const auto& name : QByteArray(detected->name).split(','))
         if (name == "concat" || name == "hls" || name == "dash" || name == "imf" || name == "webm_dash_manifest" ||
             name == "mlv" || name == "sdp" || name == "avisynth" || name == "vapoursynth")
@@ -54,6 +119,7 @@ const AVInputFormat* identify(const QString& path) {
     return detected;
 }
 struct Input {
+    std::unique_ptr<SourceFile> file; // Outlives format, which reads through it.
     AVFormatContext* format = nullptr;
     AVCodecContext* codec = nullptr;
     AVFrame* frame = av_frame_alloc();
@@ -67,6 +133,10 @@ struct Input {
     }
     void open(const QString& path) {
         const auto* detected = identify(path);
+        file = std::make_unique<SourceFile>(path);
+        format = avformat_alloc_context();
+        if (!format) throw std::bad_alloc();
+        format->pb = file->io();
         AVDictionary* options = localOnly();
         const int opened = avformat_open_input(&format, path.toUtf8().constData(), detected, &options); av_dict_free(&options);
         checked(opened, "Open media");
