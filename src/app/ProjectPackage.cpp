@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 
 namespace sav {
@@ -117,10 +118,26 @@ QString entryName(archive_entry* entry) {
     return name ? QString::fromUtf8(name) : QString();
 }
 // The lock marks a live extraction so another instance's startup sweep leaves it alone.
+// Extractions whose removal failed: a decoder closing on the background sweep can still hold one of
+// their files, and Windows cannot remove a folder while a file in it is open.
+std::mutex pendingMutex;
+std::vector<QString> pendingRemovals;
 struct PackageDirectory : QTemporaryDir {
     PackageDirectory() : QTemporaryDir(QDir::tempPath() + "/simpleavshow-package-XXXXXX") {}
+    ~PackageDirectory() {
+        if (!isValid()) return;
+        lock.unlock();
+        if (!remove()) { const std::lock_guard guard(pendingMutex); pendingRemovals.push_back(path()); }
+    }
     QLockFile lock{filePath(".lock")};
 };
+}
+
+void retryPackageRemovals() {
+    std::vector<QString> paths;
+    { const std::lock_guard guard(pendingMutex); if (pendingRemovals.empty()) return; paths.swap(pendingRemovals); }
+    std::erase_if(paths, [](const QString& path) { QDir dir(path); return !dir.exists() || dir.removeRecursively(); });
+    const std::lock_guard guard(pendingMutex); pendingRemovals.insert(pendingRemovals.end(), paths.begin(), paths.end());
 }
 
 void removeStalePackageDirectories() {

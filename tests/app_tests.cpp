@@ -1932,6 +1932,19 @@ private slots:
             QVERIFY2(!QFileInfo::exists(extraction), qPrintable(extraction));
         }
     }
+    void extractionStillInUseIsRemovedLater() {
+        // A decoder can still be closing an extracted file on the background sweep when its project
+        // closes; Windows then cannot remove the folder, so removal is retried once the file is free.
+        QTemporaryDir dir; const auto source = dir.filePath("cue.wav"); writeBytes(source, waveBytes(16, 1, 2, 44100, false, 4410));
+        auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        auto asset = loadMedia(source); project.assets.insert(asset.id, asset);
+        const auto package = dir.filePath("held.savpack"); writeProjectPackage(project, package);
+        auto opened = readProject(package); const auto extraction = opened.packageDirectory->path();
+        QFile held(opened.assets.first().path); QVERIFY(held.open(QIODevice::ReadOnly));
+        opened = Project{};
+        held.close(); retryPackageRemovals();
+        QVERIFY2(!QFileInfo::exists(extraction), qPrintable(extraction));
+    }
     void idleStreamDecodersCloseTheirFiles() {
 #ifdef Q_OS_WIN
         QSKIP("counts descriptors through /dev/fd");
