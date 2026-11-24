@@ -1461,6 +1461,8 @@ private slots:
         QTest::newRow("ac3-48k") << QStringList{"-c:a", "ac3", "x.ac3"} << false;
         QTest::newRow("eac3-48k") << QStringList{"-c:a", "eac3", "x.eac3"} << false;
         QTest::newRow("mp2-44k") << QStringList{"-ar", "44100", "-c:a", "mp2", "x.mp2"} << false;
+        // G.722 in WAV: after a byte seek FFmpeg computes timestamps a linear decode gave other packets.
+        QTest::newRow("g722-wav") << QStringList{"-ar", "16000", "-ac", "1", "-c:a", "g722", "x.wav"} << false;
         QTest::newRow("ima-adpcm-mov") << QStringList{"-ar", "44100", "-c:a", "adpcm_ima_qt", "x.mov"} << false;
         QTest::newRow("mp3-in-mpeg-ps") << QStringList{"-ar", "44100", "-c:a", "libmp3lame", "-f", "vob", "x.mpg"} << true;
         QTest::newRow("vorbis-native-44k") << QStringList{"-ar", "44100", "-c:a", "vorbis", "-strict", "experimental", "x.ogg"} << true;

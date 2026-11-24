@@ -243,6 +243,11 @@ private:
     std::optional<detail::FileVersion> expected_;
     std::vector<detail::SeekPoint> recorded_;
     std::optional<detail::SeekPoint> landing_; // The seek point a seek aims at.
+    std::deque<std::pair<std::int64_t, std::int64_t>> sentAt_; // Recent packets' (timestamp, byte offset).
+    std::int64_t sentFrom(std::int64_t pts) const {
+        for (auto it = sentAt_.rbegin(); it != sentAt_.rend(); ++it) if (it->first == pts) return it->second;
+        return -1;
+    }
     std::int64_t nextPoint_ = 0, lastPts_ = AV_NOPTS_VALUE;
     bool recording_ = false, ordered_ = true;
     std::unique_ptr<Input> input_;
@@ -271,7 +276,7 @@ private:
         checked(swr_init(input_->resampler), "Initialize resampling");
         // Video and other streams are never decoded here; skip their packets while demuxing.
         for (unsigned i = 0; i < input_->format->nb_streams; ++i) if (static_cast<int>(i) != stream_) input_->format->streams[i]->discard = AVDISCARD_ALL;
-        started_ = aligned_ = finished_ = false; landing_.reset();
+        started_ = aligned_ = finished_ = false; landing_.reset(); sentAt_.clear();
     }
     // The next decoded frame into input_->frame; false once the decoder is drained.
     bool receive() {
@@ -283,6 +288,11 @@ private:
             const int read = av_read_frame(input_->format, input_->packet);
             if (read == AVERROR_EOF) { checked(avcodec_send_packet(input_->codec, nullptr), "Flush audio decoder"); continue; }
             checked(read, "Read audio packets");
+            if (input_->packet->stream_index == stream_) {
+                // Which byte offset each recent timestamp came from, for recording and checking seek points.
+                sentAt_.emplace_back(input_->packet->pts, input_->packet->pos);
+                if (sentAt_.size() > 64) sentAt_.pop_front();
+            }
             const int sent = input_->packet->stream_index == stream_ ? avcodec_send_packet(input_->codec, input_->packet) : 0;
             av_packet_unref(input_->packet);
             checked(sent, "Feed audio decoder");
@@ -300,7 +310,7 @@ private:
     void reset() {
         avcodec_flush_buffers(input_->codec); swr_close(input_->resampler);
         checked(swr_init(input_->resampler), "Initialize resampling");
-        aligned_ = finished_ = recording_ = false;
+        aligned_ = finished_ = recording_ = false; sentAt_.clear();
     }
     // Returns the resampler's output count (0 once a flush is drained); samples get the part at or after frame 0.
     int convert(AVFrame* frame, Frame& first, std::vector<float>& samples) {
@@ -315,14 +325,15 @@ private:
             else if (!aligned_) {
                 // After a seek: frames before the landing point only warm the decoder up.
                 if (!landing_ || pts == AV_NOPTS_VALUE || pts < landing_->pts) return 0;
-                if (pts > landing_->pts) { restart(); return 0; } // The landing packet never decoded.
+                // The landing packet never decoded, or a computed timestamp named another packet.
+                if (pts > landing_->pts || (landing_->pos >= 0 && sentFrom(pts) != landing_->pos)) { restart(); return 0; }
                 inputAt_ = landing_->sample; landing_.reset();
             }
             if (!aligned_) { aligned_ = true; produced_ = target_ / stepIn_ * stepOut_; }
             if (recording_) {
                 // Seek points need increasing timestamps; a stream without them seeks by decoding from the start.
                 ordered_ = ordered_ && pts != AV_NOPTS_VALUE && (lastPts_ == AV_NOPTS_VALUE || pts > lastPts_); lastPts_ = pts;
-                if (ordered_ && inputAt_ >= nextPoint_) { recorded_.push_back({pts, inputAt_}); nextPoint_ = inputAt_ + rate_; }
+                if (ordered_ && inputAt_ >= nextPoint_) { recorded_.push_back({pts, inputAt_, sentFrom(pts)}); nextPoint_ = inputAt_ + rate_; }
             }
             const auto skip = static_cast<int>(std::clamp<std::int64_t>(target_ - inputAt_, 0, frame->nb_samples));
             inputAt_ += frame->nb_samples; count = frame->nb_samples - skip;

@@ -783,7 +783,7 @@ void MainWindow::relinkMedia(bool afterOpening) {
         const QString summary = QString("Relinked %1 media file%2.").arg(relinked).arg(relinked == 1 ? "" : "s") +
             (remaining ? QString(" %1 still missing.").arg(remaining) : "");
         if (!errors.isEmpty()) QMessageBox::warning(this, "Some media could not be relinked", summary + "\n\n" + errors.join("\n\n"));
-        c_.report(summary); if (!remaining) c_.playbackProblem.clear();
+        c_.report(summary); if (!remaining && !c_.armFailed()) c_.playbackProblem.clear(); // Still disarmed: keep that warning.
     });
     const auto offline = c_.project.assets;
     watcher->setFuture(QtConcurrent::run([folder, wanted, offline]() {

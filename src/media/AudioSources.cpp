@@ -60,7 +60,7 @@ namespace {
 constexpr qint64 stereoBytes = 2 * sizeof(float);
 constexpr qint64 legacyHeader = 8 + 8 + 1 + 32 + 32, metadataHeader = legacyHeader + 32;
 constexpr char legacyMagic[] = "SAVPCM01", cacheMagic[] = "SAVMETA2";
-constexpr char indexMagic[] = "SAVIDX02", waveMagic[] = "SAVWAV01", streamMagic[] = "SAVSTRM3";
+constexpr char indexMagic[] = "SAVIDX02", waveMagic[] = "SAVWAV01", streamMagic[] = "SAVSTRM4";
 constexpr qint64 staleAge = 7ll * 24 * 3600 * 1000;
 constexpr qint64 racyWindow = 2000; // Coarse (FAT: 2 s) timestamps can hide a rewrite during hashing.
 constexpr qsizetype maxIndexEntries = 4096;
@@ -387,7 +387,7 @@ std::optional<AudioSummary> StreamSummary::reuse(bool mono) const {
     // a sidecar is a few hundred KB per source hour, so anything near the cap is damage.
     constexpr qint64 maxSidecar = 256ll << 20;
     char count[8];
-    if (file.size() > maxSidecar || rest < 0 || !file.seek(fixed - 8) || file.read(count, 8) != 8 || rest % 16 || qFromLittleEndian<qint64>(count) != rest / 16 ||
+    if (file.size() > maxSidecar || rest < 0 || !file.seek(fixed - 8) || file.read(count, 8) != 8 || rest % 24 || qFromLittleEndian<qint64>(count) != rest / 24 ||
         !file.seek(header)) return {};
     const auto bytes = head + file.readAll(); file.close();
     if (bytes.size() != fixed + rest + 32 ||
@@ -396,9 +396,9 @@ std::optional<AudioSummary> StreamSummary::reuse(bool mono) const {
     std::memcpy(summary.peaks.data(), bytes.constData() + header, summary.peaks.size() * sizeof(float));
     if (!std::all_of(summary.peaks.begin(), summary.peaks.end(), [](float value) { return std::isfinite(value) && value >= 0; })) return {};
     // Seeking searches the points by sample and lands by timestamp; both must increase.
-    for (const char* at = bytes.constData() + fixed; at < bytes.constData() + fixed + rest; at += 16) {
-        const SeekPoint point{qFromLittleEndian<qint64>(at), qFromLittleEndian<qint64>(at + 8)};
-        if (point.sample < 0 || (!summary.seekPoints.empty() && (point.pts <= summary.seekPoints.back().pts || point.sample <= summary.seekPoints.back().sample))) return {};
+    for (const char* at = bytes.constData() + fixed; at < bytes.constData() + fixed + rest; at += 24) {
+        const SeekPoint point{qFromLittleEndian<qint64>(at), qFromLittleEndian<qint64>(at + 8), qFromLittleEndian<qint64>(at + 16)};
+        if (point.sample < 0 || point.pos < -1 || (!summary.seekPoints.empty() && (point.pts <= summary.seekPoints.back().pts || point.sample <= summary.seekPoints.back().sample))) return {};
         summary.seekPoints.push_back(point);
     }
     touch(path_); // Least-recently-used trimming.
@@ -414,6 +414,7 @@ void StreamSummary::save(const AudioSummary& summary) const {
     qToLittleEndian<qint64>(static_cast<qint64>(summary.seekPoints.size()), number); bytes.append(number, 8);
     for (const auto& point : summary.seekPoints) {
         qToLittleEndian<qint64>(point.pts, number); bytes.append(number, 8); qToLittleEndian<qint64>(point.sample, number); bytes.append(number, 8);
+        qToLittleEndian<qint64>(point.pos, number); bytes.append(number, 8);
     }
     bytes += QCryptographicHash::hash(bytes, QCryptographicHash::Sha256);
     // Concurrent imports of the same content write identical files; the last one wins.

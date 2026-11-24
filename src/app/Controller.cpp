@@ -99,12 +99,16 @@ bool Controller::arm(Frame position) {
     // Callers have already committed their change; a failure (out of memory, no worker thread) must not
     // escape into Qt or leave the previous snapshot playing. The stream closes (so the device watchdog
     // keeps quiet), the transport disarms, and Play or the next edit arms again at the kept position.
-    try { armOrThrow(position); armFailed_ = false; return true; }
-    catch (const std::exception& e) {
-        device.close(); configured_ = false; transport.disarm();
+    try {
+        armOrThrow(position); armFailed_ = false;
+        if (!armProblem_.isEmpty() && playbackProblem == armProblem_) playbackProblem.clear(); // Recovered.
+        armProblem_.clear(); return true;
+    } catch (const std::exception& e) {
+        // The previous snapshot goes too, so nothing (a MIDI consumer started from Outputs) acts on it.
+        stopMidiThread(); device.close(); configured_ = false; transport.disarm(); armed_.reset();
         armFailed_ = true; pendingPosition_ = std::clamp(position, Frame{0}, project.show.duration);
         report("Playback could not be prepared: " + QString::fromUtf8(e.what()) + ". Press Play to try again.");
-        playbackProblem = status; return false;
+        playbackProblem = armProblem_ = status; return false;
     }
 }
 void Controller::armOrThrow(Frame position) {
@@ -129,6 +133,7 @@ void Controller::armOrThrow(Frame position) {
     startMidiThread();
 }
 void Controller::startMidiThread() {
+    if (!armed_) return; // Nothing armed: no cues to send.
     const auto snapshot = armed_;
     midiStop_.store(false);
     // std::jthread is unavailable in the libc++ shipped with older macOS SDKs.
@@ -193,6 +198,7 @@ void Controller::seek(Frame time) {
     lastComposed_ = -1;
 }
 void Controller::stopAll() {
+    if (armFailed_) return; // Nothing is armed, so nothing plays; the transport could not take the command.
     if (!transport.command({Action::StopAll})) { report("Transport command queue is full"); return; }
     if (!device.running()) transport.render(nullptr, 0, 0);
 }

@@ -75,6 +75,7 @@ public:
     static QString untitledAutosavePath();
     void discardAutosave();
     bool routesValid() const;
+    bool armFailed() const { return armFailed_; }
     unsigned lateFrames = 0;
 signals:
     void changed();
@@ -88,7 +89,9 @@ private:
     QString midiName_;
     QString midiProblem_; // The playback problem MIDI last reported; a reconnect clears only that.
     // The last arm failed: nothing is armed, and Play arms at pendingPosition_ (updated by seeks).
+    // armProblem_ is the playback problem it reported; a later successful arm clears only that.
     bool armFailed_ = false;
+    QString armProblem_;
     Frame pendingPosition_ = 0;
     std::map<std::string, std::unique_ptr<VideoReader>> videos_;
     std::shared_ptr<const Show> armed_;

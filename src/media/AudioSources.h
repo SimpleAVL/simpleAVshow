@@ -45,7 +45,10 @@ std::shared_ptr<const AudioData> loadPcmWave(const QString& path);
 // An input sample position by packet timestamp, recorded about once a second while decoding a
 // stream whose timestamps are coarser than one sample (Matroska/WebM's milliseconds), where a
 // timestamp alone cannot say which sample a seek landed on.
-struct SeekPoint { std::int64_t pts = 0, sample = 0; };
+// pos: the packet's byte offset (-1 if the container has none). Byte-seeked containers can compute a
+// timestamp after a seek that a linear decode gave another packet (G.722 in WAV), so a landing must
+// match the offset too.
+struct SeekPoint { std::int64_t pts = 0, sample = 0, pos = -1; };
 struct AudioSummary { Frame length = 0; bool mono = false; std::vector<float> peaks; std::vector<SeekPoint> seekPoints; };
 class StreamSummary {
 public:
