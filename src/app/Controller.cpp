@@ -564,7 +564,8 @@ QImage Controller::compose() {
         clocks.push_back(source < 0 ? source : static_cast<Frame>(std::floor(seconds(source) * project.fps)));
     }
     const Frame frame = static_cast<Frame>(std::floor(seconds(position) * project.fps));
-    if (frame == lastComposed_ && clocks == lastClocks_ && !lastPicture_.isNull()) return lastPicture_;
+    // A reopened video is polled until it has a picture, even while show time stands still (a hold).
+    if (frame == lastComposed_ && clocks == lastClocks_ && !lastPicture_.isNull() && recovering_.empty()) return lastPicture_;
     QImage picture(project.width, project.height, QImage::Format_RGB32); picture.fill(Qt::black);
     QPainter painter(&picture); painter.setRenderHint(QPainter::SmoothPixmapTransform); painter.setRenderHint(QPainter::TextAntialiasing);
     bool waiting = false;
@@ -615,7 +616,11 @@ QImage Controller::compose() {
                         // A reopened reader that delivers a picture resolves its own warning, not a newer problem.
                         if (recovering_.erase(c.id) && it != videos_.end() && it->second->error().isEmpty()) {
                             const auto problem = videoProblems_.find(c.id);
-                            if (problem != videoProblems_.end()) { if (playbackProblem == problem->second) playbackProblem.clear(); videoProblems_.erase(problem); }
+                            if (problem != videoProblems_.end()) {
+                                if (playbackProblem == problem->second) playbackProblem.clear();
+                                if (status == problem->second) report("Picture restored: " + a.name + ".");
+                                videoProblems_.erase(problem);
+                            }
                         }
                     } else if (recovering_.contains(c.id)) {
                         // While a reopened reader starts, this layer keeps its last frame and the others go on.
