@@ -157,7 +157,9 @@ std::pair<State, Frame> Controller::predictTransport(bool* hasPendingPlay) const
             if (entry.seq <= applied) continue;
             if (entry.command.action == Action::Seek &&
                 transport.isSourceValid(entry.command.source, entry.command.sourceEpoch)) {
-                pos = std::clamp(entry.command.position, Frame{0}, project.show.duration);
+                // Only seeks run before the stop, under the state they find: a playing seek stops at the end.
+                pos = std::clamp(entry.command.position, Frame{0}, state == State::Playing ? project.show.duration : maxFrame);
+                if (state != State::Playing) state = State::Paused;
             }
         }
         return {State::Stopped, pos};
@@ -177,7 +179,8 @@ std::pair<State, Frame> Controller::predictTransport(bool* hasPendingPlay) const
             if (state == State::Playing) state = State::Paused;
             break;
         case Action::Seek:
-            pos = std::clamp(cmd.position, Frame{0}, project.show.duration);
+            // Mirrors the transport: a stopped playhead may park past the end; a playing one stops at it.
+            pos = std::clamp(cmd.position, Frame{0}, state == State::Playing ? project.show.duration : maxFrame);
             if (state != State::Playing) state = State::Paused;
             break;
         case Action::StopAll:
@@ -211,7 +214,10 @@ bool Controller::canEdit(bool reportFailure) {
 bool Controller::edit(const std::function<void(Project&)>& mutation) {
     if (!canEdit()) return false;
     try {
-        Project next = project; mutation(next); bindAudio(next); validate(next);
+        Project next = project; mutation(next); bindAudio(next);
+        // Edits never fail for running past the end: the show grows to hold them. A non-positive duration is still an error.
+        if (next.show.duration <= 0) throw std::runtime_error("Project duration must be positive");
+        fitDuration(next); validate(next);
         // The previous state moves into history rather than being copied again.
         undo_.push_back(std::move(project)); if (undo_.size() > 32) undo_.pop_front(); redo_.clear();
         project = std::move(next); dirty = true; ++projectRevision_; ++historyEpoch_; arm(); emit changed(); return true;
@@ -243,7 +249,7 @@ void Controller::redo() {
 bool Controller::arm(std::optional<Frame> position) {
     pausedLive_ = false; resetMediaState(); // Arming starts over from position, with the show as it is now.
     // Where Play arms again if this fails before armOrThrow resolves the exact target.
-    pendingPosition_ = std::clamp(position ? *position : effectivePosition(), Frame{0}, project.show.duration);
+    pendingPosition_ = std::clamp(position ? *position : effectivePosition(), Frame{0}, maxFrame);
     // Callers have already committed their change; a failure (out of memory, no worker thread) must not
     // escape into Qt or leave the previous snapshot playing. The stream closes (so the device watchdog
     // keeps quiet), the transport disarms, and Play or the next edit arms again at the kept position.
@@ -267,8 +273,9 @@ void Controller::armOrThrow(std::optional<Frame> position) {
     if (keep) device.pause(); else device.close();
     // Resolve the target position AFTER pausing the audio callback so any queued valid Seek
     // (whether already applied by a racing callback or still pending in pendingCommands_) is preserved.
-    const Frame targetPosition = position ? *position : std::min(effectivePosition(), project.show.duration);
-    pendingPosition_ = std::clamp(targetPosition, Frame{0}, project.show.duration);
+    // A playhead parked past the end stays there, so items placed at it land where the operator clicked.
+    const Frame targetPosition = position ? *position : effectivePosition();
+    pendingPosition_ = std::clamp(targetPosition, Frame{0}, maxFrame);
     // A video warning about readers being replaced goes with them.
     for (const auto& [clip, problem] : videoProblems_) {
         if (playbackProblem == problem) playbackProblem.clear();
@@ -391,6 +398,10 @@ bool Controller::play(CommandSource source) {
         report("Operator Stop All is in progress; wait for playback to stop before starting.");
         return false;
     }
+    // The transport refuses Play at or past the end (the playhead may park there while editing); say so.
+    if (const auto [predicted, at] = predictTransport(); predicted != State::Playing && predicted != State::Held && at >= project.show.duration) {
+        report("The playhead is at or past the end of the show. Move it earlier to play."); return false;
+    }
     cancelPendingTestMidi();
     const State state = transport.state();
     const bool starting = state != State::Playing;
@@ -491,7 +502,7 @@ bool Controller::toggle() {
 bool Controller::seek(Frame time, CommandSource source) {
     if (busy || showMode) { report(showMode ? "Leave show mode to jump on the timeline" : "Media is loading"); return false; }
     // Disarmed after a failed arm: the transport cannot take the seek, so it is where Play arms again.
-    if (armFailed_) { pendingPosition_ = std::clamp(time, Frame{0}, project.show.duration); lastComposed_ = -1; pausedLive_ = false; return true; }
+    if (armFailed_) { pendingPosition_ = std::clamp(time, Frame{0}, maxFrame); lastComposed_ = -1; pausedLive_ = false; return true; }
     const std::uint64_t ep = source == CommandSource::ExternalAgent ? transport.externalAgentEpoch()
         : source == CommandSource::ChatAgent ? transport.chatAgentEpoch() : 0;
     if (!postTransportCommand({Action::Seek, time, source, ep})) return false;
@@ -641,7 +652,7 @@ Controller::AudioSwap Controller::replaceAudio(const QMap<QString, std::shared_p
     }
     // Committed: a failure to re-arm leaves the transport disarmed (Play retries) and the new audio in place.
     project = std::move(next);
-    const auto outcome = arm(std::min(position(), project.show.duration)) ? AudioSwap::Applied : AudioSwap::ArmFailed;
+    const auto outcome = arm(position()) ? AudioSwap::Applied : AudioSwap::ArmFailed;
     emit changed(); return outcome;
 }
 QStringList Controller::preflight(bool probeHardware) {

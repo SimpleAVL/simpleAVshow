@@ -66,7 +66,7 @@ The top-bar button always tells you what the agent can do right now: **Agent · 
 
 ### Built-in guardrails
 
-- **Atomic validation:** Every edit batch must leave the show completely valid—no overlapping pictures on one layer, all clips inside project duration, valid track/asset IDs, and valid MIDI/automation data—or the entire batch is rejected cleanly.
+- **Atomic validation:** Every edit batch must leave the show completely valid—no overlapping pictures on one layer, valid track/asset IDs, and valid MIDI/automation data—or the entire batch is rejected cleanly.
 - **Single-step undo for project edits:** Timeline, track, clip, cue, import, and relink edits can be reverted in one step via **Edit → Undo**. Note that file actions (`project_action` save/export/open/new) and hardware/remote settings (`configure_outputs`, `configure_remote`) affect disk or device state directly, and opening/replacing a project clears the current undo history.
 - **Your Stop All always wins:** Clicking **Stop All** also cancels any agent playback command that hasn't run yet, so an agent can't restart playback you just stopped. Disconnecting the chat, starting a **New** session, or entering Show mode does the same for that agent. Playback an agent already started keeps going until you stop it.
 - **Same locks as the operator:** Agent edits are blocked during Show mode, playback, active async voices, or busy operations. Background media preparation can run while you edit or rehearse, though committing the prepared assets still waits until the editor is unlocked.
@@ -107,7 +107,7 @@ The top-bar button always tells you what the agent can do right now: **Agent · 
 
 ### Example `apply_edits` payload
 
-Adds a 5-second fading title on track 1 and a hold cue at 12 seconds (`12 × 48000 = 576000`). Always use the latest `revision` from `get_show`, confirm track 1 is an available picture layer, and extend project duration first if needed:
+Adds a 5-second fading title on track 1 and a hold cue at 12 seconds (`12 × 48000 = 576000`). Always use the latest `revision` from `get_show`, and confirm track 1 is an available picture layer. Project duration extends automatically when edits run past the end:
 
 ```json
 {

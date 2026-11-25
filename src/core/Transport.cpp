@@ -112,7 +112,7 @@ void Transport::load(std::shared_ptr<const Show> show, Frame position) {
     publishedSources_ = std::make_unique<std::atomic<Frame>[]>(show_->clips.size()); publishedSourceCount_ = show_->clips.size();
     for (std::size_t i = 0; i < publishedSourceCount_; ++i) publishedSources_[i].store(dormantSource);
     buffers_.clear(); buffers_.resize(show_->clips.size());
-    position_ = std::clamp(position, Frame{0}, show_->duration);
+    position_ = std::clamp(position, Frame{0}, maxFrame);
     for (std::size_t i = 0; i < show_->clips.size(); ++i) {
         const auto& c = show_->clips[i];
         if (c.track < 0 || static_cast<std::size_t>(c.track) >= show_->tracks.size()) continue;
@@ -182,7 +182,9 @@ void Transport::apply(Command command) noexcept {
         sendResumeCues(); // Play left the hold; its cues still belong to that.
         break;
     case Action::Seek: {
-        const Frame next = std::clamp(command.position, Frame{0}, show_->duration);
+        // A stopped playhead may park past the end so editors can place items there (Play refuses from there).
+        // While playing, a seek stops at the end so cues there still fire.
+        const Frame next = std::clamp(command.position, Frame{0}, state_ == State::Playing ? show_->duration : maxFrame);
         for (std::size_t i = 0; i < show_->clips.size(); ++i) {
             if (!show_->clips[i].contains(next)) { cut(i); voices_[i] = {}; }
             else if (voices_[i].audible && next != position_ && !show_->tracks[show_->clips[i].track].async) cut(i); // A normal source jumps.

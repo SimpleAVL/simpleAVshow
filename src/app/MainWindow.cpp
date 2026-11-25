@@ -457,6 +457,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
 }
 
 MainWindow::~MainWindow() {
+    // ~QWidget closes the window, which moves focus and makes a focused inspector field emit editingFinished.
+    // Its slots must not run on a MainWindow whose destructor has already run (Qt 6.12 asserts on it).
+    for (auto* child : findChildren<QObject*>()) disconnect(child, nullptr, this, nullptr);
     // Destroy child widgets that hold references to mcp_/c_ before member destructors run.
     if (agentChat_) {
         agentChat_->shutdown();
@@ -860,11 +863,11 @@ void MainWindow::nudge(int step) {
     if (!c_.canEdit()) return;
     const Frame delta = std::abs(step) == 1 ? std::max<Frame>(1, frames(1. / c_.project.fps)) * step : frames(step / 1000.);
     if (const auto* clip = selectedClip()) {
-        const auto id = clip->id; const Frame start = std::clamp(clip->start + delta, Frame{0}, c_.project.show.duration - clip->duration);
+        const auto id = clip->id; const Frame start = std::clamp(clip->start + delta, Frame{0}, maxFrame - clip->duration);
         const Frame duration = clip->duration, offset = clip->offset;
         c_.edit([=](Project& p) { retimeLinked(p, id, start, duration, offset); });
     } else if (const auto* marker = selectedMarker()) {
-        const auto id = marker->id; const Frame time = std::clamp(marker->time + delta, Frame{0}, c_.project.show.duration);
+        const auto id = marker->id; const Frame time = std::clamp(marker->time + delta, Frame{0}, maxFrame);
         c_.edit([=](Project& p) { for (auto& m : p.show.markers) if (m.id == id) m.time = time; });
     }
 }
@@ -999,8 +1002,8 @@ void MainWindow::placeAsset(QString id, int track, Frame time) {
         c_.report("Add an async audio track first so this video's sound keeps playing with it"); return;
     }
     Clip clip; clip.id = newId().toStdString(); clip.assetId = id.toStdString(); clip.track = track; clip.start = time;
-    clip.duration = frames(asset.duration); if (clip.duration > maxFrame - clip.start - frames(5)) { c_.report("Media extends beyond representable frame timing"); return; }
-    if (c_.edit([=](Project& p) { p.show.duration = std::max(p.show.duration, clip.end() + frames(5)); p.show.clips.push_back(clip);
+    clip.duration = frames(asset.duration); if (clip.duration > maxFrame - clip.start) { c_.report("Media extends beyond representable frame timing"); return; }
+    if (c_.edit([=](Project& p) { p.show.duration = std::max(p.show.duration, clip.end() + std::min(frames(5), maxFrame - clip.end())); p.show.clips.push_back(clip);
         if (visual && asset.video && asset.audio) {
             auto audioTrack = std::find_if(p.show.tracks.begin(), p.show.tracks.end(), soundTrack);
             if (audioTrack != p.show.tracks.end()) {
@@ -1018,7 +1021,7 @@ void MainWindow::addText() {
         if (it == c_.project.show.tracks.end()) { c_.report("Add a picture track first"); return; } track = static_cast<int>(it - c_.project.show.tracks.begin());
     }
     Clip clip; clip.id = newId().toStdString(); clip.track = track; clip.text = "Your text"; clip.start = c_.position(); clip.duration = frames(10);
-    if (c_.edit([=](Project& p) { p.show.duration = std::max(p.show.duration, clip.end() + frames(5)); p.show.clips.push_back(clip); })) timeline_->selectClip(QString::fromStdString(clip.id));
+    if (c_.edit([=](Project& p) { p.show.duration = std::max(p.show.duration, clip.end() + std::min(frames(5), maxFrame - clip.end())); p.show.clips.push_back(clip); })) timeline_->selectClip(QString::fromStdString(clip.id));
 }
 void MainWindow::addMarker() {
     // Number after the highest existing "Hold N" so names stay unique after deletions.
@@ -1052,7 +1055,9 @@ void MainWindow::projectSettings() {
     if (dialog.exec() == QDialog::Accepted) {
         if (!c_.canEdit() || c_.projectRevision() != initialRev) { c_.report("Project settings cancelled because the show changed."); return; }
         const QString name = title->text(); const int w = width->value(), h = height->value(); const double rate = fps->value(); const Frame length = frames(duration->value());
-        c_.edit([=](Project& p) { p.title = name; p.width = w; p.height = h; p.fps = rate; p.show.duration = length; });
+        const bool fitted = length < contentEnd(c_.project.show);
+        if (c_.edit([=](Project& p) { p.title = name; p.width = w; p.height = h; p.fps = rate; p.show.duration = length; }) && fitted)
+            c_.report("Duration kept at the end of the last clip or cue; trim or move them to shorten the show");
     }
 }
 void MainWindow::outputSettings() {

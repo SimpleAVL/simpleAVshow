@@ -336,6 +336,44 @@ private slots:
         QCOMPARE(clip().duration, frames(3)); QVERIFY(c.status.contains("end of the source"));
         c.dirty = false;
     }
+    void editsPastTheEndLengthenTheShow() {
+        MainWindow window; window.show(); auto& c = window.controller();
+        const auto act = [&](const QString& text) { for (auto* a : window.findChildren<QAction*>()) if (a->text() == text) { a->trigger(); return true; } return false; };
+        QVERIFY(c.edit([](Project& p) { p.show.clips.clear(); p.show.markers.clear(); p.show.duration = frames(10); }));
+        // A clip or cue placed past the end grows the show instead of being refused.
+        QVERIFY(c.edit([](Project& p) { Clip clip; clip.id = "t"; clip.text = "Late"; clip.track = 0; clip.start = frames(8); clip.duration = frames(6); p.show.clips.push_back(clip); }));
+        QCOMPARE(c.project.show.duration, frames(14));
+        QVERIFY(c.edit([](Project& p) { p.show.markers.push_back({"m", "Late cue", frames(20), true}); }));
+        QCOMPARE(c.project.show.duration, frames(20) + 1); // One sample past a cue that grows the show, so it fires.
+        // Nudging past the end and duplicating at the end both extend it.
+        auto* timeline = window.findChild<Timeline*>(); timeline->selectMarker("m");
+        QVERIFY(act("Nudge right one second")); QCOMPARE(c.project.show.duration, frames(21) + 1);
+        timeline->selectClip("t"); QVERIFY(act("Duplicate clip"));
+        QCOMPARE(c.project.show.clips.size(), std::size_t{2}); QCOMPARE(c.project.show.duration, frames(21) + 1);
+        QVERIFY(act("Duplicate clip")); QCOMPARE(c.project.show.duration, frames(26));
+        c.undo(); QCOMPARE(c.project.show.duration, frames(21) + 1); QCOMPARE(c.project.show.clips.size(), std::size_t{2});
+        c.redo(); QCOMPARE(c.project.show.duration, frames(26)); QCOMPARE(c.project.show.clips.size(), std::size_t{3});
+        // A duration that is not positive is still refused, rather than silently fitted to the content.
+        QVERIFY(!c.edit([](Project& p) { p.title = "Zero"; p.show.duration = 0; })); QCOMPARE(c.project.show.duration, frames(26));
+        // Shortening the show keeps everything inside it; removing content leaves the length alone.
+        QVERIFY(c.edit([](Project& p) { p.show.duration = frames(1); })); QCOMPARE(c.project.show.duration, frames(26));
+        QVERIFY(c.edit([](Project& p) { p.show.clips.clear(); })); QCOMPARE(c.project.show.duration, frames(26));
+        c.undo(); c.undo(); QCOMPARE(c.project.show.duration, frames(26));
+        // The playhead can sit past the end, so items placed at it land there; Play refuses from there.
+        const int range = timeline->horizontalScrollBar()->maximum();
+        c.seek(frames(400)); emit c.tick(); QVERIFY(timeline->horizontalScrollBar()->maximum() > range); // A parked playhead stays reachable.
+        c.seek(0); emit c.tick(); QCOMPARE(timeline->horizontalScrollBar()->maximum(), range); // and the range shrinks back after.
+        c.seek(maxFrame); emit c.tick(); c.seek(0); emit c.tick(); QCOMPARE(timeline->horizontalScrollBar()->maximum(), range);
+        c.seek(frames(40)); QCOMPARE(c.position(), frames(40));
+        timeline->selectClip("t"); QVERIFY(act("Copy clip")); timeline->selectedTrack = 0; QVERIFY(act("Paste clip at playhead"));
+        QCOMPARE(c.project.show.clips.back().start, frames(40)); QCOMPARE(c.position(), frames(40));
+        QCOMPARE(c.project.show.duration, c.project.show.clips.back().end());
+        c.seek(c.project.show.duration + frames(1)); QVERIFY(!c.toggle()); QVERIFY(c.status.contains("past the end")); c.transport.render(nullptr, 0, 0); QVERIFY(c.transport.state() != State::Playing);
+        // A cue already inside the show, even exactly on its end, does not grow it.
+        const Frame end = c.project.show.duration;
+        QVERIFY(c.edit([=](Project& p) { p.show.markers.push_back({"edge", "Edge", end, false}); })); QCOMPARE(c.project.show.duration, end);
+        c.dirty = false;
+    }
     void missingMediaOpensOfflineAndRelinks() {
         QTemporaryDir dir; QDir().mkpath(dir.filePath("a")); QDir().mkpath(dir.filePath("b"));
         writeBytes(dir.filePath("a/sound.wav"), waveBytes(16, 1, 2, 48000));
@@ -2448,6 +2486,27 @@ private slots:
             QCOMPARE(out[i * 2], sampleAt(*asset.audio, i)); QCOMPARE(out[i * 2 + 1], 0.f);
         }
         }
+    }
+    void timelineDragsAndTrimsPastTheEnd() {
+        Controller c; auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}}; project.show.duration = frames(4);
+        auto audio = std::make_shared<AudioData>(); audio->samples.assign(static_cast<std::size_t>(frames(4)) * 2, 0.f);
+        MediaAsset asset; asset.id = "tone"; asset.name = "Tone"; asset.audio = audio; project.assets.insert(asset.id, asset);
+        Clip clip; clip.id = "a"; clip.assetId = "tone"; clip.audio = audio; clip.loop = true; clip.duration = frames(2); project.show.clips.push_back(clip);
+        c.replace(project); Timeline timeline(c); timeline.resize(900, 300); timeline.show(); QVERIFY(QTest::qWaitForWindowExposed(&timeline));
+        timeline.snapping = false; timeline.setZoom(50); timeline.horizontalScrollBar()->setValue(0); auto* view = timeline.viewport();
+        auto send = [&](QEvent::Type type, int x, Qt::MouseButtons buttons) {
+            QMouseEvent e(type, QPointF(x, 90), view->mapToGlobal(QPointF(x, 90)), Qt::LeftButton, buttons, Qt::NoModifier); QApplication::sendEvent(view, &e);
+        };
+        // Moving the clip from 0 s to 5 s carries it past the 4 s end, which grows to 7 s.
+        send(QEvent::MouseButtonPress, 240, Qt::LeftButton); send(QEvent::MouseMove, 300, Qt::LeftButton); send(QEvent::MouseMove, 490, Qt::LeftButton);
+        send(QEvent::MouseButtonRelease, 490, Qt::NoButton);
+        QCOMPARE(c.project.show.clips[0].start, frames(5)); QCOMPARE(c.project.show.duration, frames(7));
+        // Trimming its right edge further out lengthens the show again.
+        send(QEvent::MouseButtonPress, 538, Qt::LeftButton); send(QEvent::MouseMove, 600, Qt::LeftButton); send(QEvent::MouseMove, 790, Qt::LeftButton);
+        send(QEvent::MouseButtonRelease, 790, Qt::NoButton);
+        QVERIFY(c.project.show.clips[0].end() > frames(11)); QCOMPARE(c.project.show.duration, c.project.show.clips[0].end());
+        c.dirty = false;
     }
     void timelineTrimStopsAtNonLoopingSourceEnd() {
         Controller c; auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();

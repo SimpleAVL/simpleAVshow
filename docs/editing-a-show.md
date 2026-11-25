@@ -37,7 +37,7 @@ Two placement rules to keep in mind:
 - **Picture clips cannot overlap on the same layer.** To show two images together or crossfade between them, place them on separate picture layers.
 - **Audio clips can overlap freely** on the same track; their levels simply sum together.
 
-Placing a clip past the current end of the timeline automatically extends project duration to give five seconds of headroom afterward.
+The end of the show is a dimmed area on the timeline, and you can still edit there. Dropping media or adding text past the end extends the duration to five seconds after the new clip. Moving, trimming, nudging, pasting, or duplicating a clip or cue past the end extends it just far enough to fit (one audio sample past a cue, so the cue still fires before the show ends). You can also click the ruler past the end to park the playhead there and add or paste items at that point. Playback won't start from past the end, and a seek past the end during playback jumps to the end.
 
 ---
 
@@ -134,7 +134,7 @@ When you place a video that contains embedded audio onto a picture layer, Simple
 | --- | --- |
 | **Edit → Copy clip** | Copies the selected clip to the app's clip clipboard. |
 | **Edit → Paste clip at playhead** | Pastes the copied clip at the playhead onto the selected compatible track. |
-| **Edit → Duplicate clip** | Places an unlinked copy right after the selected clip (requires open space on picture layers and room inside project duration). |
+| **Edit → Duplicate clip** | Places an unlinked copy right after the selected clip (requires open space on picture layers; the show extends if the copy runs past the end). |
 | **Edit → Split clip at playhead** | Cuts a non-looping clip when the playhead sits strictly inside it. Linked partners split together at the same time, and automation flows seamlessly across the cut. |
 | **Edit → Unlink clip** | Detaches all clips sharing a link. |
 | **Edit → Delete selected clip / cue** | Removes the selection (and any linked partners). |
