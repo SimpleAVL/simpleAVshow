@@ -952,6 +952,26 @@ private slots:
         const Project repointed = readProject(symShowPath);
         QVERIFY(!repointed.assets[titleAsset.id].offline);
         QCOMPARE(repointed.assets[titleAsset.id].still.pixelColor(0, 0), QColor(Qt::blue));
+
+        // Even when a media symlink points to an enclosing ancestor (root/show/media -> root),
+        // saving root/show/show.savshow must still store "media/title.png" rather than "../title.png".
+        const QString parentSymRoot = dir.filePath("parent-sym-root");
+        const QString parentSymShowDir = parentSymRoot + "/show";
+        QVERIFY(QDir().mkpath(parentSymShowDir));
+        QVERIFY(green.save(parentSymRoot + "/title.png"));
+        const QString parentMediaLink = parentSymShowDir + "/media";
+        QVERIFY(QFile::link(parentSymRoot, parentMediaLink));
+        Project parentSymProj = newProject();
+        MediaAsset parentSymAsset = loadMedia(parentMediaLink + "/title.png");
+        parentSymProj.assets.insert(parentSymAsset.id, parentSymAsset);
+        const QString parentSymShowPath = parentSymShowDir + "/show.savshow";
+        writeProject(parentSymProj, parentSymShowPath);
+        {
+            QFile checkFile(parentSymShowPath);
+            QVERIFY(checkFile.open(QIODevice::ReadOnly));
+            const auto doc = QJsonDocument::fromJson(checkFile.readAll()).object();
+            QCOMPARE(doc["assets"].toArray()[0].toObject()["path"].toString(), QString("media/title.png"));
+        }
 #endif
     }
     void zip64AndCompressedPackagesCanBeOpened() {

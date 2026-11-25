@@ -651,12 +651,15 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
                 if (stopping_ || process_ != spawnedProcess) return;
             }
             const bool duringConnect = state_ == AcpState::Connecting;
+            const bool duringPrompt = state_ == AcpState::Prompting;
             const QString reason = exitStatus == QProcess::CrashExit
                 ? QString("ACP agent crashed (exit code %1).").arg(exitCode)
                 : duringConnect && exitCode == 0
                     ? QString("ACP agent exited before completing handshake (code 0).")
-                    : QString("ACP agent exited (code %1).").arg(exitCode);
-            const bool hadSession = state_ == AcpState::Ready || state_ == AcpState::Prompting || duringConnect;
+                    : duringPrompt && exitCode == 0
+                        ? QString("ACP agent exited before completing the turn (code 0).")
+                        : QString("ACP agent exited (code %1).").arg(exitCode);
+            const bool hadSession = state_ == AcpState::Ready || duringPrompt || duringConnect;
             pending_.clear();
             pendingPermissions_.clear();
             awaitingOldPromptCancel_ = false;
@@ -679,7 +682,7 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
 #endif
             }
             if (process_) { process_->deleteLater(); process_ = nullptr; }
-            if (hadSession && (exitCode != 0 || exitStatus == QProcess::CrashExit || duringConnect)) failConnection(reason);
+            if (hadSession && (exitCode != 0 || exitStatus == QProcess::CrashExit || duringConnect || duringPrompt)) failConnection(reason);
             else setState(AcpState::Disconnected);
         });
 

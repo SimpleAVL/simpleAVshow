@@ -374,6 +374,7 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         updateControls();
     });
     connect(&acp_, &AcpClient::connected, this, [this](const QString& name, const QString&) {
+        ++sessionGeneration_;
         sentContextPreamble_ = false;
         const QString transport = acp_.usedHttpMcp() ? "HTTP MCP" : "stdio MCP bridge";
         appendEntry({ChatEntry::Kind::System, {}, {}, {},
@@ -397,6 +398,7 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
             while (entries_.size() > 1 && totalChars > maxTotalChars) {
                 totalChars -= entries_.front().text.size() + entries_.front().thought.size();
                 entries_.erase(entries_.begin());
+                entriesTrimmed_ = true;
             }
             scheduleRender();
         }
@@ -422,7 +424,8 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         const QString status = clampField(update.status, 32);
         const QString detail = clampField(update.detail, 4096);
         for (auto it = entries_.rbegin(); it != entries_.rend(); ++it) {
-            if (it->kind == ChatEntry::Kind::ToolCall && !toolId.isEmpty() && it->id == toolId) {
+            if (it->kind == ChatEntry::Kind::ToolCall && it->sessionGeneration == sessionGeneration_ &&
+                !toolId.isEmpty() && it->id == toolId) {
                 if (!title.isEmpty()) it->title = title;
                 if (!meta.isEmpty()) it->meta = meta;
                 if (!status.isEmpty()) it->status = status;
@@ -433,7 +436,7 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         }
         appendEntry({ChatEntry::Kind::ToolCall, toolId,
             title.isEmpty() ? QString("Tool call") : title,
-            meta, detail, {}, status.isEmpty() ? QString("in_progress") : status});
+            meta, detail, {}, status.isEmpty() ? QString("in_progress") : status, sessionGeneration_});
     });
     connect(&acp_, &AcpClient::permissionRequested, this, &AgentChatPanel::addPermissionCard);
     connect(&acp_, &AcpClient::promptFinished, this, [this](const QString& reason) {

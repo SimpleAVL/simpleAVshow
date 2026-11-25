@@ -399,33 +399,50 @@ QJsonObject projectJson(const Project& p, const QString& directory) {
         const QString prefix = ancestor.endsWith('/') ? ancestor : (ancestor + '/');
         return target.startsWith(prefix);
     };
+    const QString cleanBase = directory.isEmpty() ? QString() : QDir::cleanPath(QDir(directory).absolutePath());
     for (const auto& a : p.assets) {
         QString assetPath = a.path;
         if (!directory.isEmpty() && !assetPath.isEmpty()) {
-            // Walk up from the asset's parent directory until reaching an ancestor whose canonical
-            // path is equal to or encloses canonicalBase. Only that shared ancestor is canonicalized
-            // (reconciling OS symlink aliases like /var vs /private/var or /tmp vs /private/tmp),
-            // while any symlinked media directories or files below it (e.g. project/media -> ../vol-a)
-            // are preserved verbatim in the serialized relative path.
-            const QFileInfo assetInfo(assetPath);
-            QDir anc = assetInfo.absoluteDir();
-            QStringList trailing;
-            bool matched = false;
-            for (;;) {
-                const QString ancCanonical = anc.canonicalPath();
-                if (isCanonicalAncestor(ancCanonical, canonicalBase)) {
-                    QDir rebuilt(ancCanonical);
-                    for (const QString& segment : trailing) rebuilt.setPath(rebuilt.filePath(segment));
-                    assetPath = dir.relativeFilePath(rebuilt.filePath(assetInfo.fileName()));
-                    matched = true;
-                    break;
+            // If the asset path is already lexically inside the manifest directory (e.g.
+            // root/show/media/title.png with media -> root), compute the relative path directly
+            // without dereferencing any media directory or file symlinks.
+            const QString cleanAsset = QDir::cleanPath(QFileInfo(assetPath).absoluteFilePath());
+            if (isCanonicalAncestor(cleanBase, cleanAsset)) {
+                assetPath = QDir(cleanBase).relativeFilePath(cleanAsset);
+            } else {
+                // Otherwise walk up from the asset's parent directory to a shared canonical ancestor
+                // (reconciling OS aliases like /var vs /private/var or /tmp vs /private/tmp),
+                // preferring a non-symlink ancestor so symlinked media directories (even those
+                // pointing to a parent like media -> ..) are never collapsed.
+                const QFileInfo assetInfo(assetPath);
+                QDir anc = assetInfo.absoluteDir();
+                QStringList trailing;
+                bool matched = false;
+                QString symlinkFallback;
+                for (;;) {
+                    const QString ancCanonical = anc.canonicalPath();
+                    if (isCanonicalAncestor(ancCanonical, canonicalBase)) {
+                        QDir rebuilt(ancCanonical);
+                        for (const QString& segment : trailing) rebuilt.setPath(rebuilt.filePath(segment));
+                        const QString rel = dir.relativeFilePath(rebuilt.filePath(assetInfo.fileName()));
+                        if (!QFileInfo(anc.absolutePath()).isSymLink()) {
+                            assetPath = rel;
+                            matched = true;
+                            break;
+                        }
+                        if (symlinkFallback.isEmpty()) symlinkFallback = rel;
+                    }
+                    const QString current = anc.absolutePath();
+                    const QString leaf = anc.dirName();
+                    if (leaf.isEmpty() || !anc.cdUp() || anc.absolutePath() == current) break;
+                    trailing.prepend(leaf);
                 }
-                const QString current = anc.absolutePath();
-                const QString leaf = anc.dirName();
-                if (leaf.isEmpty() || !anc.cdUp() || anc.absolutePath() == current) break;
-                trailing.prepend(leaf);
+                if (!matched) {
+                    assetPath = !symlinkFallback.isEmpty()
+                        ? symlinkFallback
+                        : QDir(directory).relativeFilePath(assetPath);
+                }
             }
-            if (!matched) assetPath = QDir(directory).relativeFilePath(assetPath);
         }
         assets.append(QJsonObject{{"id", a.id}, {"name", a.name}, {"path", assetPath}});
     }

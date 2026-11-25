@@ -344,13 +344,14 @@ void applyOperations(Project& p, const QJsonArray& operations) {
                 for (std::size_t i = 0; i < p.show.tracks.size(); ++i) if (p.show.tracks[i].id == id.toStdString()) { index = static_cast<int>(i); break; }
                 if (index < 0) fail("Unknown track ID");
                 if (p.show.tracks.size() <= 1) fail("Cannot delete the last remaining track");
-                std::vector<std::string> doomed;
+                QSet<QString> doomedLinks;
                 for (const auto& clip : p.show.clips) {
-                    if (clip.track != index) continue;
-                    for (const auto& linkedId : linkedClips(p, clip.id)) doomed.push_back(linkedId);
+                    if (clip.track == index && !clip.link.empty())
+                        doomedLinks.insert(QString::fromStdString(clip.link));
                 }
                 std::erase_if(p.show.clips, [&](const Clip& clip) {
-                    return std::find(doomed.begin(), doomed.end(), clip.id) != doomed.end();
+                    return clip.track == index ||
+                        (!clip.link.empty() && doomedLinks.contains(QString::fromStdString(clip.link)));
                 });
                 p.show.tracks.erase(p.show.tracks.begin() + index);
                 for (auto& clip : p.show.clips) if (clip.track > index) --clip.track;

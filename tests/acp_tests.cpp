@@ -777,7 +777,8 @@ private slots:
         QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
         promptInput->setPlainText("Trigger permission then clean exit");
         sendButton->click();
-        QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Error);
+        QVERIFY(panel->acpClient().lastError().contains("before completing the turn"));
         QVERIFY(!permissionBox->isVisible());
         QVERIFY(!window.mcpServer().running());
 

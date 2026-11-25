@@ -621,12 +621,16 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
         pendingStart.seekRollbackCount = 0;
     }
     float peak = 0; bool waiting = false;
+    // Stay on the start-of-callback transaction boundary until a sample actually commits
+    // (!waiting && !rolledBackOnReady), so a rollback on f == 0 still dispatches restored
+    // Operator hold-resume MIDI before advancing to the next frame in the same callback.
+    bool startBoundary = true;
     for (unsigned f = 0; f < count; ++f) {
         if (waiting && releasing_.empty()) break; // Remaining device samples stay silent; retry at the same show/source time.
         float* const frame = output ? output + static_cast<std::size_t>(f) * channels : nullptr;
         bool rolledBackOnReady = false;
         if (!waiting) {
-            if (f == 0 && (pendingStart.seekRollbackCount > 0 || pendingStart.active || pendingStart.wasHeld)) {
+            if (startBoundary && (pendingStart.seekRollbackCount > 0 || pendingStart.active || pendingStart.wasHeld)) {
                 rollbackRevokedSeeks(pendingStart, true);
                 if (state_ == State::Playing) {
                     if (pendingStart.active && pendingStart.source != CommandSource::Operator &&
@@ -661,9 +665,10 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             CommandSource cueSource2 = CommandSource::Operator;
             std::uint64_t cueEpoch2 = 0;
             bool suppressSeekCue = false;
+            bool holdAtPos = false;
             bool willEnd = false;
             if (advancingAtBoundary) {
-                if (f == 0) {
+                if (startBoundary) {
                     if (pendingStart.active && pendingStart.source != CommandSource::Operator) {
                         cueSource = pendingStart.source;
                         cueEpoch = pendingStart.sourceEpoch;
@@ -684,24 +689,24 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                     const auto i = starts_[nextStart_++];
                     if (show_->clips[i].contains(position_)) active_.push_back(i);
                 }
-                // Preview whether a hold marker exists at position_ so normal clips respect the hold
-                // during readiness checking without consuming nextMarker_ or emitting MIDI yet.
-                bool holdAtPos = false;
+                // Preview whether a hold marker exists at position_ WITHOUT mutating state_ or
+                // heldMarker_ yet, so normal clips respect the hold during readiness checking while
+                // any revoked-seek rollback still sees the true Playing state (e.g. Operator Play).
                 for (std::size_t m = nextMarker_; m < markers_.size() && show_->markers[markers_[m]].time == position_; ++m) {
-                    const auto i = markers_[m];
-                    if (show_->markers[i].hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); holdAtPos = true; }
+                    if (show_->markers[markers_[m]].hold) holdAtPos = true;
                 }
                 willEnd = !holdAtPos && position_ >= show_->duration;
             }
             bool ready = true;
             bool hasExpired = false;
+            const bool playNormal = state_ == State::Playing && !holdAtPos;
             // Resolve all sources before mixing: a cache miss freezes the whole
             // sample clock, so tracks remain aligned and no source frames are lost.
             // Do NOT mutate Dormant async voices to Running or Finished until !waiting && !rolledBackOnReady.
             if (!willEnd) for (std::size_t cursor = 0; cursor < active_.size(); ++cursor) {
                 const auto i = active_[cursor]; const auto& clip = show_->clips[i]; const auto& track = show_->tracks[clip.track]; auto& voice = voices_[i];
                 voice.ready = false;
-                if (!clip.contains(position_) && state_ == State::Playing) {
+                if (!clip.contains(position_) && playNormal) {
                     hasExpired = true;
                     continue;
                 }
@@ -711,7 +716,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                     if (!startingAsync && voice.state != VoiceState::Running) continue;
                     source = startingAsync ? (clip.offset + position_ - clip.start) : voice.source;
                 } else {
-                    if (state_ != State::Playing || !clip.contains(position_)) continue;
+                    if (!playNormal || !clip.contains(position_)) continue;
                     source = clip.offset + position_ - clip.start;
                 }
                 const Frame length = sourceLength(clip);
@@ -733,7 +738,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             }
             if (!ready) { bufferWaits_.fetch_add(1, std::memory_order_relaxed); waiting = true; }
             bool seekRolledBackOnReady = false;
-            if (!waiting && f == 0 && (pendingStart.seekRollbackCount > 0 || pendingStart.active || pendingStart.wasHeld)) {
+            if (!waiting && startBoundary && (pendingStart.seekRollbackCount > 0 || pendingStart.active || pendingStart.wasHeld)) {
                 if (rollbackRevokedSeeks(pendingStart, true)) { rolledBackOnReady = true; seekRolledBackOnReady = true; }
                 if (pendingStart.active && pendingStart.source != CommandSource::Operator &&
                     !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
@@ -778,7 +783,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                     // Re-verify agent Seek and Play authorization immediately before committing
                     // epoch_, consuming markers, or entering State::Held.
                     auto checkCommitRevocation = [&]() noexcept -> bool {
-                        if (f != 0 || (pendingStart.seekRollbackCount == 0 && !pendingStart.active)) return false;
+                        if (!startBoundary || (pendingStart.seekRollbackCount == 0 && !pendingStart.active)) return false;
                         bool revoked = false;
                         bool seekRevoked = false;
                         if (rollbackRevokedSeeks(pendingStart, true)) { revoked = true; seekRevoked = true; }
@@ -818,7 +823,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                             // Seek and boundary state are now committed: bump global MIDI epoch
                             // before dispatching landing cues so pre-seek MIDI cues are discarded
                             // while landing cues receive the new epoch.
-                            if (f == 0 && pendingStart.seekRollbackCount > 0) epoch_.fetch_add(1);
+                            if (startBoundary && pendingStart.seekRollbackCount > 0) epoch_.fetch_add(1);
                             for (std::size_t m = commitMarkerBegin; m < commitMarkerEnd; ++m) {
                                 const auto i = markers_[m]; const auto& marker = show_->markers[i];
                                 if (marker.timing == MidiTiming::Arrival && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
@@ -904,11 +909,12 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             sample = std::clamp(sample, -1.f, 1.f);
         }
         if (!waiting && !rolledBackOnReady) {
-            if (f == 0) {
+            if (startBoundary) {
                 pendingStart.active = false;
                 pendingStart.wasHeld = false;
                 pendingStart.seekCueActive = false;
                 pendingStart.seekRollbackCount = 0;
+                startBoundary = false;
             }
             if (state_ == State::Playing) ++position_;
         }
