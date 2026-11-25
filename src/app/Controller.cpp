@@ -656,11 +656,12 @@ QImage Controller::compose() {
                         else if (source >= 0) time = seconds(source);
                     }
                     auto it = videos_.find(c.id);
+                    QString error; // One reading: the reader's worker can fail at any moment.
                     if (it != videos_.end()) {
                         it->second->setLoop(c.loop ? seconds(c.offset) : -1, a.duration);
                         source = it->second->imageAt(std::min(time, std::max(0., a.duration - 1. / a.fps)));
                         // A failed reader freezes its picture; audio and cues continue.
-                        const QString error = it->second->error();
+                        error = it->second->error();
                         if (!error.isEmpty() && !videoErrors_.contains(c.id)) {
                             videoErrors_.insert(c.id);
                             report("Video error in " + a.name + ": " + error + " The picture holds its last frame; audio continues.");
@@ -671,7 +672,7 @@ QImage Controller::compose() {
                     if (!source.isNull()) {
                         clipFrames_[c.id] = source;
                         // A reopened reader that delivers a picture resolves its own warning, not a newer problem.
-                        if (recovering_.erase(c.id) && it != videos_.end() && it->second->error().isEmpty()) {
+                        if (recovering_.erase(c.id) && error.isEmpty()) {
                             const auto problem = videoProblems_.find(c.id);
                             if (problem != videoProblems_.end()) {
                                 const bool shown = playbackProblem == problem->second;
@@ -681,7 +682,7 @@ QImage Controller::compose() {
                                 if (shown) promoteVideoWarning();
                             }
                         }
-                    } else if (recovering_.contains(c.id) || (it != videos_.end() && !it->second->error().isEmpty()) || missingNow_.contains(a.path)) {
+                    } else if (recovering_.contains(c.id) || !error.isEmpty() || missingNow_.contains(a.path)) {
                         // A reopened reader starting, one that failed without a picture, or a file known to be
                         // missing (its read may be stalled): this layer keeps its last frame (or none) and the
                         // others go on.
