@@ -12,6 +12,7 @@
 #include <map>
 #include <thread>
 #include <atomic>
+#include <mutex>
 
 namespace sav {
 class Controller : public QObject {
@@ -44,6 +45,10 @@ public:
     bool needsMidi() const;
     // Offline sources and vanished videos used on the timeline.
     QStringList missingMedia() const;
+    // The missing files the last background check found, among those the show still uses; no disk access.
+    QStringList lastMissingMedia() const;
+    // Starts a background check of the show's media unless one is running; wait finishes it (tests).
+    void checkMediaInBackground(bool wait = false);
     // Whether an asset needs relinking: offline since opening, or its file is gone though playback
     // needs it (a video, or audio read from its original rather than a prepared cache).
     static bool needsRelink(const MediaAsset& asset);
@@ -92,6 +97,12 @@ private:
     // armProblem_ is the playback problem it reported; a later successful arm clears only that.
     bool armFailed_ = false;
     bool pausedLive_ = false; // Paused by the operator during playback, not stopped or sought since.
+    // Files the show needs that are offline, and those it needs present now (videos, streamed audio).
+    void mediaToCheck(QStringList& offline, QStringList& needed) const;
+    // Shared with the checking thread, which may outlive the controller.
+    struct MediaCheck { std::mutex mutex; QStringList missing; std::atomic<bool> running{false}; };
+    std::shared_ptr<MediaCheck> mediaCheck_ = std::make_shared<MediaCheck>();
+    QStringList reportedMissing_; // What the last hold warning named, so it is said once.
     QString armProblem_;
     Frame pendingPosition_ = 0;
     std::map<std::string, std::unique_ptr<VideoReader>> videos_;

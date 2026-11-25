@@ -1885,6 +1885,8 @@ private slots:
         c.replace(project); QVERIFY(c.missingMedia().isEmpty());
         QVERIFY(QFile::remove(path));
         QCOMPARE(c.missingMedia(), QStringList{asset.path}); QVERIFY(!c.preflight().filter(asset.path).isEmpty());
+        // Continuing a live show warns from the background check instead of looking itself.
+        QVERIFY(c.lastMissingMedia().isEmpty()); c.checkMediaInBackground(true); QCOMPARE(c.lastMissingMedia(), QStringList{asset.path});
         QVERIFY(Controller::needsRelink(c.project.assets[asset.id])); // Relink offers it, though it was online when opened.
         c.toggle(); QCOMPARE(c.transport.state(), State::Stopped);
         // A prepared cache does not need the original. Restoring the file under its name needs the
@@ -1893,6 +1895,7 @@ private slots:
         writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 + 211)); const auto prepared = loadMedia(path, AudioPreparation::Prepared).audio;
         QVERIFY(!prepared->storage->readsSource()); QCOMPARE(c.replaceAudio({{asset.path, prepared}}), Controller::AudioSwap::Applied); QVERIFY(QFile::remove(path));
         QVERIFY(c.missingMedia().isEmpty()); QVERIFY(!Controller::needsRelink(c.project.assets[asset.id]));
+        QVERIFY(c.lastMissingMedia().isEmpty()); // The earlier check named a file the show no longer needs.
     }
     void saveKeepsUndoStepsThatSavedMediaWouldInvalidate() {
         // Opened package; remove a clip that starts 0.8 s into its source; the extracted file then
