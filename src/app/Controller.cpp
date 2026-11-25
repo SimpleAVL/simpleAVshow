@@ -44,9 +44,12 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
                 const auto missing = transport.state() == State::Held ? lastMissingMedia() : QStringList{};
                 if (!missing.isEmpty() && missing != reportedMissing_) {
                     report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
-                    playbackProblem = status;
+                    playbackProblem = reportedProblem_ = status;
+                } else if (missing.isEmpty() && !reportedMissing_.isEmpty() && transport.state() == State::Held && playbackProblem == reportedProblem_) {
+                    // A completed check found the files again; the warning on screen is still this one.
+                    playbackProblem.clear(); reportedProblem_.clear(); report("Missing media is back online.");
                 }
-                reportedMissing_ = missing;
+                reportedMissing_ = missing; // Empty outside a hold, so the next hold says it again.
             }
         }
         emit tick();
@@ -199,7 +202,7 @@ void Controller::toggle() {
         if (const auto missing = live ? lastMissingMedia() : missingMedia(); !missing.isEmpty()) {
             report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
             playbackProblem = warning = status;
-            if (!resuming) return;
+            if (!live) return; // Only a live show continues past missing media (it warned above).
         }
         if (needsMidi() && !prepareMidi()) { playbackProblem = midiProblem_ = status; if (!resuming) return; if (warning.isEmpty()) warning = status; }
         if (!prepareAudio()) { playbackProblem = status; return; }
@@ -342,9 +345,11 @@ void Controller::mediaToCheck(QStringList& offline, QStringList& needed) const {
         const auto asset = project.assets.constFind(QString::fromStdString(clip.assetId));
         if (asset == project.assets.cend()) continue;
         if (asset->offline) { if (!offline.contains(asset->path)) offline << asset->path; continue; }
-        // Videos, and audio that plays from its original file rather than a prepared cache, need the file now.
-        const bool readsSource = !project.show.tracks[clip.track].visual && asset->audio && asset->audio->storage && asset->audio->storage->readsSource();
-        if ((asset->video || readsSource) && !needed.contains(asset->path)) needed << asset->path;
+        // Picture clips need their video; audio clips need the file only while they play from it rather than
+        // from a prepared cache (a video's soundtrack on an audio track included).
+        const bool visual = project.show.tracks[clip.track].visual;
+        const bool needs = visual ? static_cast<bool>(asset->video) : asset->audio && asset->audio->storage && asset->audio->storage->readsSource();
+        if (needs && !needed.contains(asset->path)) needed << asset->path;
     }
     for (const auto& path : offline) needed.removeAll(path);
 }
