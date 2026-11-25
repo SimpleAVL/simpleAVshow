@@ -104,6 +104,7 @@ private:
     std::shared_ptr<MediaCheck> mediaCheck_ = std::make_shared<MediaCheck>();
     QStringList reportedMissing_; // What the last hold warning named, so it is said once.
     QString reportedProblem_; // That warning's text, cleared once the files are back.
+    bool wasHeld_ = false; // The transport was held at the last media check.
     QString armProblem_;
     Frame pendingPosition_ = 0;
     std::map<std::string, std::unique_ptr<VideoReader>> videos_;

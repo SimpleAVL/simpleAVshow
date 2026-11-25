@@ -42,8 +42,10 @@ quint64 volumeId(int descriptor);
 // shares): it is not present. Other open failures (a share briefly unreachable) count as present, so
 // they are retried by reads instead of being reported as missing media.
 bool present(const QString& path);
-// Both from one file-system lookup.
-struct Probe { bool present = false; FileIdentity identity; };
+// As present, but empty when the lookup failed without saying the file is gone (a share dropping out).
+std::optional<bool> presentIfKnown(const QString& path);
+// Both from one file-system lookup; certain: the lookup succeeded or found the file definitely absent.
+struct Probe { bool present = false; FileIdentity identity; bool certain = false; };
 Probe probe(const QString& path);
 // Size, modification time and identity: a file that still has all three is the one that was read.
 struct FileVersion {

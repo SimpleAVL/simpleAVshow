@@ -41,15 +41,18 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
             // During a show, media is checked in the background; a hold says when a later cue's file goes missing.
             if (!busy && (transport.state() != State::Stopped || transport.asyncVoices())) {
                 checkMediaInBackground();
-                const auto missing = transport.state() == State::Held ? lastMissingMedia() : QStringList{};
-                if (!missing.isEmpty() && missing != reportedMissing_) {
+                const bool held = transport.state() == State::Held;
+                const auto missing = lastMissingMedia();
+                if (held && !missing.isEmpty() && (missing != reportedMissing_ || !wasHeld_)) {
+                    // Each hold says it again, and so does a change while held.
                     report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
-                    playbackProblem = reportedProblem_ = status;
-                } else if (missing.isEmpty() && !reportedMissing_.isEmpty() && transport.state() == State::Held && playbackProblem == reportedProblem_) {
-                    // A completed check found the files again; the warning on screen is still this one.
-                    playbackProblem.clear(); reportedProblem_.clear(); report("Missing media is back online.");
+                    playbackProblem = reportedProblem_ = status; reportedMissing_ = missing;
+                } else if (missing.isEmpty() && !reportedMissing_.isEmpty()) {
+                    // A completed check found the files again, held or not; the warning goes if it is still on screen.
+                    if (playbackProblem == reportedProblem_) { playbackProblem.clear(); report("Missing media is back online."); }
+                    reportedMissing_.clear(); reportedProblem_.clear();
                 }
-                reportedMissing_ = missing; // Empty outside a hold, so the next hold says it again.
+                wasHeld_ = held;
             }
         }
         emit tick();
@@ -203,6 +206,7 @@ void Controller::toggle() {
             report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
             playbackProblem = warning = status;
             if (!live) return; // Only a live show continues past missing media (it warned above).
+            reportedMissing_ = missing; reportedProblem_ = status; // Cleared once a background check finds them.
         }
         if (needsMidi() && !prepareMidi()) { playbackProblem = midiProblem_ = status; if (!resuming) return; if (warning.isEmpty()) warning = status; }
         if (!prepareAudio()) { playbackProblem = status; return; }
@@ -372,8 +376,14 @@ void Controller::checkMediaInBackground(bool wait) {
     QStringList offline, needed; mediaToCheck(offline, needed);
     // Lookups can stall on a share, so they run on a thread of their own, never the show's controls.
     auto run = [check, needed] {
-        QStringList missing;
-        try { for (const auto& path : needed) if (!detail::present(path)) missing << path; } catch (...) {}
+        QStringList missing, before; { const std::lock_guard lock(check->mutex); before = check->missing; }
+        // A lookup that cannot tell (a share dropping out) keeps what the last one found.
+        try {
+            for (const auto& path : needed) {
+                const auto here = detail::presentIfKnown(path);
+                if (here ? !*here : before.contains(path)) missing << path;
+            }
+        } catch (...) { missing = before; }
         { const std::lock_guard lock(check->mutex); check->missing = missing; }
         check->running = false;
     };

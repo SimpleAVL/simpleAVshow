@@ -60,9 +60,15 @@ template <typename Query> quint64 volumeKey(Query query) {
     return high ^ low;
 }
 #endif
-// Only definite absence counts; other failures (a mount briefly unreachable) are retried by reads.
-bool statPresent(const QByteArray& native, struct stat& info) {
-    if (::stat(native.constData(), &info)) return errno != ENOENT && errno != ENOTDIR;
+// Only definite absence counts; other failures (a mount briefly unreachable) are retried by reads,
+// and are not certain.
+bool statPresent(const QByteArray& native, struct stat& info, bool* certain = nullptr) {
+    if (::stat(native.constData(), &info)) {
+        const bool absent = errno == ENOENT || errno == ENOTDIR;
+        if (certain) *certain = absent;
+        return !absent;
+    }
+    if (certain) *certain = true;
     return S_ISREG(info.st_mode);
 }
 }
@@ -76,24 +82,24 @@ Probe probe(const QString& path) {
         // Delete-pending files fail with access denied (as do unreadable ones, which cannot play either).
         const DWORD error = GetLastError();
         // A card reader or drive that keeps its letter with no medium in it reports not ready.
-        return {error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND && error != ERROR_ACCESS_DENIED &&
-            error != ERROR_DELETE_PENDING && error != ERROR_INVALID_NAME && error != ERROR_NOT_READY &&
-            error != ERROR_NO_MEDIA_IN_DRIVE, {}};
+        const bool absent = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND || error == ERROR_ACCESS_DENIED ||
+            error == ERROR_DELETE_PENDING || error == ERROR_INVALID_NAME || error == ERROR_NOT_READY || error == ERROR_NO_MEDIA_IN_DRIVE;
+        return {!absent, {}, absent};
     }
     BY_HANDLE_FILE_INFORMATION info{};
     const bool ok = GetFileInformationByHandle(file, &info); CloseHandle(file);
-    return {true, ok ? FileIdentity{info.dwVolumeSerialNumber, (quint64{info.nFileIndexHigh} << 32) | info.nFileIndexLow} : FileIdentity{}};
+    return {true, ok ? FileIdentity{info.dwVolumeSerialNumber, (quint64{info.nFileIndexHigh} << 32) | info.nFileIndexLow} : FileIdentity{}, true};
 #else
     const auto native = QFile::encodeName(path);
-    struct stat info{}; info.st_ino = 0;
-    const bool here = statPresent(native, info);
-    if (!info.st_ino) return {here, {}};
+    struct stat info{}; info.st_ino = 0; bool certain = false;
+    const bool here = statPresent(native, info, &certain);
+    if (!info.st_ino) return {here, {}, certain};
 #ifdef Q_OS_MACOS
     const auto volume = volumeKey([&](attrlist* request, void* reply, std::size_t size) { return ::getattrlist(native.constData(), request, reply, size, 0); });
 #else
     const quint64 volume = 0;
 #endif
-    return {here, {volume, static_cast<quint64>(info.st_ino)}};
+    return {here, {volume, static_cast<quint64>(info.st_ino)}, certain};
 #endif
 }
 #ifndef Q_OS_WIN
@@ -111,6 +117,18 @@ bool present(const QString& path) {
     return probe(path).present;
 #else
     struct stat info{}; return statPresent(QFile::encodeName(path), info); // No identity needed: one lookup.
+#endif
+}
+std::optional<bool> presentIfKnown(const QString& path) {
+#ifdef Q_OS_WIN
+    const auto result = probe(path);
+    if (!result.certain) return std::nullopt;
+    return result.present;
+#else
+    struct stat info{}; bool certain = false;
+    const bool here = statPresent(QFile::encodeName(path), info, &certain);
+    if (!certain) return std::nullopt;
+    return here;
 #endif
 }
 FileVersion fileVersion(const QString& path) {
