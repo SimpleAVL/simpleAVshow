@@ -858,12 +858,13 @@ private slots:
         // Output follows the end while the operator is there; scrolling up stops it until they return.
         auto* bar = transcript->verticalScrollBar();
         transcript->resize(transcript->width(), 120);
-        for (int i = 0; i < 6 && bar->maximum() == 0; ++i) {
+        // Well past the 24-pixel "at the bottom" margin, whatever the platform's fonts.
+        for (int i = 0; i < 20 && bar->maximum() < 200; ++i) {
             promptInput->setPlainText(QString("Line %1\nmore\nmore\nmore").arg(i));
             sendButton->click();
             QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
         }
-        QTRY_VERIFY(bar->maximum() > 0);
+        QTRY_VERIFY(bar->maximum() >= 200);
         QTRY_COMPARE(bar->value(), bar->maximum());
         bar->setValue(0); // The operator scrolls up to read.
         promptInput->setPlainText("Keep going");
