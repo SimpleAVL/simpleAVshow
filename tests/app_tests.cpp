@@ -1751,9 +1751,12 @@ private slots:
             std::vector<float> a(count * 2), b(count * 2);
             prepared->storage->read(start, a.data(), count); streamed->storage->read(start, b.data(), count);
             if (!exact) {
-                // Placement: no shift fits better than none; level: differences stay small.
+                // Placement: no shift fits better than none; level: differences stay small. Placement only
+                // means something where there is signal: in the encoder's padding after the content both
+                // decodes are near silence, and the best shift fits the decoder's dither noise.
                 const auto error = [&](int lag) { double e = 0; for (std::size_t i = 64; i + 64 < count; ++i) e += std::abs(a[i * 2] - b[(i + lag) * 2]); return e; };
-                for (int lag = -48; lag <= 48 && count > 256; ++lag) if (lag) QVERIFY2(error(lag) > error(0), qPrintable(QString("read at %1 fits shifted by %2").arg(start).arg(lag)));
+                const bool audible = std::any_of(a.begin(), a.end(), [](float x) { return std::abs(x) > .01f; });
+                for (int lag = -48; lag <= 48 && count > 256 && audible; ++lag) if (lag) QVERIFY2(error(lag) > error(0), qPrintable(QString("read at %1 fits shifted by %2").arg(start).arg(lag)));
                 for (std::size_t i = 0; i < a.size(); ++i) QVERIFY2(std::abs(a[i] - b[i]) < .1f, qPrintable(QString("read at %1 differs by %2").arg(start).arg(a[i] - b[i])));
                 continue;
             }
