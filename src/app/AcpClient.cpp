@@ -229,11 +229,26 @@ QString extractContentText(const QJsonValue& content) {
 }
 }
 
+AcpLaunch resolveAcpPreset(const AcpAgentPreset& preset) {
+    if (preset.program.isEmpty()) return {};
+    if (const QString adapter = findAcpExecutable(preset.program); !adapter.isEmpty()) return {adapter, preset.args, false};
+    if (preset.npmPackage.isEmpty() || (!preset.agentCli.isEmpty() && findAcpExecutable(preset.agentCli).isEmpty())) return {};
+    const QString npx = findAcpExecutable("npx");
+    if (npx.isEmpty()) return {};
+    return {npx, QStringList{"--yes", preset.npmPackage} + preset.args, true};
+}
+
 std::vector<AcpAgentPreset> defaultAcpPresets() {
     return {
         {"opencode", "OpenCode", "opencode", {"acp"}, "Install OpenCode from opencode.ai and run `opencode auth` once."},
-        {"claude", "Claude Code (ACP)", "claude-agent-acp", {}, "Install with `npm install -g @zed-industries/claude-agent-acp`."},
-        {"codex", "Codex (ACP)", "codex-acp", {}, "Install with `npm install -g @agentclientprotocol/codex-acp`."},
+        {"claude", "Claude Code (ACP)", "claude-agent-acp", {},
+         "Needs Claude Code (`claude`, logged in) and Node.js; the ACP adapter then runs through npx. "
+         "Or install it with `npm install -g @agentclientprotocol/claude-agent-acp`.",
+         "@agentclientprotocol/claude-agent-acp", "claude"},
+        {"codex", "Codex (ACP)", "codex-acp", {},
+         "Needs Codex (`codex`, logged in) and Node.js; the ACP adapter then runs through npx. "
+         "Or install it with `npm install -g @agentclientprotocol/codex-acp`.",
+         "@agentclientprotocol/codex-acp", "codex"},
         {"antigravity", "Antigravity (agy)", "agy", {"acp"}, "Install Google Antigravity CLI (`agy`) and run `agy acp --login` once."},
         {"pi", "Pi (pi-acp)", "pi-acp", {}, "Install with `npm install -g pi-acp` alongside Pi."},
         {"custom", "Custom ACP command…", {}, {}, "Enter any ACP-compatible executable and arguments (e.g. `my-agent acp`)."}

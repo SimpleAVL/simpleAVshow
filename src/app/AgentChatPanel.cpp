@@ -580,10 +580,14 @@ void AgentChatPanel::populatePresets() {
     int savedIndex = -1;
     for (int i = 0; i < static_cast<int>(presets_.size()); ++i) {
         const auto& p = presets_[i];
-        const bool available = !p.program.isEmpty() && !findAcpExecutable(p.program).isEmpty();
+        const AcpLaunch launch = resolveAcpPreset(p);
+        const bool available = !launch.program.isEmpty();
         if (available && firstAvailable < 0) firstAvailable = i;
         if (p.id == savedId) savedIndex = i;
-        const QString label = p.id == "custom" ? p.name : (available ? p.name + " · installed" : p.name + " · not found");
+        const QString label = p.id == "custom" ? p.name
+            : !available ? p.name + " · not found"
+            : launch.viaNpx ? p.name + " · via npx"
+            : p.name + " · installed";
         presetCombo_->addItem(label, p.id);
     }
     if (savedIndex >= 0) presetCombo_->setCurrentIndex(savedIndex);
@@ -601,9 +605,12 @@ void AgentChatPanel::updatePresetUi() {
         presetHint_->setText(preset.installHint);
         presetHint_->setVisible(true);
     } else {
-        const bool found = !findAcpExecutable(preset.program).isEmpty();
-        presetHint_->setText(found ? QString() : preset.installHint);
-        presetHint_->setVisible(!found);
+        const AcpLaunch launch = resolveAcpPreset(preset);
+        const bool found = !launch.program.isEmpty();
+        presetHint_->setText(!found ? preset.installHint
+            : launch.viaNpx ? "Runs the ACP adapter " + preset.npmPackage + " through npx with your existing " + preset.agentCli + " login; the first start downloads it."
+            : QString());
+        presetHint_->setVisible(!presetHint_->text().isEmpty());
     }
 }
 
@@ -687,6 +694,7 @@ void AgentChatPanel::toggleConnection() {
     const auto& preset = presets_[idx];
     QString program;
     QStringList args;
+    bool viaNpx = false;
     if (preset.id == "custom") {
         const QString cmd = customCommand_->text().trimmed();
         QSettings().setValue("agent/customCommand", cmd);
@@ -700,8 +708,17 @@ void AgentChatPanel::toggleConnection() {
         program = parts.front();
         args = parts.mid(1);
     } else {
-        program = preset.program;
-        args = preset.args;
+        const AcpLaunch launch = resolveAcpPreset(preset);
+        if (launch.program.isEmpty()) {
+            appendEntry({ChatEntry::Kind::Error, {}, {}, {}, preset.name + " is not available on this computer. " + preset.installHint, {}, {}});
+            return;
+        }
+        program = launch.program;
+        args = launch.args;
+        viaNpx = launch.viaNpx;
+        if (viaNpx)
+            appendEntry({ChatEntry::Kind::System, {}, {}, {},
+                "Starting the " + preset.name + " adapter through npx (" + preset.npmPackage + "). The first start downloads it and can take a minute.", {}, {}});
     }
 
     // Ensure the local MCP server is running so the ACP session receives live show tools automatically.
@@ -731,6 +748,7 @@ void AgentChatPanel::toggleConnection() {
     logsPending_ = false;
     logsTimer_.stop();
     connecting_ = true;
+    acp_.setHandshakeTimeout(viaNpx ? 180000 : 15000);
     acp_.connectToAgent(program, args, currentWorkingDirectory(), mcpConfig);
     connecting_ = false;
     if (acp_.state() == AcpState::Disconnected || acp_.state() == AcpState::Error) {

@@ -22,7 +22,19 @@ struct AcpAgentPreset {
     QString program;
     QStringList args;
     QString installHint;
+    // When program (an ACP adapter) is not installed but the agent's own CLI is, the adapter runs from npm
+    // through npx instead, using that CLI's existing login.
+    QString npmPackage;
+    QString agentCli;
 };
+
+// How a preset launches on this machine; empty program when it cannot.
+struct AcpLaunch {
+    QString program;
+    QStringList args;
+    bool viaNpx = false; // The first run downloads the adapter, so the handshake gets longer to finish.
+};
+AcpLaunch resolveAcpPreset(const AcpAgentPreset& preset);
 
 struct AcpMcpConfig {
     QString name = "simpleavshow";
@@ -92,6 +104,8 @@ public:
     void respondPermission(int requestKey, const QString& optionId);
     void disconnectFromAgent();
     void setTimeoutsForTesting(int startupMs, int handshakeMs, int cancelMs);
+    // Applies from the next connect; npx launches may download the adapter before answering.
+    void setHandshakeTimeout(int ms) { handshakeTimeoutMs_ = std::max(10, ms); }
 
 signals:
     void stateChanged(sav::AcpState state);

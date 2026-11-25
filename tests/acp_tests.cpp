@@ -46,6 +46,28 @@ private slots:
             }
         }
         QVERIFY(hasAntigravity);
+        // An adapter that is not installed falls back to npx only when the agent's own CLI is present.
+        AcpAgentPreset adapter{"x", "X", "sav-no-such-adapter", {"--stdio"}, {}, "@example/x-acp", "sav-no-such-cli"};
+        QVERIFY(resolveAcpPreset(adapter).program.isEmpty());
+#ifdef Q_OS_WIN
+        adapter.agentCli = "cmd";
+#else
+        adapter.agentCli = "sh";
+#endif
+        const auto viaNpx = resolveAcpPreset(adapter);
+        if (findAcpExecutable("npx").isEmpty()) QVERIFY(viaNpx.program.isEmpty());
+        else {
+            QVERIFY(viaNpx.viaNpx);
+            QCOMPARE(viaNpx.args, QStringList({"--yes", "@example/x-acp", "--stdio"}));
+        }
+        adapter.npmPackage.clear();
+        QVERIFY(resolveAcpPreset(adapter).program.isEmpty());
+        // An installed adapter is used directly.
+#ifndef Q_OS_WIN
+        const AcpAgentPreset direct{"y", "Y", "sh", {"-c"}, {}, "@example/y-acp", "sav-no-such-cli"};
+        const auto launch = resolveAcpPreset(direct);
+        QVERIFY(!launch.program.isEmpty() && !launch.viaNpx); QCOMPARE(launch.args, QStringList({"-c"}));
+#endif
         QCOMPARE(splitCommandLine("opencode acp"), QStringList({"opencode", "acp"}));
         QCOMPARE(splitCommandLine("\"/path/with spaces/agent\" --flag 'hello world'"),
                  QStringList({"/path/with spaces/agent", "--flag", "hello world"}));
