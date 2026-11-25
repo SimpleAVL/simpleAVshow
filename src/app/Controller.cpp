@@ -545,6 +545,12 @@ QImage Controller::compose() {
         if (!needed.contains(it->first)) { videoErrors_.erase(it->first); it = videos_.erase(it); }
         else ++it;
     }
+    // A clip leaving the picture takes its video warning with it, unless a newer problem replaced it.
+    for (auto it = videoProblems_.begin(); it != videoProblems_.end();) {
+        if (needed.contains(it->first)) { ++it; continue; }
+        if (playbackProblem == it->second) playbackProblem.clear();
+        it = videoProblems_.erase(it);
+    }
     std::erase_if(clipFrames_, [&](const auto& entry) { return !needed.contains(entry.first); });
     std::erase_if(recovering_, [&](const std::string& clip) { return !needed.contains(clip); });
     for (const auto& clip : project.show.clips) {
@@ -564,9 +570,10 @@ QImage Controller::compose() {
         clocks.push_back(source < 0 ? source : static_cast<Frame>(std::floor(seconds(source) * project.fps)));
     }
     const Frame frame = static_cast<Frame>(std::floor(seconds(position) * project.fps));
-    // A reopened video on screen is polled until it has a picture, even while show time stands still (a hold).
-    const bool polling = !recovering_.empty() && std::any_of(project.show.clips.begin(), project.show.clips.end(), [&](const Clip& clip) { return recovering_.contains(clip.id) && clip.contains(position); });
-    if (frame == lastComposed_ && clocks == lastClocks_ && !lastPicture_.isNull() && !polling) return lastPicture_;
+    // A reopened video that is drawn is polled until it has a picture, even while show time stands still (a hold).
+    // recoveringDrawn_: the last pass polled a recovering clip's reader (it is visible, not skipped).
+    if (frame == lastComposed_ && clocks == lastClocks_ && !lastPicture_.isNull() && !recoveringDrawn_) return lastPicture_;
+    recoveringDrawn_ = false;
     QImage picture(project.width, project.height, QImage::Format_RGB32); picture.fill(Qt::black);
     QPainter painter(&picture); painter.setRenderHint(QPainter::SmoothPixmapTransform); painter.setRenderHint(QPainter::TextAntialiasing);
     bool waiting = false;
@@ -624,9 +631,11 @@ QImage Controller::compose() {
                                 videoProblems_.erase(problem);
                             }
                         }
-                    } else if (recovering_.contains(c.id) || (it != videos_.end() && !it->second->error().isEmpty())) {
-                        // A reopened reader starting, or one that failed without a picture: this layer keeps its
-                        // last frame (or none) and the others go on.
+                    } else if (recovering_.contains(c.id) || (it != videos_.end() && !it->second->error().isEmpty()) || missingNow_.contains(a.path)) {
+                        // A reopened reader starting, one that failed without a picture, or a file known to be
+                        // missing (its read may be stalled): this layer keeps its last frame (or none) and the
+                        // others go on.
+                        recoveringDrawn_ |= recovering_.contains(c.id);
                         if (const auto held = clipFrames_.find(c.id); held != clipFrames_.end()) source = held->second;
                     } else waiting = true;
                 }
