@@ -176,6 +176,10 @@ bool Transport::rollbackRevokedSeeks(PendingPlayStart& pendingStart, bool onlyAf
                 newer.savedPlayPrevState = older.savedPlayPrevState;
                 newer.savedPlayPrevHeld = older.savedPlayPrevHeld;
             } else if (newer.afterPlay) {
+                // older ran before Play while newer ran after Play; the compacted rollback now
+                // spans back before Play, so roll it back after Play verification (afterPlay = false)
+                // to preserve a still-valid Operator Play and reconstruct its hold-resume MIDI.
+                newer.afterPlay = false;
                 newer.savedPlayPrevState = older.prevState;
                 newer.savedPlayPrevHeld = older.prevHeldMarker;
             }

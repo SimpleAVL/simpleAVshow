@@ -1246,7 +1246,10 @@ void MainWindow::requestShowMode(bool enabled) {
         PreflightGuard guard{c_};
         const quint64 initialRev = c_.projectRevision();
         const QString initialAudio = c_.audioName;
+        const bool initialAudioConfigured = c_.audioConfigured();
+        const bool initialAudioRunning = c_.device.running();
         const QString initialMidi = c_.midi.name();
+        const bool initialMidiConnected = c_.midi.connected();
         const bool initialOutputOpen = bool(outputWindow_ && outputWindow_->isVisible());
         auto problems = c_.preflight();
         const bool picture = std::any_of(c_.project.show.clips.begin(), c_.project.show.clips.end(), [this](const Clip& clip) { return c_.project.show.tracks[clip.track].visual; });
@@ -1259,7 +1262,9 @@ void MainWindow::requestShowMode(bool enabled) {
             confirmed = box.clickedButton() == start;
         }
         if (!confirmed) { showButton_->setChecked(false); return; }
-        if (c_.projectRevision() != initialRev || c_.audioName != initialAudio || c_.midi.name() != initialMidi ||
+        if (c_.projectRevision() != initialRev || c_.audioName != initialAudio ||
+            c_.audioConfigured() != initialAudioConfigured || c_.device.running() != initialAudioRunning ||
+            c_.midi.name() != initialMidi || c_.midi.connected() != initialMidiConnected ||
             bool(outputWindow_ && outputWindow_->isVisible()) != initialOutputOpen) {
             showButton_->setChecked(false);
             c_.report("Show or output state changed during preflight; review preflight again before entering Show mode.");
@@ -1676,12 +1681,25 @@ void MainWindow::remoteSettings() {
         status->setText(!remote_.running() ? "Disabled." : remote_.links().isEmpty() ? "No network connection found. Connect this computer to the phone's network." :
             devices ? QString("%1 device%2 connected.").arg(devices).arg(devices == 1 ? "" : "s") : "Waiting for a phone to open the link.");
     };
+    bool lastRunning = remote_.running();
+    int lastSavedPort = remote_.running() ? remote_.port() : QSettings().value("remote/port", 48124).toInt();
     const auto refresh = [&] {
         QSignalBlocker block(enabled), blockPort(port);
-        enabled->setChecked(remote_.running()); port->setEnabled(!remote_.running());
-        port->setValue(remote_.running() ? remote_.port() : QSettings().value("remote/port", 48124).toInt());
+        const bool nowRunning = remote_.running();
+        enabled->setChecked(nowRunning); port->setEnabled(!nowRunning);
+        if (nowRunning) {
+            port->setValue(remote_.port());
+            lastSavedPort = remote_.port();
+        } else {
+            const int persistedPort = QSettings().value("remote/port", 48124).toInt();
+            if (lastRunning || persistedPort != lastSavedPort) {
+                port->setValue(persistedPort);
+                lastSavedPort = persistedPort;
+            }
+        }
+        lastRunning = nowRunning;
         const auto addresses = remote_.links();
-        links->setPlainText(addresses.join("\n")); links->setEnabled(remote_.running());
+        links->setPlainText(addresses.join("\n")); links->setEnabled(nowRunning);
         copy->setEnabled(!addresses.isEmpty()); change->setEnabled(true);
         updateStatus();
     };

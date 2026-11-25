@@ -811,6 +811,41 @@ int main() {
             while (revt.takeMidi(rcEv)) if (rcEv.marker == 0) ++revResumes;
             expect(revt.state() == State::Playing && revt.position() > rcHoldPos && revt.position() < farPos && revResumes == 1,
                 "revoked chat seek before Operator Play synthesizes hold-resume MIDI once");
+
+            // Round 35 High #1: [Chat Seek, Operator Play, External Seek] from a Hold with Resume MIDI,
+            // stalling at External's uncached target, then revoking BOTH agent epochs must preserve
+            // Operator Play and emit the hold-resume MIDI once.
+            auto twoStorage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto twop = show(false);
+            twop->duration = twoStorage->length();
+            twop->clips[0].duration = twop->duration;
+            twop->clips[0].audio = diskAudio(twoStorage);
+            twop->markers.push_back({"two-hold", "TwoHold", rcHoldPos, true, MidiTiming::Resume, {0x90, 67, 100}});
+            Transport twot; twot.configure(twop);
+            twot.command({Action::Seek, rcHoldPos - 4, CommandSource::Operator, 0});
+            play(twot);
+            for (int i = 0; i < 200 && twot.state() != State::Held; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                checkedRender(twot, dout.data(), 16, 2);
+            }
+            expect(twot.state() == State::Held && twot.position() == rcHoldPos, "reached hold for two-seek compaction test");
+            twoStorage->fail.store(true);
+            twot.command({Action::Seek, frames(2), CommandSource::ChatAgent, twot.chatAgentEpoch()});
+            twot.command({Action::Play, 0, CommandSource::Operator, 0});
+            twot.command({Action::Seek, farPos, CommandSource::ExternalAgent, twot.externalAgentEpoch()});
+            checkedRender(twot, dout.data(), 64, 2); // Stalls at farPos.
+            expect(twot.position() == farPos, "two-seek test stalled at farPos");
+            twot.invalidateAllAgentCommands();
+            twoStorage->fail.store(false);
+            checkedRender(twot, dout.data(), 16, 2); // Compacts and rolls back both agent seeks, preserving Operator Play.
+            for (int i = 0; i < 200 && twot.position() <= rcHoldPos; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                checkedRender(twot, dout.data(), 16, 2);
+            }
+            int twoResumes = 0;
+            while (twot.takeMidi(rcEv)) if (rcEv.marker == 0) ++twoResumes;
+            expect(twot.state() == State::Playing && twot.position() > rcHoldPos && twot.position() < farPos && twoResumes == 1,
+                "revoking both Chat and External seeks around Operator Play preserves Continue and resume MIDI");
         }}
     };
     for (const auto& [name, test] : tests) {

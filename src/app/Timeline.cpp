@@ -112,7 +112,17 @@ void Timeline::refresh() {
     selectedTrack = std::clamp(selectedTrack, 0, static_cast<int>(c_.project.show.tracks.size()) - 1);
     lastTrackedIndex_ = selectedTrack;
     if (!c_.project.show.tracks.empty()) selectedTrackId_ = c_.project.show.tracks[selectedTrack].id;
-    if (!selectedClip.isEmpty() && std::none_of(c_.project.show.clips.begin(), c_.project.show.clips.end(), [this](const Clip& clip) { return clip.id == selectedClip.toStdString(); })) selectedClip.clear();
+    if (!selectedClip.isEmpty()) {
+        const auto it = std::find_if(c_.project.show.clips.begin(), c_.project.show.clips.end(),
+            [this](const Clip& clip) { return clip.id == selectedClip.toStdString(); });
+        if (it == c_.project.show.clips.end()) {
+            selectedClip.clear();
+        } else if (it->track >= 0 && static_cast<std::size_t>(it->track) < c_.project.show.tracks.size()) {
+            selectedTrack = it->track;
+            lastTrackedIndex_ = selectedTrack;
+            selectedTrackId_ = c_.project.show.tracks[selectedTrack].id;
+        }
+    }
     if (!selectedMarker.isEmpty() && std::none_of(c_.project.show.markers.begin(), c_.project.show.markers.end(), [this](const Marker& m) { return m.id == selectedMarker.toStdString(); })) selectedMarker.clear();
     viewport()->update();
 }

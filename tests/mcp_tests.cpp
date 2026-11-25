@@ -897,6 +897,26 @@ private slots:
             QVERIFY(QFileInfo::exists(aliasAuto));
         }
 
+        // 26. Moving a selected clip to another track via MCP apply_edits must update selected_track.
+        {
+            window.controller().replace(demoProject());
+            const QString titleClip = QString::fromStdString(window.controller().project.show.clips[1].id);
+            QVERIFY(!call(server, "seek_and_select", {{"clip_id", titleClip}})["isError"].toBool());
+            QCOMPARE(call(server, "get_environment")["structuredContent"].toObject()["selection"].toObject()["selected_track"].toInt(), 1);
+            // Move title clip from track 1 to track 0 (first remove backdrop on track 0 so there is no overlap).
+            const QString bgClip = QString::fromStdString(window.controller().project.show.clips[0].id);
+            QVERIFY(!call(server, "apply_edits", {
+                {"expected_revision", revision(server)},
+                {"operations", QJsonArray{
+                    QJsonObject{{"type", "delete_clip"}, {"id", bgClip}},
+                    QJsonObject{{"type", "clip"}, {"id", titleClip}, {"fields", QJsonObject{{"track", 0}}}}
+                }}
+            })["isError"].toBool());
+            const auto sel = call(server, "get_environment")["structuredContent"].toObject()["selection"].toObject();
+            QCOMPARE(sel["selected_clip"].toString(), titleClip);
+            QCOMPARE(sel["selected_track"].toInt(), 0);
+        }
+
         window.controller().dirty = false;
         server.stop();
     }
