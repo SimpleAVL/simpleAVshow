@@ -802,28 +802,39 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                     if (checkCommitRevocation()) {
                         rolledBackOnReady = true;
                     } else {
-                        // Commit pending agent Seek epoch right before dispatching landing cues so
-                        // stale pre-seek MIDI cues are cancelled while landing cues get the new epoch.
-                        if (f == 0 && pendingStart.seekRollbackCount > 0) epoch_.fetch_add(1);
-                        // Disk is ready and authorization is valid: now consume boundary markers and emit MIDI.
+                        // Consume boundary markers into [commitMarkerBegin, commitMarkerEnd) BEFORE
+                        // bumping epoch_ or dispatching MIDI so a revocation caught right after
+                        // setting State::Held rolls back cleanly without incrementing epoch_ or
+                        // dropping earlier queued Operator MIDI cues.
+                        const std::size_t commitMarkerBegin = nextMarker_;
                         while (nextMarker_ < markers_.size() && show_->markers[markers_[nextMarker_]].time == position_) {
-                            const auto i = markers_[nextMarker_++]; const auto& marker = show_->markers[i];
-                            if (marker.timing == MidiTiming::Arrival && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
-                            if (marker.hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); }
-                            else if (marker.timing == MidiTiming::Resume && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
+                            const auto i = markers_[nextMarker_++];
+                            if (show_->markers[i].hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); }
                         }
+                        const std::size_t commitMarkerEnd = nextMarker_;
                         if (checkCommitRevocation()) {
                             rolledBackOnReady = true;
-                        } else if (willEnd && state_ == State::Playing) {
-                            state_ = State::Ended; for (std::size_t i = 0; i < voices_.size(); ++i) cut(i);
-                            std::fill(voices_.begin(), voices_.end(), Voice{}); active_.clear();
-                        } else if (hasExpired && state_ == State::Playing) {
-                            for (std::size_t cursor = 0; cursor < active_.size();) {
-                                const auto i = active_[cursor];
-                                if (!show_->clips[i].contains(position_)) {
-                                    cut(i); voices_[i] = {}; active_[cursor] = active_.back(); active_.pop_back(); continue;
+                        } else {
+                            // Seek and boundary state are now committed: bump global MIDI epoch
+                            // before dispatching landing cues so pre-seek MIDI cues are discarded
+                            // while landing cues receive the new epoch.
+                            if (f == 0 && pendingStart.seekRollbackCount > 0) epoch_.fetch_add(1);
+                            for (std::size_t m = commitMarkerBegin; m < commitMarkerEnd; ++m) {
+                                const auto i = markers_[m]; const auto& marker = show_->markers[i];
+                                if (marker.timing == MidiTiming::Arrival && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
+                                else if (!marker.hold && marker.timing == MidiTiming::Resume && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
+                            }
+                            if (willEnd && state_ == State::Playing) {
+                                state_ = State::Ended; for (std::size_t i = 0; i < voices_.size(); ++i) cut(i);
+                                std::fill(voices_.begin(), voices_.end(), Voice{}); active_.clear();
+                            } else if (hasExpired && state_ == State::Playing) {
+                                for (std::size_t cursor = 0; cursor < active_.size();) {
+                                    const auto i = active_[cursor];
+                                    if (!show_->clips[i].contains(position_)) {
+                                        cut(i); voices_[i] = {}; active_[cursor] = active_.back(); active_.pop_back(); continue;
+                                    }
+                                    ++cursor;
                                 }
-                                ++cursor;
                             }
                         }
                     }

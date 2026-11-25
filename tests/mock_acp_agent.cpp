@@ -33,6 +33,7 @@ int main(int argc, char** argv) {
     const bool summaryOnlyPermission = args.contains("--summary-only-permission");
     const bool diffPermission = args.contains("--diff-permission");
     const bool burstAndExit = args.contains("--burst-and-exit");
+    const bool largeBurstAndExit = args.contains("--large-burst-and-exit");
     const bool closeNotFound = args.contains("--close-not-found");
     const bool largeToolOutput = args.contains("--large-tool-output");
     if (args.contains("--exit-zero-on-start")) return 0;
@@ -228,8 +229,9 @@ int main(int argc, char** argv) {
                 if (exitCleanAfterPermission) return 0;
             } else if (holdPrompt && (!staleOnNewSession || sessionCounter == 1)) {
                 waitingCancel = true;
-            } else if (burstAndExit) {
-                for (int i = 0; i < 45; ++i) {
+            } else if (burstAndExit || largeBurstAndExit) {
+                const int count = largeBurstAndExit ? 5000 : 45;
+                for (int i = 0; i < count; ++i) {
                     send({{"jsonrpc", "2.0"}, {"method", "session/update"}, {"params", QJsonObject{
                         {"sessionId", pendingPromptSession},
                         {"update", QJsonObject{

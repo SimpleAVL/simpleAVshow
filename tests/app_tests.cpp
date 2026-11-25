@@ -923,6 +923,35 @@ private slots:
         QVERIFY(!loadedCanonical.assets[cueAsset.id].offline);
         QCOMPARE(QFileInfo(loadedCanonical.assets[cueAsset.id].path).canonicalFilePath(),
                  QFileInfo(targetDir + "/cue.png").canonicalFilePath());
+
+        // Saving a show with a symlinked media subdirectory (project/media -> ../vol-a) must store
+        // "media/title.png" verbatim so repointing the symlink to ../vol-b loads from vol-b on reopen.
+        const QString projDir = dir.filePath("sym-media-proj");
+        const QString volA = dir.filePath("vol-a");
+        const QString volB = dir.filePath("vol-b");
+        QVERIFY(QDir().mkpath(projDir));
+        QVERIFY(QDir().mkpath(volA));
+        QVERIFY(QDir().mkpath(volB));
+        QVERIFY(green.save(volA + "/title.png"));
+        QVERIFY(blue.save(volB + "/title.png"));
+        const QString mediaLink = projDir + "/media";
+        QVERIFY(QFile::link(volA, mediaLink));
+        Project symMediaProj = newProject();
+        MediaAsset titleAsset = loadMedia(mediaLink + "/title.png");
+        symMediaProj.assets.insert(titleAsset.id, titleAsset);
+        const QString symShowPath = projDir + "/show.savshow";
+        writeProject(symMediaProj, symShowPath);
+        {
+            QFile checkFile(symShowPath);
+            QVERIFY(checkFile.open(QIODevice::ReadOnly));
+            const auto doc = QJsonDocument::fromJson(checkFile.readAll()).object();
+            QCOMPARE(doc["assets"].toArray()[0].toObject()["path"].toString(), QString("media/title.png"));
+        }
+        QVERIFY(QFile::remove(mediaLink));
+        QVERIFY(QFile::link(volB, mediaLink));
+        const Project repointed = readProject(symShowPath);
+        QVERIFY(!repointed.assets[titleAsset.id].offline);
+        QCOMPARE(repointed.assets[titleAsset.id].still.pixelColor(0, 0), QColor(Qt::blue));
 #endif
     }
     void zip64AndCompressedPackagesCanBeOpened() {

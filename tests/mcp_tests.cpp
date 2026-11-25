@@ -262,13 +262,17 @@ private slots:
         })["isError"].toBool());
         QVERIFY(edits(server, {operation("split_clip", "p1", {{"time", frameJson(7)}})})["isError"].toBool());
 
-        // 4. delete_track removes clips on that track, re-indexes higher tracks, and rejects deleting last track.
+        // 4. delete_track removes clips on that track plus their linked partners, re-indexes higher tracks, and rejects deleting last track.
+        QVERIFY(!edits(server, {
+            operation("clip", "p3", {{"track", 1}, {"text", "Unlinked"}, {"start", frameJson(20)}, {"duration", frameJson(4)}})
+        })["isError"].toBool());
         const QString bgTrackId = QString::fromStdString(c.project.show.tracks[0].id);
         QVERIFY(!edits(server, {QJsonObject{{"type", "delete_track"}, {"id", bgTrackId}}})["isError"].toBool());
         QCOMPARE(c.project.show.clips.size(), size_t(1));
+        QCOMPARE(c.project.show.clips.front().id, std::string("p3"));
         QCOMPARE(c.project.show.clips.front().track, 0);
         c.undo();
-        QCOMPARE(c.project.show.clips.size(), size_t(2));
+        QCOMPARE(c.project.show.clips.size(), size_t(3));
         QJsonArray deleteAllTracks;
         for (const auto& t : c.project.show.tracks) deleteAllTracks.append(QJsonObject{{"type", "delete_track"}, {"id", QString::fromStdString(t.id)}});
         QVERIFY(edits(server, deleteAllTracks)["isError"].toBool());
@@ -851,6 +855,27 @@ private slots:
                 [&](const Clip& c) { return c.id == clipA.toStdString(); });
             QVERIFY(itA != window.controller().project.show.clips.end());
             QCOMPARE(itA->start, frames(7.5));
+        }
+
+        // 24. MCP delete_track must also delete linked clip partners on other tracks.
+        {
+            window.controller().replace(newProject());
+            auto& p = window.controller().project;
+            Clip pic; pic.id = "linked-pic"; pic.track = 0; pic.text = "Slide"; pic.start = 0; pic.duration = frames(2); pic.link = "L1";
+            Clip snd; snd.id = "linked-snd"; snd.track = 2; snd.start = 0; snd.duration = frames(2); snd.link = "L1";
+            auto pcm = std::make_shared<AudioData>(); pcm->mono = true; pcm->samples.resize(frames(2) * 2, 0.f);
+            MediaAsset a; a.id = "a1"; a.name = "Tone"; a.duration = 2; a.audio = pcm;
+            p.assets.insert(a.id, a);
+            snd.assetId = "a1"; snd.audio = pcm;
+            p.show.clips = {pic, snd};
+            window.controller().replace(p);
+            const QString picTrackId = QString::fromStdString(window.controller().project.show.tracks[0].id);
+            const auto delTrack = call(server, "apply_edits", {
+                {"expected_revision", revision(server)},
+                {"operations", QJsonArray{QJsonObject{{"type", "delete_track"}, {"id", picTrackId}}}}
+            });
+            QVERIFY(!delTrack["isError"].toBool());
+            QVERIFY(window.controller().project.show.clips.empty());
         }
 
         window.controller().dirty = false;

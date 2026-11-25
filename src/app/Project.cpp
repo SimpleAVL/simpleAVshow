@@ -373,7 +373,8 @@ QString canonicalizeDirectoryPath(const QString& dirPath) {
 }
 QJsonObject projectJson(const Project& p, const QString& directory) {
     QJsonArray tracks, clips, markers, assets;
-    const QDir dir(canonicalizeDirectoryPath(directory));
+    const QString canonicalBase = canonicalizeDirectoryPath(directory);
+    const QDir dir(canonicalBase);
     for (const auto& t : p.show.tracks) tracks.append(QJsonObject{
         {"id", QString::fromStdString(t.id)}, {"name", QString::fromStdString(t.name)}, {"visual", t.visual}, {"async", t.async},
         {"muted", t.muted}, {"gain", t.gain}, {"pan", t.pan}, {"left", t.left}, {"right", t.right}});
@@ -392,16 +393,39 @@ QJsonObject projectJson(const Project& p, const QString& directory) {
         markers.append(QJsonObject{{"id", QString::fromStdString(m.id)}, {"name", QString::fromStdString(m.name)},
             {"time", static_cast<double>(m.time)}, {"hold", m.hold}, {"timing", m.timing == MidiTiming::Arrival ? "arrival" : "resume"}, {"message", bytes}});
     }
+    auto isCanonicalAncestor = [](const QString& ancestor, const QString& target) {
+        if (ancestor.isEmpty() || target.isEmpty()) return false;
+        if (ancestor == target) return true;
+        const QString prefix = ancestor.endsWith('/') ? ancestor : (ancestor + '/');
+        return target.startsWith(prefix);
+    };
     for (const auto& a : p.assets) {
         QString assetPath = a.path;
         if (!directory.isEmpty() && !assetPath.isEmpty()) {
-            // Canonicalize the nearest existing ancestor directory for both base and asset parent
-            // (e.g. /var -> /private/var or /tmp -> /private/tmp), preserving media file symlinks verbatim.
+            // Walk up from the asset's parent directory until reaching an ancestor whose canonical
+            // path is equal to or encloses canonicalBase. Only that shared ancestor is canonicalized
+            // (reconciling OS symlink aliases like /var vs /private/var or /tmp vs /private/tmp),
+            // while any symlinked media directories or files below it (e.g. project/media -> ../vol-a)
+            // are preserved verbatim in the serialized relative path.
             const QFileInfo assetInfo(assetPath);
-            const QString canonicalParent = canonicalizeDirectoryPath(assetInfo.absolutePath());
-            if (!canonicalParent.isEmpty())
-                assetPath = QDir(canonicalParent).filePath(assetInfo.fileName());
-            assetPath = dir.relativeFilePath(assetPath);
+            QDir anc = assetInfo.absoluteDir();
+            QStringList trailing;
+            bool matched = false;
+            for (;;) {
+                const QString ancCanonical = anc.canonicalPath();
+                if (isCanonicalAncestor(ancCanonical, canonicalBase)) {
+                    QDir rebuilt(ancCanonical);
+                    for (const QString& segment : trailing) rebuilt.setPath(rebuilt.filePath(segment));
+                    assetPath = dir.relativeFilePath(rebuilt.filePath(assetInfo.fileName()));
+                    matched = true;
+                    break;
+                }
+                const QString current = anc.absolutePath();
+                const QString leaf = anc.dirName();
+                if (leaf.isEmpty() || !anc.cdUp() || anc.absolutePath() == current) break;
+                trailing.prepend(leaf);
+            }
+            if (!matched) assetPath = QDir(directory).relativeFilePath(assetPath);
         }
         assets.append(QJsonObject{{"id", a.id}, {"name", a.name}, {"path", assetPath}});
     }
@@ -412,10 +436,13 @@ QJsonObject projectJson(const Project& p, const QString& directory) {
 namespace {
 QString canonicalManifestDirectory(const QString& filePath) {
     const QFileInfo fi(filePath);
-    if (const QString canonicalFile = fi.canonicalFilePath(); !canonicalFile.isEmpty())
-        return QFileInfo(canonicalFile).absolutePath();
-    const QString canonicalDir = fi.absoluteDir().canonicalPath();
-    return canonicalDir.isEmpty() ? fi.absolutePath() : canonicalDir;
+    // Only follow the manifest file's symlink target when the manifest itself is a symlink;
+    // regular files keep their literal parent path spelling (e.g. /var/folders/... on macOS).
+    if (fi.isSymLink()) {
+        if (const QString canonicalFile = fi.canonicalFilePath(); !canonicalFile.isEmpty())
+            return QFileInfo(canonicalFile).absolutePath();
+    }
+    return fi.absolutePath();
 }
 }
 void writeProject(const Project& p, const QString& path, bool allowOverwrite) {

@@ -616,7 +616,7 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
             if (process_ == spawnedProcess) {
                 constexpr qsizetype maxStdoutBufferBytes = 16 * 1024 * 1024;
                 constexpr qint64 maxStderrTailBytes = 64 * 1024;
-                constexpr int maxExitDrainLines = 2048;
+                constexpr qint64 maxExitDrainBytes = maxStdoutBufferBytes * 2;
                 spawnedProcess->setReadChannel(QProcess::StandardError);
                 const QByteArray stderrTail = spawnedProcess->read(maxStderrTailBytes);
                 spawnedProcess->setReadChannel(QProcess::StandardOutput);
@@ -625,15 +625,26 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
                     if (!decoded.isEmpty()) emit stderrReceived(decoded);
                 }
                 stderrDecoder_.resetState();
-                const qint64 remainingBudget = std::max<qint64>(0, maxStdoutBufferBytes * 2 - stdoutBuffer_.size());
-                if (remainingBudget > 0) stdoutBuffer_.append(spawnedProcess->read(remainingBudget));
-                int drained = 0;
-                while (process_ == spawnedProcess && !stopping_ && drained < maxExitDrainLines) {
-                    const qsizetype newline = stdoutBuffer_.indexOf('\n');
-                    if (newline < 0 || newline > maxStdoutBufferBytes) break;
-                    QByteArray line = stdoutBuffer_.left(newline);
-                    stdoutBuffer_.remove(0, newline + 1);
-                    ++drained;
+                // Drain all remaining stdout bytes (up to maxExitDrainBytes) using an O(N) forward
+                // cursor so a large burst of short chunks before clean exit never drops the tail
+                // or the final session/prompt result.
+                qint64 drainedBytes = stdoutBuffer_.size();
+                while (drainedBytes < maxExitDrainBytes) {
+                    const QByteArray chunk = spawnedProcess->read(std::min<qint64>(256 * 1024, maxExitDrainBytes - drainedBytes));
+                    if (chunk.isEmpty()) break;
+                    stdoutBuffer_.append(chunk);
+                    drainedBytes += chunk.size();
+                }
+                const QByteArray tail = std::move(stdoutBuffer_);
+                stdoutBuffer_.clear();
+                qsizetype pos = 0;
+                while (process_ == spawnedProcess && !stopping_ && pos < tail.size()) {
+                    const qsizetype newline = tail.indexOf('\n', pos);
+                    if (newline < 0) break;
+                    const qsizetype lineLen = newline - pos;
+                    if (lineLen > maxStdoutBufferBytes) break;
+                    QByteArray line = tail.mid(pos, lineLen);
+                    pos = newline + 1;
                     if (!line.isEmpty() && line.endsWith('\r')) line.chop(1);
                     if (!line.trimmed().isEmpty()) handleLine(line);
                 }

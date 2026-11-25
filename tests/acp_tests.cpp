@@ -1123,6 +1123,20 @@ private slots:
         QVERIFY(m2.hasMatch());
         QCOMPARE(m2.captured(1), m1.captured(1)); // Same PID: did not restart agent process on -32002.
         closeNotFoundClient.disconnectFromAgent();
+
+        // A clean exit immediately after a 5,000-line burst (>2,048 lines) must drain all chunks and promptFinished.
+        AcpClient largeBurstClient;
+        QString largeBurstText;
+        QString largeBurstStop;
+        QObject::connect(&largeBurstClient, &AcpClient::messageChunk, &largeBurstClient, [&](const QString& c) { largeBurstText += c; });
+        QObject::connect(&largeBurstClient, &AcpClient::promptFinished, &largeBurstClient, [&](const QString& r) { largeBurstStop = r; });
+        largeBurstClient.connectToAgent(QString::fromUtf8(SAV_MOCK_ACP_AGENT), {"--http-mcp", "--large-burst-and-exit"},
+            QDir::tempPath(), {});
+        QTRY_COMPARE(largeBurstClient.state(), AcpState::Ready);
+        largeBurstClient.sendPrompt("large burst");
+        QTRY_COMPARE_WITH_TIMEOUT(largeBurstClient.state(), AcpState::Disconnected, 5000);
+        QCOMPARE(largeBurstStop, QString("end_turn"));
+        QVERIFY(largeBurstText.contains("B4999 "));
     }
 };
 
