@@ -74,7 +74,11 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
                 // on its own line regardless.
                 const bool ours = !reportedProblem_.isEmpty() && playbackProblem == reportedProblem_;
                 if (missing.isEmpty()) {
-                    if (ours) { playbackProblem.clear(); report("Missing media is back online."); }
+                    if (ours) {
+                        playbackProblem.clear(); report("Missing media is back online.");
+                        promoteVideoWarning(); // A picture still frozen for another reason keeps its warning.
+                        if (!playbackProblem.isEmpty()) report(playbackProblem);
+                    }
                     reportedProblem_.clear();
                 } else if ((ours && changed) || (held && (!wasHeld_ || changed) && (ours || playbackProblem.isEmpty()))) {
                     report(missingWarning_); playbackProblem = reportedProblem_ = status; // Each hold says it again.
@@ -170,7 +174,8 @@ void Controller::armOrThrow(Frame position) {
         if (playbackProblem == problem) playbackProblem.clear();
         if (status == problem) report(QString());
     }
-    videos_.clear(); videoErrors_.clear(); missingSeen_.clear(); clipFrames_.clear(); recovering_.clear(); videoProblems_.clear(); lastPicture_ = {}; lastComposed_ = -1; lateFrames = 0;
+    // missingSeen_ stays: a confirmed absence still needs a confirmed return, even after re-arming.
+    videos_.clear(); videoErrors_.clear(); clipFrames_.clear(); recovering_.clear(); videoProblems_.clear(); lastPicture_ = {}; lastComposed_ = -1; lateFrames = 0;
     auto armed = std::make_shared<Show>(project.show);
     for (auto& clip : armed->clips) {
         if (!armed->tracks[clip.track].visual) continue;
