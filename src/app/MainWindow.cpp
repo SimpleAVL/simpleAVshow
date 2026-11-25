@@ -457,6 +457,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
 }
 
 MainWindow::~MainWindow() {
+    // ~QWidget closes the window, which moves focus and makes a focused inspector field emit editingFinished.
+    // Its slots must not run on a MainWindow whose destructor has already run (Qt 6.12 asserts on it).
+    for (auto* child : findChildren<QObject*>()) disconnect(child, nullptr, this, nullptr);
     // Destroy child widgets that hold references to mcp_/c_ before member destructors run.
     if (agentChat_) {
         agentChat_->shutdown();
