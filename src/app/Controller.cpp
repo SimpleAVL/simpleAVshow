@@ -55,6 +55,7 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
                         const auto asset = project.assets.constFind(QString::fromStdString(clip.assetId));
                         if (asset != project.assets.cend() && back.contains(asset->path)) retireVideo(clip.id);
                     }
+                    for (const auto& path : back) missingSeen_.remove(path); // Its readers are new now.
                     lastComposed_ = -1;
                 }
                 const bool changed = missing != missingNow_, held = state == State::Held;
