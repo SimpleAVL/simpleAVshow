@@ -37,6 +37,7 @@ int main(int argc, char** argv) {
     const bool closeNotFound = args.contains("--close-not-found");
     const bool largeToolOutput = args.contains("--large-tool-output");
     const bool configOptions = args.contains("--config-options");
+    const bool echoPrompt = args.contains("--echo-prompt");
     const bool rejectConfig = args.contains("--reject-config");
     const bool legacyModels = args.contains("--legacy-models");
     QString model = "m1", thinking = "low";
@@ -106,7 +107,8 @@ int main(int argc, char** argv) {
             {"sessionId", sessionId},
             {"update", QJsonObject{
                 {"sessionUpdate", "agent_message_chunk"},
-                {"content", QJsonObject{{"type", "text"}, {"text", note + " | pid=" + QString::number(QCoreApplication::applicationPid()) + " | closed=" + lastClosedSession + " | mcp=" + mcpSummary}}}
+                {"content", QJsonObject{{"type", "text"}, {"text", note + " | pid=" + QString::number(QCoreApplication::applicationPid()) + " | closed=" + lastClosedSession + " | mcp=" + mcpSummary +
+                    (echoPrompt ? " | prompt=" + pendingPromptText : QString())}}}
             }}
         }}});
         send({{"jsonrpc", "2.0"}, {"id", pendingPromptId}, {"result", QJsonObject{{"stopReason", "end_turn"}}}});

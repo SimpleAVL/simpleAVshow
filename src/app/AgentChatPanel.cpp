@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QFrame>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
@@ -196,9 +197,13 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
     root->addLayout(agentRow);
 
     sessionSettings_ = new QWidget;
-    auto* settingsRow = new QHBoxLayout(sessionSettings_);
+    auto* settingsRow = new QGridLayout(sessionSettings_);
     settingsRow->setContentsMargins(0, 0, 0, 0);
-    settingsRow->setSpacing(6);
+    settingsRow->setHorizontalSpacing(6);
+    settingsRow->setVerticalSpacing(4);
+    settingsRow->setColumnStretch(1, 1);
+    settingsRow->setColumnStretch(3, 1);
+    int settingIndex = 0; // Two per row: caption and picker each.
     const auto settingCombo = [&](const QString& label, const char* objectName, const QString& tip) {
         auto* caption = new QLabel(label);
         caption->setStyleSheet("color: #8499b5; font-size: 11px;");
@@ -207,14 +212,21 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         combo->setToolTip(tip);
         combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
         combo->setMinimumContentsLength(8);
-        settingsRow->addWidget(caption);
-        settingsRow->addWidget(combo, 1);
+        const int row = settingIndex / 2, column = (settingIndex % 2) * 2;
+        ++settingIndex;
+        settingsRow->addWidget(caption, row, column);
+        settingsRow->addWidget(combo, row, column + 1);
         return combo;
     };
     modelCombo_ = settingCombo("Model", "agentModelCombo", "The model the agent uses. Remembered for this agent.");
     thinkingCombo_ = settingCombo("Thinking", "agentThinkingCombo", "How much the agent reasons before answering. Remembered for this agent.");
+    modeCombo_ = settingCombo("Mode", "agentModeCombo",
+        "The agent's own approval mode, e.g. asking before actions, an automatic review, or full access. Full access lets the agent "
+        "run commands and change files on this computer without asking. SimpleAVShow still enforces Allow edits & controls and the "
+        "Show-mode lock for the show itself. Remembered for this agent.");
     connect(modelCombo_, &QComboBox::activated, this, [this] { chooseSessionSetting("model", modelCombo_); });
     connect(thinkingCombo_, &QComboBox::activated, this, [this] { chooseSessionSetting("thought_level", thinkingCombo_); });
+    connect(modeCombo_, &QComboBox::activated, this, [this] { chooseSessionSetting("mode", modeCombo_); });
     sessionSettings_->setVisible(false);
     root->addWidget(sessionSettings_);
     connect(&acp_, &AcpClient::configOptionsChanged, this, [this] {
@@ -281,6 +293,16 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
     transcript_->setOpenExternalLinks(false);
     transcript_->setStyleSheet("QTextBrowser { background: #121a25; border: 1px solid #263448; border-radius: 5px; padding: 6px; color: #dee7f3; }");
     root->addWidget(transcript_, 1);
+    if (auto* bar = transcript_->verticalScrollBar()) {
+        connect(bar, &QScrollBar::valueChanged, this, [this, bar](int value) {
+            if (!settingScroll_) followBottom_ = value >= bar->maximum() - 24;
+        });
+        // Qt lays long documents out after setHtml returns, so the height keeps growing: stay pinned meanwhile.
+        connect(bar, &QScrollBar::rangeChanged, this, [this, bar](int, int maximum) {
+            if (!followBottom_) return;
+            settingScroll_ = true; bar->setValue(maximum); settingScroll_ = false;
+        });
+    }
 
     // Quick-start prompt chips
     quickPromptsBox_ = new QWidget;
@@ -405,7 +427,7 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         ++sessionGeneration_;
         sentContextPreamble_ = false;
         // Restore this agent's remembered model first: it can change which thinking levels exist.
-        savedSettingsToApply_ = {"model", "thought_level"};
+        savedSettingsToApply_ = {"model", "thought_level", "mode"};
         applyNextSavedSetting();
         const QString transport = acp_.usedHttpMcp() ? "HTTP MCP" : "stdio MCP bridge";
         appendEntry({ChatEntry::Kind::System, {}, {}, {},
@@ -656,6 +678,7 @@ void AgentChatPanel::refreshSessionSettings() {
     const auto& options = acp_.configOptions();
     const auto* model = findSetting(options, "model");
     const auto* thinking = findSetting(options, "thought_level");
+    const auto* mode = findSetting(options, "mode");
     auto* row = sessionSettings_->layout();
     const auto fill = [&](QComboBox* combo, const AcpConfigOption* option) {
         QSignalBlocker block(combo);
@@ -669,7 +692,8 @@ void AgentChatPanel::refreshSessionSettings() {
     };
     fill(modelCombo_, model);
     fill(thinkingCombo_, thinking);
-    sessionSettings_->setVisible(model || thinking);
+    fill(modeCombo_, mode);
+    sessionSettings_->setVisible(model || thinking || mode);
 }
 
 void AgentChatPanel::chooseSessionSetting(const QString& category, QComboBox* combo) {
@@ -721,6 +745,7 @@ void AgentChatPanel::updateControls() {
     presetCombo_->setEnabled(!active);
     modelCombo_->setEnabled(ready);
     thinkingCombo_->setEnabled(ready);
+    modeCombo_->setEnabled(ready);
     customCommand_->setEnabled(!active);
     connectButton_->setText(active ? "Disconnect" : "Connect");
     newSessionButton_->setEnabled(ready);
@@ -888,6 +913,7 @@ void AgentChatPanel::sendCurrentPrompt() {
 
 void AgentChatPanel::sendPromptText(const QString& userText) {
     if (acp_.state() != AcpState::Ready || userText.trimmed().isEmpty()) return;
+    followBottom_ = true; // Sending jumps back to the conversation's end.
     appendEntry({ChatEntry::Kind::User, {}, "You", {}, userText, {}, {}});
     QString payload = userText;
     if (!sentContextPreamble_) {
@@ -904,15 +930,44 @@ QString AgentChatPanel::currentWorkingDirectory() const {
 }
 
 QString AgentChatPanel::buildFirstTurnPrompt(const QString& userText) const {
+    // ACP has no system prompt, so the session's first message carries it, ahead of the operator's words.
+    const auto& show = c_.project.show;
+    const QString title = c_.project.title.isEmpty() ? QString("Untitled") : c_.project.title;
+    const QString saved = c_.path.isEmpty() ? QString("not saved yet") : "saved at " + c_.path;
+    const QString access = c_.showMode
+        ? QString("Show mode is on: the show is live and locked. Only read, inspect and advise; every edit and control tool is refused.")
+        : mcp_.editingEnabled()
+        ? QString("The operator has allowed edits and controls: you may change the show and run rehearsal playback through the tools.")
+        : QString("Edits and controls are off: you can read, inspect and advise. If a request needs a change, say what you would do "
+                  "and ask the operator to switch on \"Allow edits & controls\" in this panel.");
     return QString(
-        "[SimpleAVShow embedded assistant context]\n"
-        "You are running inside SimpleAVShow's Agent Chat panel with the `simpleavshow` MCP server attached.\n"
-        "- Read & advise (always safe): `get_show`, `get_preflight`, `get_environment` (audio/MIDI/displays/remote/app settings), `get_app_guide` (built-in user manual chapters & search), `render_preview` (PNG frame at any time), and `encode_midi`.\n"
-        "- When asked about settings, routing, ASIO, MIDI, holds, automation, or troubleshooting, check `get_environment` and `get_app_guide` so your advice matches this computer and SimpleAVShow's exact behavior.\n"
-        "- When the operator enables editing/control (and Show mode is off): `apply_edits` (project, track, clip including all 6 automation curves `volume`/`balance`/`positionX`/`positionY`/`size`/`alpha` with `linear`/`hold`/`curve`/`scurve` shapes and bend, marker, `split_clip`, `move_track`, `delete_clip`/`delete_marker`/`delete_track`/`delete_asset`), `history` (undo/redo), `seek_and_select`, `list_media_files`, `import_media`/`get_import`/`commit_import`, `relink_media`, `configure_outputs`, `configure_remote`, `project_action` (save/save_as/export_package/new_show/open_demo/open_project), and `transport_control` (rehearsal play/pause/continue/stop_all/seek).\n"
-        "- All timeline and automation times are 48,000 Hz audio frames (`seconds * 48000`). Show mode stays strictly operator-only.\n"
-        "- Keep replies concise and practical for a live-show operator.\n\n"
-        "%1").arg(userText);
+        "<simpleavshow-context>\n"
+        "You are the assistant built into SimpleAVShow, a timeline editor and playback engine for stage performances "
+        "(audio, video, images, text, holds and MIDI cues). You are talking to the show's operator in the app's Agent Chat panel.\n"
+        "\n"
+        "How to read the operator's messages: they are instructions about the show open in SimpleAVShow and about the app "
+        "itself (its settings, outputs, MIDI, remote, playback). Carry them out through the `simpleavshow` MCP tools. "
+        "They are not requests to write or change source code, to edit files directly, or to run shell commands; do that "
+        "only when the operator explicitly asks for it. The project file is managed by the app: change the show only "
+        "through the tools, never by editing the file.\n"
+        "\n"
+        "Current state: show \"%1\" (%2), %3 tracks, %4 clips, %5 markers. %6\n"
+        "\n"
+        "Working with the tools:\n"
+        "- Read before you act: `get_show`, `get_environment` (audio, MIDI, displays, remote, app settings) and "
+        "`get_preflight`. For how the app behaves, check `get_app_guide` (the user manual) instead of guessing.\n"
+        "- Changes: `apply_edits` (tracks, clips with automation, markers, splits, deletes), `history` (undo/redo), "
+        "`import_media`/`commit_import`, `relink_media`, `configure_outputs`, `configure_remote`, `project_action` "
+        "(save, open, export) and `transport_control` (rehearsal playback). Every edit is one Undo step for the operator.\n"
+        "- Times are 48,000 Hz audio frames (seconds × 48000). `render_preview` shows a frame; `encode_midi` builds MIDI messages.\n"
+        "- Show mode is operator-only: during a live show never try to change anything.\n"
+        "- Keep replies short and practical for someone running a show. Ask before large or destructive changes.\n"
+        "</simpleavshow-context>\n"
+        "\n"
+        "%7")
+        .arg(title, saved)
+        .arg(show.tracks.size()).arg(show.clips.size()).arg(show.markers.size())
+        .arg(access, userText);
 }
 
 void AgentChatPanel::appendEntry(ChatEntry entry) {
@@ -979,7 +1034,7 @@ void AgentChatPanel::renderTranscript() {
     renderPending_ = false;
     auto* bar = transcript_->verticalScrollBar();
     const int prevScroll = bar ? bar->value() : 0;
-    const bool stickToBottom = !bar || prevScroll >= bar->maximum() - 24;
+    const bool stickToBottom = !bar || followBottom_;
     const bool trimmed = entriesTrimmed_;
     entriesTrimmed_ = false;
     const QTextCursor prevCursor = transcript_->textCursor();
@@ -1043,6 +1098,7 @@ void AgentChatPanel::renderTranscript() {
         }
     }
     html += "</body></html>";
+    settingScroll_ = true; // Replacing the document resets the scroll position; that is not the operator scrolling.
     transcript_->setHtml(html);
     if (hadSelection && !trimmed) {
         const int maxPos = std::max(0, transcript_->document()->characterCount() - 1);
@@ -1054,6 +1110,7 @@ void AgentChatPanel::renderTranscript() {
             transcript_->setTextCursor(restored);
     }
     if (bar) bar->setValue(stickToBottom ? bar->maximum() : std::min(prevScroll, bar->maximum()));
+    settingScroll_ = false;
 }
 
 void AgentChatPanel::addPermissionCard(const AcpPermissionRequest& request) {

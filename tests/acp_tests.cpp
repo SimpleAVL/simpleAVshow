@@ -5,6 +5,7 @@
 #include "ReportUncaught.h"
 #include <QCheckBox>
 #include <QComboBox>
+#include <QScrollBar>
 #include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -797,6 +798,72 @@ private slots:
         connectButton->click();
         QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
         QSettings().remove("agent/custom");
+        window.controller().dirty = false;
+    }
+
+    void chatPanelFramesTheFirstMessageAndFollowsOutput() {
+        MainWindow window;
+        auto project = demoProject(); project.title = "Lighthouse Rehearsal";
+        window.controller().replace(project);
+        window.show();
+        window.findChild<QPushButton*>("agentChatButton")->click();
+        auto* panel = window.findChild<AgentChatPanel*>("agentChatPanel");
+        auto* presetCombo = panel->findChild<QComboBox*>("agentPresetCombo");
+        auto* customCommand = panel->findChild<QLineEdit*>("agentCustomCommand");
+        auto* connectButton = panel->findChild<QPushButton*>("agentConnectButton");
+        auto* promptInput = panel->findChild<QPlainTextEdit*>("agentPromptInput");
+        auto* sendButton = panel->findChild<QPushButton*>("agentSendButton");
+        auto* transcript = panel->findChild<QTextBrowser*>("agentChatTranscript");
+        auto* mode = panel->findChild<QComboBox*>("agentModeCombo");
+        QVERIFY(presetCombo && customCommand && connectButton && promptInput && sendButton && transcript && mode);
+        presetCombo->setCurrentIndex(presetCombo->findData("custom"));
+        customCommand->setText(QString("\"%1\" --http-mcp --echo-prompt --config-options").arg(SAV_MOCK_ACP_AGENT));
+        QString replies;
+        connect(&panel->acpClient(), &AcpClient::messageChunk, [&](const QString& chunk) { replies += chunk; });
+        connectButton->click();
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
+        // The agent's own approval mode is offered too (for agents that have one).
+        QTRY_VERIFY(mode->isVisible()); QCOMPARE(mode->currentData().toString(), QString("ask"));
+
+        // The first message tells the agent where it runs and how to read the operator; later ones are the operator's words.
+        promptInput->setPlainText("Add a hold at the end");
+        sendButton->click();
+        QTRY_VERIFY(replies.contains("prompt="));
+        QVERIFY(replies.contains("<simpleavshow-context>"));
+        QVERIFY(replies.contains("instructions about the show open in SimpleAVShow"));
+        QVERIFY(replies.contains("show \"Lighthouse Rehearsal\""));
+        QVERIFY(replies.contains("Edits and controls are off"));
+        QVERIFY(replies.trimmed().endsWith("Add a hold at the end"));
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
+        replies.clear();
+        promptInput->setPlainText("And another");
+        sendButton->click();
+        QTRY_VERIFY(replies.contains("prompt="));
+        QVERIFY(!replies.contains("simpleavshow-context"));
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
+
+        // Output follows the end while the operator is there; scrolling up stops it until they return.
+        auto* bar = transcript->verticalScrollBar();
+        transcript->resize(transcript->width(), 120);
+        for (int i = 0; i < 6 && bar->maximum() == 0; ++i) {
+            promptInput->setPlainText(QString("Line %1\nmore\nmore\nmore").arg(i));
+            sendButton->click();
+            QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
+        }
+        QTRY_VERIFY(bar->maximum() > 0);
+        QTRY_COMPARE(bar->value(), bar->maximum());
+        bar->setValue(0); // The operator scrolls up to read.
+        promptInput->setPlainText("Keep going");
+        sendButton->click(); // Sending returns to the end.
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
+        QTRY_COMPARE(bar->value(), bar->maximum());
+        bar->setValue(0);
+        const int maximumBefore = bar->maximum();
+        emit panel->acpClient().messageChunk("A late chunk that grows the transcript\nwith\nseveral\nlines");
+        QTRY_VERIFY(bar->maximum() > maximumBefore);
+        QCOMPARE(bar->value(), 0); // Still where the operator left it.
+        connectButton->click();
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
         window.controller().dirty = false;
     }
 

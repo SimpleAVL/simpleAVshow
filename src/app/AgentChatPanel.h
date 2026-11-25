@@ -71,6 +71,9 @@ private:
     bool shuttingDown_ = false;
     bool renderPending_ = false;
     bool entriesTrimmed_ = false;
+    // Follow new output while the operator is at the bottom; scrolling up stops following until they return.
+    bool followBottom_ = true;
+    bool settingScroll_ = false;
     bool logsPending_ = false;
     QString pendingLogs_;
     QString chatMcpToken_;
@@ -85,6 +88,7 @@ private:
     QWidget* sessionSettings_ = nullptr;
     QComboBox* modelCombo_ = nullptr;
     QComboBox* thinkingCombo_ = nullptr;
+    QComboBox* modeCombo_ = nullptr;
     QString activePresetId_;
     QStringList savedSettingsToApply_; // Categories still to restore for the new session, in order.
     void refreshSessionSettings();
