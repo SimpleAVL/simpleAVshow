@@ -195,6 +195,33 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
     newSessionButton_->setToolTip("Start a fresh conversation session");
     root->addLayout(agentRow);
 
+    sessionSettings_ = new QWidget;
+    auto* settingsRow = new QHBoxLayout(sessionSettings_);
+    settingsRow->setContentsMargins(0, 0, 0, 0);
+    settingsRow->setSpacing(6);
+    const auto settingCombo = [&](const QString& label, const char* objectName, const QString& tip) {
+        auto* caption = new QLabel(label);
+        caption->setStyleSheet("color: #8499b5; font-size: 11px;");
+        auto* combo = new QComboBox;
+        combo->setObjectName(objectName);
+        combo->setToolTip(tip);
+        combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        combo->setMinimumContentsLength(8);
+        settingsRow->addWidget(caption);
+        settingsRow->addWidget(combo, 1);
+        return combo;
+    };
+    modelCombo_ = settingCombo("Model", "agentModelCombo", "The model the agent uses. Remembered for this agent.");
+    thinkingCombo_ = settingCombo("Thinking", "agentThinkingCombo", "How much the agent reasons before answering. Remembered for this agent.");
+    connect(modelCombo_, &QComboBox::activated, this, [this] { chooseSessionSetting("model", modelCombo_); });
+    connect(thinkingCombo_, &QComboBox::activated, this, [this] { chooseSessionSetting("thought_level", thinkingCombo_); });
+    sessionSettings_->setVisible(false);
+    root->addWidget(sessionSettings_);
+    connect(&acp_, &AcpClient::configOptionsChanged, this, [this] {
+        refreshSessionSettings();
+        if (!acp_.configChangePending()) applyNextSavedSetting();
+    });
+
     customCommand_ = new QLineEdit;
     customCommand_->setObjectName("agentCustomCommand");
     customCommand_->setPlaceholderText("ACP command, e.g. opencode acp");
@@ -377,6 +404,9 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
     connect(&acp_, &AcpClient::connected, this, [this](const QString& name, const QString&) {
         ++sessionGeneration_;
         sentContextPreamble_ = false;
+        // Restore this agent's remembered model first: it can change which thinking levels exist.
+        savedSettingsToApply_ = {"model", "thought_level"};
+        applyNextSavedSetting();
         const QString transport = acp_.usedHttpMcp() ? "HTTP MCP" : "stdio MCP bridge";
         appendEntry({ChatEntry::Kind::System, {}, {}, {},
             QString("Connected to %1 (%2 · %3).").arg(name, transport, mcp_.editingEnabled() ? "editing enabled" : "read only"), {}, {}});
@@ -614,6 +644,56 @@ void AgentChatPanel::updatePresetUi() {
     }
 }
 
+namespace {
+const AcpConfigOption* findSetting(const std::vector<AcpConfigOption>& options, const QString& category) {
+    const auto it = std::find_if(options.begin(), options.end(), [&](const auto& o) { return o.category == category; });
+    return it == options.end() ? nullptr : &*it;
+}
+QString settingKey(const QString& presetId, const QString& category) { return "agent/" + presetId + "/" + category; }
+}
+
+void AgentChatPanel::refreshSessionSettings() {
+    const auto& options = acp_.configOptions();
+    const auto* model = findSetting(options, "model");
+    const auto* thinking = findSetting(options, "thought_level");
+    auto* row = sessionSettings_->layout();
+    const auto fill = [&](QComboBox* combo, const AcpConfigOption* option) {
+        QSignalBlocker block(combo);
+        combo->clear();
+        combo->setVisible(option);
+        if (const int at = row->indexOf(combo); at > 0)
+            if (auto* caption = row->itemAt(at - 1)->widget()) caption->setVisible(option);
+        if (!option) return;
+        for (const auto& [value, label] : option->choices) combo->addItem(label, value);
+        combo->setCurrentIndex(combo->findData(option->currentValue));
+    };
+    fill(modelCombo_, model);
+    fill(thinkingCombo_, thinking);
+    sessionSettings_->setVisible(model || thinking);
+}
+
+void AgentChatPanel::chooseSessionSetting(const QString& category, QComboBox* combo) {
+    const auto* option = findSetting(acp_.configOptions(), category);
+    const QString value = combo->currentData().toString();
+    if (!option || value.isEmpty()) return;
+    savedSettingsToApply_.removeAll(category); // The operator's choice wins over a remembered one.
+    if (acp_.setConfigOption(option->id, value)) {
+        if (!activePresetId_.isEmpty()) QSettings().setValue(settingKey(activePresetId_, category), value);
+    } else refreshSessionSettings(); // Not accepted right now (e.g. mid-turn): show what is in effect.
+}
+
+void AgentChatPanel::applyNextSavedSetting() {
+    if (acp_.state() != AcpState::Ready || activePresetId_.isEmpty()) return;
+    while (!savedSettingsToApply_.isEmpty()) {
+        const QString category = savedSettingsToApply_.takeFirst();
+        const QString saved = QSettings().value(settingKey(activePresetId_, category)).toString();
+        const auto* option = findSetting(acp_.configOptions(), category);
+        if (saved.isEmpty() || !option || option->currentValue == saved) continue;
+        // A remembered value the agent no longer offers is skipped; the agent's default stays.
+        if (acp_.setConfigOption(option->id, saved)) return; // The next one follows the agent's answer.
+    }
+}
+
 void AgentChatPanel::updateControls() {
     const AcpState st = acp_.state();
     const bool active = st == AcpState::Connecting || st == AcpState::Ready || st == AcpState::Prompting;
@@ -639,6 +719,8 @@ void AgentChatPanel::updateControls() {
     statusLabel_->setStyleSheet(QString("color: %1; font-size: 11px; font-weight: 600;").arg(statusColor));
 
     presetCombo_->setEnabled(!active);
+    modelCombo_->setEnabled(ready);
+    thinkingCombo_->setEnabled(ready);
     customCommand_->setEnabled(!active);
     connectButton_->setText(active ? "Disconnect" : "Connect");
     newSessionButton_->setEnabled(ready);
@@ -707,7 +789,9 @@ void AgentChatPanel::toggleConnection() {
         }
         program = parts.front();
         args = parts.mid(1);
+        activePresetId_ = preset.id;
     } else {
+        activePresetId_ = preset.id;
         const AcpLaunch launch = resolveAcpPreset(preset);
         if (launch.program.isEmpty()) {
             appendEntry({ChatEntry::Kind::Error, {}, {}, {}, preset.name + " is not available on this computer. " + preset.installHint, {}, {}});

@@ -50,6 +50,16 @@ struct AcpPermissionOption {
     QString kind;
 };
 
+// A session setting the agent offers (ACP session config options), e.g. its model or thinking level.
+struct AcpConfigOption {
+    QString id;
+    QString name;
+    QString category; // "model", "thought_level", "mode", … (free-form; empty when the agent gives none)
+    QString currentValue;
+    QList<QPair<QString, QString>> choices; // value, label
+    bool legacyModel = false; // From the older session "models" list; changed with session/set_model.
+};
+
 struct AcpPermissionRequest {
     int requestKey = 0;
     QString toolCallId;
@@ -106,6 +116,13 @@ public:
     void setTimeoutsForTesting(int startupMs, int handshakeMs, int cancelMs);
     // Applies from the next connect; npx launches may download the adapter before answering.
     void setHandshakeTimeout(int ms) { handshakeTimeoutMs_ = std::max(10, ms); }
+    // The current session's settings; empty until a session is created, or when the agent offers none.
+    const std::vector<AcpConfigOption>& configOptions() const { return configOptions_; }
+    // Changes one between turns (Ready). Returns false when there is no such option or value, or no ready session.
+    bool setConfigOption(const QString& id, const QString& value);
+    bool configChangePending() const {
+        return std::any_of(pending_.cbegin(), pending_.cend(), [](const PendingRequest& p) { return p.kind == PendingKind::SetConfig; });
+    }
 
 signals:
     void stateChanged(sav::AcpState state);
@@ -118,13 +135,19 @@ signals:
     void promptFinished(const QString& stopReason);
     void stderrReceived(const QString& text);
     void errorOccurred(const QString& message);
+    void configOptionsChanged();
 
 private:
-    enum class PendingKind { Initialize, SessionClose, SessionNew, Prompt };
+    enum class PendingKind { Initialize, SessionClose, SessionNew, Prompt, SetConfig };
     struct PendingRequest {
         PendingKind kind = PendingKind::Initialize;
         QString sessionId;
+        QString configId, previousValue; // SetConfig: restored if the agent rejects the change.
     };
+    std::vector<AcpConfigOption> configOptions_;
+    // Replaces the options from a session/new or set_config_option result, or a config_option_update.
+    bool readConfigOptions(const QJsonObject& source);
+    void clearConfigOptions();
     struct PendingPermission {
         QJsonValue rpcId;
         QString sessionId;

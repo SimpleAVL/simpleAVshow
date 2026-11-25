@@ -36,6 +36,23 @@ int main(int argc, char** argv) {
     const bool largeBurstAndExit = args.contains("--large-burst-and-exit");
     const bool closeNotFound = args.contains("--close-not-found");
     const bool largeToolOutput = args.contains("--large-tool-output");
+    const bool configOptions = args.contains("--config-options");
+    const bool rejectConfig = args.contains("--reject-config");
+    const bool legacyModels = args.contains("--legacy-models");
+    QString model = "m1", thinking = "low";
+    // m2 also offers "max" thinking, so changing the model changes the other option.
+    const auto settings = [&] {
+        QJsonArray thinkingChoices{QJsonObject{{"value", "low"}, {"name", "Low"}}, QJsonObject{{"value", "high"}, {"name", "High"}}};
+        if (model == "m2") thinkingChoices.append(QJsonObject{{"value", "max"}, {"name", "Max"}});
+        return QJsonArray{
+            QJsonObject{{"id", "model"}, {"name", "Model"}, {"category", "model"}, {"type", "select"}, {"currentValue", model},
+                {"options", QJsonArray{QJsonObject{{"value", "m1"}, {"name", "Model One"}},
+                                       QJsonObject{{"group", "more"}, {"name", "More"}, {"options", QJsonArray{QJsonObject{{"value", "m2"}, {"name", "Model Two"}}}}}}}},
+            QJsonObject{{"id", "effort"}, {"name", "Effort"}, {"category", "thought_level"}, {"type", "select"}, {"currentValue", thinking},
+                {"options", thinkingChoices}},
+            QJsonObject{{"id", "mode"}, {"name", "Mode"}, {"category", "mode"}, {"type", "select"}, {"currentValue", "ask"},
+                {"options", QJsonArray{QJsonObject{{"value", "ask"}, {"name", "Ask"}}}}}};
+    };
     if (args.contains("--exit-zero-on-start")) return 0;
 
     int sessionCounter = 0;
@@ -145,7 +162,11 @@ int main(int argc, char** argv) {
             const QString previousSession = pendingPromptSession;
             const QJsonValue stalePromptId = pendingPromptId;
             sessionId = QString("mock-session-%1").arg(++sessionCounter);
-            send({{"jsonrpc", "2.0"}, {"id", id}, {"result", QJsonObject{{"sessionId", sessionId}}}});
+            QJsonObject created{{"sessionId", sessionId}};
+            if (configOptions) created.insert("configOptions", settings());
+            if (legacyModels) created.insert("models", QJsonObject{{"currentModelId", model}, {"availableModels", QJsonArray{
+                QJsonObject{{"modelId", "m1"}, {"name", "Model One"}}, QJsonObject{{"modelId", "m2"}, {"name", "Model Two"}}}}});
+            send({{"jsonrpc", "2.0"}, {"id", id}, {"result", created}});
             if (staleOnNewSession && !stalePromptId.isUndefined() && !stalePromptId.isNull()) {
                 // Emit stale update and stale prompt completion for the superseded session.
                 send({{"jsonrpc", "2.0"}, {"method", "session/update"}, {"params", QJsonObject{
@@ -160,6 +181,16 @@ int main(int argc, char** argv) {
                 pendingPromptSession.clear();
                 waitingCancel = false;
             }
+        } else if (method == "session/set_config_option" || method == "session/set_model") {
+            if (rejectConfig) {
+                send({{"jsonrpc", "2.0"}, {"id", id}, {"error", QJsonObject{{"code", -32602}, {"message", "Setting locked"}}}});
+                continue;
+            }
+            if (method == "session/set_model") model = params["modelId"].toString();
+            else if (params["configId"].toString() == "model") model = params["value"].toString();
+            else if (params["configId"].toString() == "effort") thinking = params["value"].toString();
+            if (model != "m2" && thinking == "max") thinking = "high";
+            send({{"jsonrpc", "2.0"}, {"id", id}, {"result", method == "session/set_model" ? QJsonObject{} : QJsonObject{{"configOptions", settings()}}}});
         } else if (method == "session/prompt") {
             pendingPromptId = id;
             pendingPromptSession = params["sessionId"].toString(sessionId);

@@ -81,6 +81,15 @@ private:
     QLabel* presetHint_ = nullptr;
     QPushButton* connectButton_ = nullptr;
     QPushButton* newSessionButton_ = nullptr;
+    // The session's model and thinking level, when the agent offers them; remembered per preset.
+    QWidget* sessionSettings_ = nullptr;
+    QComboBox* modelCombo_ = nullptr;
+    QComboBox* thinkingCombo_ = nullptr;
+    QString activePresetId_;
+    QStringList savedSettingsToApply_; // Categories still to restore for the new session, in order.
+    void refreshSessionSettings();
+    void applyNextSavedSetting();
+    void chooseSessionSetting(const QString& category, QComboBox* combo);
     QCheckBox* allowEditing_ = nullptr;
     QPushButton* undoButton_ = nullptr;
     QToolButton* logsToggle_ = nullptr;

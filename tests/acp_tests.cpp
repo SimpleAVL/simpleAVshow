@@ -702,6 +702,104 @@ private slots:
         }
     }
 
+    void sessionModelAndThinkingSettings() {
+        const auto option = [](const AcpClient& c, const QString& category) -> const AcpConfigOption* {
+            for (const auto& o : c.configOptions()) if (o.category == category) return &o;
+            return nullptr;
+        };
+        AcpClient client;
+        int changes = 0; QString lastError;
+        connect(&client, &AcpClient::configOptionsChanged, [&] { ++changes; });
+        connect(&client, &AcpClient::errorOccurred, [&](const QString& e) { lastError = e; });
+        client.connectToAgent(SAV_MOCK_ACP_AGENT, {"--http-mcp", "--config-options"}, QDir::tempPath(), {});
+        QTRY_COMPARE(client.state(), AcpState::Ready);
+        QVERIFY(option(client, "model") && option(client, "thought_level"));
+        QCOMPARE(option(client, "model")->currentValue, QString("m1"));
+        QCOMPARE(option(client, "model")->choices.size(), 2); // Grouped choices are flattened.
+        QCOMPARE(option(client, "thought_level")->choices.size(), 2);
+        QVERIFY(!client.setConfigOption("model", "no-such-model"));
+        // Changing the model takes the agent's answer, which here also adds a thinking level.
+        QVERIFY(client.setConfigOption("model", "m2"));
+        QCOMPARE(option(client, "model")->currentValue, QString("m2")); // Shown at once.
+        QTRY_VERIFY(!client.configChangePending());
+        QCOMPARE(option(client, "thought_level")->choices.size(), 3);
+        QVERIFY(client.setConfigOption("effort", "max"));
+        QTRY_COMPARE(option(client, "thought_level")->currentValue, QString("max"));
+        QTRY_VERIFY(!client.configChangePending());
+        client.disconnectFromAgent();
+        QVERIFY(client.configOptions().empty());
+
+        // A rejected change restores the previous value and keeps the session.
+        AcpClient locked;
+        connect(&locked, &AcpClient::errorOccurred, [&](const QString& e) { lastError = e; });
+        locked.connectToAgent(SAV_MOCK_ACP_AGENT, {"--http-mcp", "--config-options", "--reject-config"}, QDir::tempPath(), {});
+        QTRY_COMPARE(locked.state(), AcpState::Ready);
+        QVERIFY(locked.setConfigOption("model", "m2"));
+        QTRY_VERIFY(!locked.configChangePending());
+        QCOMPARE(option(locked, "model")->currentValue, QString("m1"));
+        QVERIFY(lastError.contains("Setting locked"));
+        QCOMPARE(locked.state(), AcpState::Ready);
+        locked.disconnectFromAgent();
+
+        // Agents that only list models use session/set_model.
+        AcpClient legacy;
+        legacy.connectToAgent(SAV_MOCK_ACP_AGENT, {"--http-mcp", "--legacy-models"}, QDir::tempPath(), {});
+        QTRY_COMPARE(legacy.state(), AcpState::Ready);
+        QVERIFY(option(legacy, "model") && option(legacy, "model")->legacyModel && !option(legacy, "thought_level"));
+        QVERIFY(legacy.setConfigOption("model", "m2"));
+        QTRY_VERIFY(!legacy.configChangePending());
+        QCOMPARE(option(legacy, "model")->currentValue, QString("m2"));
+        legacy.disconnectFromAgent();
+    }
+
+    void chatPanelRemembersModelAndThinkingPerAgent() {
+        MainWindow window;
+        window.controller().replace(demoProject());
+        window.show();
+        window.findChild<QPushButton*>("agentChatButton")->click();
+        auto* panel = window.findChild<AgentChatPanel*>("agentChatPanel");
+        auto* presetCombo = panel->findChild<QComboBox*>("agentPresetCombo");
+        auto* customCommand = panel->findChild<QLineEdit*>("agentCustomCommand");
+        auto* connectButton = panel->findChild<QPushButton*>("agentConnectButton");
+        auto* model = panel->findChild<QComboBox*>("agentModelCombo");
+        auto* thinking = panel->findChild<QComboBox*>("agentThinkingCombo");
+        QVERIFY(presetCombo && customCommand && connectButton && model && thinking);
+        QSettings().remove("agent/custom");
+        presetCombo->setCurrentIndex(presetCombo->findData("custom"));
+        customCommand->setText(QString("\"%1\" --http-mcp --config-options").arg(SAV_MOCK_ACP_AGENT));
+        connectButton->click();
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
+        QTRY_VERIFY(model->isVisible() && thinking->isVisible());
+        QCOMPARE(model->currentData().toString(), QString("m1"));
+        QCOMPARE(thinking->count(), 2);
+        // Choosing through the pickers changes the session and is remembered for this agent.
+        model->setCurrentIndex(model->findData("m2")); emit model->activated(model->currentIndex());
+        QTRY_COMPARE(thinking->count(), 3);
+        thinking->setCurrentIndex(thinking->findData("max")); emit thinking->activated(thinking->currentIndex());
+        QTRY_VERIFY(!panel->acpClient().configChangePending());
+        QCOMPARE(QSettings().value("agent/custom/model").toString(), QString("m2"));
+        QCOMPARE(QSettings().value("agent/custom/thought_level").toString(), QString("max"));
+        connectButton->click(); // Disconnect.
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
+        QVERIFY(!model->isVisible());
+        // Reconnecting restores both, the model first (max exists only for m2).
+        connectButton->click();
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
+        QTRY_COMPARE(thinking->currentData().toString(), QString("max"));
+        QCOMPARE(model->currentData().toString(), QString("m2"));
+        connectButton->click();
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
+        // An agent without these settings shows no pickers.
+        customCommand->setText(QString("\"%1\" --http-mcp").arg(SAV_MOCK_ACP_AGENT));
+        connectButton->click();
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
+        QVERIFY(!model->isVisible() && !thinking->isVisible());
+        connectButton->click();
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
+        QSettings().remove("agent/custom");
+        window.controller().dirty = false;
+    }
+
     void embeddedChatPanelAndShortcutSafety() {
         MainWindow window;
         window.controller().replace(demoProject());

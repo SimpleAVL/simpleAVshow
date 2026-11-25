@@ -505,7 +505,68 @@ void AcpClient::armDeadline(int ms, const QString& reason) {
 void AcpClient::setState(AcpState next) {
     if (state_ == next) return;
     state_ = next;
+    if (next == AcpState::Disconnected || next == AcpState::Error || next == AcpState::Connecting) clearConfigOptions();
     emit stateChanged(state_);
+}
+
+void AcpClient::clearConfigOptions() {
+    if (configOptions_.empty()) return;
+    configOptions_.clear();
+    emit configOptionsChanged();
+}
+
+bool AcpClient::readConfigOptions(const QJsonObject& source) {
+    constexpr int maxOptions = 32, maxChoices = 512;
+    std::vector<AcpConfigOption> options;
+    const auto addChoice = [](AcpConfigOption& option, const QJsonObject& choice) {
+        const QString value = choice["value"].toString();
+        if (!value.isEmpty() && option.choices.size() < maxChoices) option.choices.append({value, choice["name"].toString(value)});
+    };
+    if (source["configOptions"].isArray()) {
+        for (const auto& entry : source["configOptions"].toArray()) {
+            const auto o = entry.toObject();
+            if (o["type"].toString("select") != "select" || o["id"].toString().isEmpty()) continue;
+            AcpConfigOption option{o["id"].toString(), o["name"].toString(o["id"].toString()), o["category"].toString(),
+                                   o["currentValue"].toString(), {}, false};
+            for (const auto& item : o["options"].toArray()) {
+                const auto choice = item.toObject();
+                if (choice.contains("options")) for (const auto& grouped : choice["options"].toArray()) addChoice(option, grouped.toObject());
+                else addChoice(option, choice);
+            }
+            if (!option.choices.isEmpty() && static_cast<int>(options.size()) < maxOptions) options.push_back(std::move(option));
+        }
+    } else if (!source.contains("models")) return false; // Not a settings payload: keep what is known.
+    // Agents that predate config options may list models only (changed with session/set_model).
+    const auto models = source["models"].toObject();
+    if (!models.isEmpty() && std::none_of(options.begin(), options.end(), [](const auto& o) { return o.category == "model"; })) {
+        AcpConfigOption option{"model", "Model", "model", models["currentModelId"].toString(), {}, true};
+        for (const auto& item : models["availableModels"].toArray()) {
+            const auto m = item.toObject();
+            const QString id = m["modelId"].toString();
+            if (!id.isEmpty() && option.choices.size() < maxChoices) option.choices.append({id, m["name"].toString(id)});
+        }
+        if (!option.choices.isEmpty()) options.push_back(std::move(option));
+    }
+    configOptions_ = std::move(options);
+    emit configOptionsChanged();
+    return true;
+}
+
+bool AcpClient::setConfigOption(const QString& id, const QString& value) {
+    if (state_ != AcpState::Ready || sessionId_.isEmpty()) return false;
+    const auto it = std::find_if(configOptions_.begin(), configOptions_.end(), [&](const auto& o) { return o.id == id; });
+    if (it == configOptions_.end() || std::none_of(it->choices.begin(), it->choices.end(), [&](const auto& c) { return c.first == value; }))
+        return false;
+    if (it->currentValue == value) return true;
+    const QString previous = it->currentValue;
+    it->currentValue = value; // Shown at once; restored if the agent rejects it.
+    const int request = it->legacyModel
+        ? sendRequest("session/set_model", {{"sessionId", sessionId_}, {"modelId", value}}, PendingKind::SetConfig, sessionId_)
+        : sendRequest("session/set_config_option", {{"sessionId", sessionId_}, {"configId", id}, {"value", value}}, PendingKind::SetConfig, sessionId_);
+    pending_[request].configId = id;
+    pending_[request].previousValue = previous;
+    emit configOptionsChanged();
+    return true;
 }
 
 void AcpClient::connectToAgent(const QString& program, const QStringList& args, const QString& cwd, const AcpMcpConfig& mcp) {
@@ -941,6 +1002,16 @@ void AcpClient::handleResponse(int id, const QJsonObject& msg) {
         }
         return;
     }
+    if (kind == PendingKind::SetConfig) {
+        if (req.sessionId != sessionId_) return; // A setting for a session that has since been replaced.
+        if (hasError) {
+            const auto it = std::find_if(configOptions_.begin(), configOptions_.end(), [&](const auto& o) { return o.id == req.configId; });
+            if (it != configOptions_.end()) it->currentValue = req.previousValue;
+            emit errorOccurred("The agent did not accept that setting: " + msg["error"].toObject()["message"].toString("request failed"));
+            emit configOptionsChanged();
+        } else readConfigOptions(msg["result"].toObject()); // Changing one (a model) can change the others.
+        return;
+    }
     if (hasError) {
         const auto errObj = msg["error"].toObject();
         const int code = errObj["code"].toInt();
@@ -1016,6 +1087,7 @@ void AcpClient::handleResponse(int id, const QJsonObject& msg) {
             failConnection("ACP agent returned an empty sessionId.");
             return;
         }
+        if (!readConfigOptions(result)) clearConfigOptions();
         if (cancelTimer_.isActive()) {
             // Do not declare the replacement session Ready while an old cancelled prompt is still
             // unsettled and its cancel timer could still terminate the connection.
@@ -1040,7 +1112,9 @@ void AcpClient::handleNotification(const QString& method, const QJsonObject& par
     if (sessionId_.isEmpty() || !sessionVal.isString() || sessionVal.toString() != sessionId_) return;
     const auto update = params["update"].toObject();
     const QString kind = update.contains("sessionUpdate") ? update["sessionUpdate"].toString() : update["type"].toString();
-    if (kind == "agent_message_chunk") {
+    if (kind == "config_option_update") {
+        readConfigOptions(update);
+    } else if (kind == "agent_message_chunk") {
         const QString text = extractContentText(update["content"]);
         if (!text.isEmpty()) emit messageChunk(text);
     } else if (kind == "agent_thought_chunk") {
