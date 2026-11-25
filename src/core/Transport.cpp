@@ -189,6 +189,7 @@ bool Transport::rollbackRevokedSeeks(PendingPlayStart& pendingStart, bool onlyAf
             newer.prevSeekCueActive = older.prevSeekCueActive;
             newer.prevSeekCueSource = older.prevSeekCueSource;
             newer.prevSeekCueEpoch = older.prevSeekCueEpoch;
+            newer.prevSinceSeek = older.prevSinceSeek;
             if (older.afterPlay) {
                 newer.afterPlay = true;
                 newer.savedPlayPrevState = older.savedPlayPrevState;
@@ -264,6 +265,7 @@ bool Transport::rollbackRevokedSeeks(PendingPlayStart& pendingStart, bool onlyAf
         pendingStart.seekCueActive = entry.prevSeekCueActive;
         pendingStart.seekCueSource = entry.prevSeekCueSource;
         pendingStart.seekCueEpoch = entry.prevSeekCueEpoch;
+        sinceSeek_ = entry.prevSinceSeek; // The revoked seek never happened for health counters either.
         prime();
         rolledBack = true;
         compactBuriedInvalid();
@@ -369,6 +371,7 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
                 newer.prevSeekCueActive = older.prevSeekCueActive;
                 newer.prevSeekCueSource = older.prevSeekCueSource;
                 newer.prevSeekCueEpoch = older.prevSeekCueEpoch;
+                newer.prevSinceSeek = older.prevSinceSeek;
                 if (older.afterPlay) {
                     newer.afterPlay = true;
                     newer.savedPlayPrevState = older.savedPlayPrevState;
@@ -406,6 +409,7 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
                 entry.prevSeekCueActive = pendingStart.seekCueActive;
                 entry.prevSeekCueSource = pendingStart.seekCueSource;
                 entry.prevSeekCueEpoch = pendingStart.seekCueEpoch;
+                entry.prevSinceSeek = sinceSeek_;
                 pendingStart.seekRollbacks[slot] = entry;
                 savedSeekVoices_[slot] = voices_;
                 savedSeekActive_[slot] = active_;

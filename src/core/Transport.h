@@ -29,6 +29,50 @@ struct MidiEvent {
     std::uint64_t secondaryEpoch = 0;
 };
 
+// Snapshots of the transport before a revocable agent Seek/Play, restored if that agent is revoked.
+namespace transport_detail {
+struct SeekRollback {
+    CommandSource source = CommandSource::Operator;
+    std::uint64_t sourceEpoch = 0;
+    Frame prevPos = 0;
+    State prevState = State::Stopped;
+    int prevHeldMarker = -1;
+    std::size_t prevNextStart = 0;
+    std::size_t prevNextMarker = 0;
+    bool prevWasHeld = false;
+    std::size_t prevResumeBegin = 0, prevResumeEnd = 0;
+    CommandSource prevResumeSource = CommandSource::Operator;
+    std::uint64_t prevResumeEpoch = 0;
+    State prevResumePrevState = State::Stopped;
+    int prevResumePrevHeldMarker = -1;
+    bool afterPlay = false;
+    State savedPlayPrevState = State::Stopped;
+    int savedPlayPrevHeld = -1;
+    bool prevSeekCueActive = false;
+    CommandSource prevSeekCueSource = CommandSource::Operator;
+    std::uint64_t prevSeekCueEpoch = 0;
+    Frame prevSinceSeek = 0; // Seek-grace accounting before the seek, for health counters.
+};
+struct PendingPlayStart {
+    bool active = false;
+    CommandSource source = CommandSource::Operator;
+    std::uint64_t sourceEpoch = 0;
+    State prevState = State::Stopped;
+    int prevHeldMarker = -1;
+    bool wasHeld = false;
+    std::size_t begin = 0, end = 0;
+    CommandSource resumeSource = CommandSource::Operator;
+    std::uint64_t resumeEpoch = 0;
+    State resumePrevState = State::Stopped;
+    int resumePrevHeldMarker = -1;
+    bool seekCueActive = false;
+    CommandSource seekCueSource = CommandSource::Operator;
+    std::uint64_t seekCueEpoch = 0;
+    SeekRollback seekRollbacks[2]{};
+    int seekRollbackCount = 0;
+};
+}
+
 class Transport {
 public:
     static constexpr int fadeFrames = 120; // 2.5 ms de-click ramps for cut and mid-source voices.
@@ -132,45 +176,9 @@ private:
         if (command.source == CommandSource::ExternalAgent) return command.sourceEpoch == validExt;
         return command.sourceEpoch == validChat;
     }
-    struct SeekRollback {
-        CommandSource source = CommandSource::Operator;
-        std::uint64_t sourceEpoch = 0;
-        Frame prevPos = 0;
-        State prevState = State::Stopped;
-        int prevHeldMarker = -1;
-        std::size_t prevNextStart = 0;
-        std::size_t prevNextMarker = 0;
-        bool prevWasHeld = false;
-        std::size_t prevResumeBegin = 0, prevResumeEnd = 0;
-        CommandSource prevResumeSource = CommandSource::Operator;
-        std::uint64_t prevResumeEpoch = 0;
-        State prevResumePrevState = State::Stopped;
-        int prevResumePrevHeldMarker = -1;
-        bool afterPlay = false;
-        State savedPlayPrevState = State::Stopped;
-        int savedPlayPrevHeld = -1;
-        bool prevSeekCueActive = false;
-        CommandSource prevSeekCueSource = CommandSource::Operator;
-        std::uint64_t prevSeekCueEpoch = 0;
-    };
-    struct PendingPlayStart {
-        bool active = false;
-        CommandSource source = CommandSource::Operator;
-        std::uint64_t sourceEpoch = 0;
-        State prevState = State::Stopped;
-        int prevHeldMarker = -1;
-        bool wasHeld = false;
-        std::size_t begin = 0, end = 0;
-        CommandSource resumeSource = CommandSource::Operator;
-        std::uint64_t resumeEpoch = 0;
-        State resumePrevState = State::Stopped;
-        int resumePrevHeldMarker = -1;
-        bool seekCueActive = false;
-        CommandSource seekCueSource = CommandSource::Operator;
-        std::uint64_t seekCueEpoch = 0;
-        SeekRollback seekRollbacks[2]{};
-        int seekRollbackCount = 0;
-    };
+    // Declared at namespace scope: GCC rejects `= {}` resets of nested structs with member initializers.
+    using SeekRollback = transport_detail::SeekRollback;
+    using PendingPlayStart = transport_detail::PendingPlayStart;
     PendingPlayStart pendingStart_;
     std::vector<Voice> savedSeekVoices_[2];
     std::vector<std::size_t> savedSeekActive_[2];

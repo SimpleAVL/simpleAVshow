@@ -538,6 +538,18 @@ private slots:
         QVERIFY(c.edit([](Project& p) { Clip clip; clip.id = "v"; clip.assetId = "unused"; clip.track = 0; clip.duration = frames(1); p.show.clips.push_back(clip); }));
         QCOMPARE(c.missingMedia(), QStringList{"/nonexistent/unused.mov"});
     }
+    void unprobedMissingMediaIncludesConfirmedBackgroundResults() {
+        // Show mode never probes the filesystem; it must still report what the background check confirmed.
+        Controller c; auto project = newProject();
+        MediaAsset gone; gone.id = "gone"; gone.name = "Gone"; gone.video = true; gone.duration = 1; gone.path = "/nonexistent/gone.mov";
+        project.assets.insert(gone.id, gone);
+        Clip clip; clip.id = "v"; clip.assetId = "gone"; clip.track = 0; clip.duration = frames(1); project.show.clips.push_back(clip);
+        c.replace(project);
+        QVERIFY(c.missingMedia(false).isEmpty()); // Nothing confirmed yet, and nothing marked offline.
+        c.checkMediaInBackground(true);
+        QCOMPARE(c.missingMedia(false), QStringList{"/nonexistent/gone.mov"});
+        QCOMPARE(c.missingMedia(true), QStringList{"/nonexistent/gone.mov"});
+    }
     void missingMidiExplainsSetupAndDoesNotStartPlayback() {
         Controller c; auto project = newProject();
         project.show.markers = {{"midi", "Lighting cue", frames(1), false, MidiTiming::Arrival, {0xc0, 0}}};
@@ -1689,6 +1701,30 @@ private slots:
         QTest::newRow("ima-adpcm-mov") << QStringList{"-ar", "44100", "-c:a", "adpcm_ima_qt", "x.mov"} << false;
         QTest::newRow("mp3-in-mpeg-ps") << QStringList{"-ar", "44100", "-c:a", "libmp3lame", "-f", "vob", "x.mpg"} << true;
         QTest::newRow("vorbis-native-44k") << QStringList{"-ar", "44100", "-c:a", "vorbis", "-strict", "experimental", "x.ogg"} << true;
+    }
+    void cancellingAnImportAtAnyPointReportsCancellation() {
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
+        QTemporaryDir dir; const QString file = dir.filePath("tone.m4a"); QProcess process;
+        process.start(ffmpeg, QStringList{"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=4", "-c:a", "aac", file});
+        QVERIFY(process.waitForFinished(30000)); if (process.exitCode() != 0) QSKIP("aac encoder unavailable");
+        // Cancel after the n-th poll: wherever that lands (probing, opening the decoder, any read), the import
+        // fails as cancelled rather than with whatever FFmpeg makes of the interrupted read.
+        // Every attempt decodes from scratch: this file's summaries and caches are removed after each one.
+        QDir caches(detail::audioCacheDirectory()); const auto kept = caches.entryList(QDir::Files);
+        const auto forget = [&] { for (const auto& name : caches.entryList(QDir::Files)) if (!kept.contains(name)) caches.remove(name); };
+        for (const auto preparation : {AudioPreparation::Stream, AudioPreparation::Prepared}) {
+            int total = 0; const auto whole = loadMedia(file, preparation, [&] { ++total; return false; }); forget();
+            QVERIFY2(total > 8, "reads poll for cancellation");
+            for (int n = 0; n < total; n += std::max(1, total / 25)) {
+                int polls = 0;
+                try { (void)loadMedia(file, preparation, [&] { return ++polls > n; }); QFAIL("cancelled import succeeded"); }
+                catch (const std::exception& e) { QVERIFY2(QString::fromUtf8(e.what()).contains("cancelled", Qt::CaseInsensitive), e.what()); }
+                forget();
+            }
+            // Nothing a cancelled import left behind is reused: the next import is whole.
+            QCOMPARE(loadMedia(file, preparation).audio->length(), whole.audio->length()); forget();
+        }
+        setAudioPreparation(AudioPreparation::Stream);
     }
     void streamedAudioMatchesPreparedCache() {
         QFETCH(QStringList, encode); QFETCH(bool, exact);

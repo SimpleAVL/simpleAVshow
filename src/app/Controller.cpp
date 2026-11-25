@@ -717,8 +717,10 @@ void Controller::mediaToCheck(QStringList& offline, QStringList& needed) const {
 }
 QStringList Controller::missingMedia(bool probeFilesystem) const {
     QStringList missing, needed; mediaToCheck(missing, needed); // Each file is looked up once, however many clips use it.
-    // Without probing (Show mode, where a stalled share must not block), only offline assets are reported.
-    if (probeFilesystem) for (const auto& path : needed) if (!detail::present(path)) missing << path;
+    // Without probing (Show mode, where a stalled share must not block), report offline assets plus what
+    // the last background check confirmed missing.
+    if (!probeFilesystem) return lastMissingMedia(missing, needed);
+    for (const auto& path : needed) if (!detail::present(path)) missing << path;
     return missing;
 }
 QString Controller::mediaWarning(const QStringList& missing) {

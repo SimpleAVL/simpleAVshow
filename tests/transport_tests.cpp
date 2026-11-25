@@ -268,6 +268,28 @@ int main() {
             checkedRender(t, out.data(), 2048, 2); // Frames 10240-12287 straddle the 12000-frame grace.
             expect(t.audioGaps() == 1, "a gap past the grace counts even mid-callback");
         }},
+        {"a revoked agent seek restores the seek grace it started", [] {
+            auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto p = show(false); p->duration = storage->length(); p->clips[0].duration = p->duration; p->clips[0].audio = diskAudio(storage);
+            Transport t; t.configure(p); play(t); std::vector<float> out(2048 * 2);
+            for (int i = 0; i < 8; ++i) checkedRender(t, out.data(), 2048, 2); // Well past the grace of the start.
+            const Frame before = t.position();
+            expect(t.bufferWaits() == 0, "steady playback before the agent seek");
+            storage->delay.store(100); // Every block read from here on is late.
+            t.command({Action::Seek, frames(30 * 3600), CommandSource::ChatAgent, t.chatAgentEpoch()});
+            checkedRender(t, out.data(), 16, 2);
+            expect(t.position() == frames(30 * 3600) && t.bufferWaits() == 0, "the agent seek stalls inside its grace");
+            // While it stalls, the read-ahead fills every slot around the sought place, evicting the blocks
+            // after where playback was.
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
+            t.invalidateAllAgentCommands();
+            checkedRender(t, out.data(), 16, 2); // Rolls back to where playback was.
+            expect(t.position() >= before && t.position() < frames(30 * 3600), "revoking the seek restores the position");
+            // Playback continues on a slow disk: the next block misses about 8,200 frames after the seek was
+            // issued, inside its 12,000-frame grace. The revoked seek never happened, so that miss counts.
+            for (int i = 0; i < 5 && !t.bufferWaits(); ++i) checkedRender(t, out.data(), 2048, 2);
+            expect(t.bufferWaits() > 0, "a steady-state miss after a revoked seek is not hidden by its grace");
+        }},
         {"arming: a rejected show keeps the armed one, nothing plays unarmed", [] {
             Transport t; expect(!t.armed(), "a new transport is not armed");
             std::vector<float> out; render(t, 4, out); expect(out[0] == 0 && t.state() == State::Stopped, "unarmed renders silence");
