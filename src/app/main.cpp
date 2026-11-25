@@ -25,6 +25,9 @@ int main(int argc, char** argv) {
     // The MIDI and disk workers sleep 1 ms between polls; the default 15.6 ms tick would delay cues and read-ahead.
     timeBeginPeriod(1);
     struct TimerPeriod { ~TimerPeriod() { timeEndPeriod(1); } } timerPeriod;
+    // A card reader with no card (or a drive gone mid-show) must fail its file checks, not stop the show
+    // with a system "insert a disk" dialog.
+    SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS);
 #endif
     QApplication app(argc, argv);
     app.setStyle("Fusion"); app.setFont(QFont("Arial", 10));

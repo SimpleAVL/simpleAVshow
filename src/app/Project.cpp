@@ -774,8 +774,8 @@ void materializeProjectMedia(Project& p, const QString& directory, const std::fu
                     created.append(target); copied.insert(a.path, target);
                 }
                 a.path = copied.value(a.path);
-                // Direct PCM storage must follow the saved copy before package
-                // extraction is released. Converted sources reuse their disk cache.
+                // Direct and streamed storage must follow the saved copy before package
+                // extraction is released. Prepared sources reuse their disk cache.
                 if (a.audio) a.audio = loadMedia(a.path).audio;
                 continue;
             }

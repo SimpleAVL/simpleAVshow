@@ -1,6 +1,7 @@
 #include "app/MainWindow.h"
 #include "app/AgentChatPanel.h"
 #include "app/MidiMessageEditor.h"
+#include "media/AudioSources.h"
 #include <limits>
 #include <QApplication>
 #include <QAbstractItemView>
@@ -19,6 +20,7 @@
 #include <QGroupBox>
 #include <QDirIterator>
 #include <QGuiApplication>
+#include <QLocale>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QHBoxLayout>
@@ -267,7 +269,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
     edit->addAction("Copy clip", QKeySequence::Copy, this, [this] {
         if (const auto* clip = selectedClip()) {
             if (clip->track < 0 || static_cast<std::size_t>(clip->track) >= c_.project.show.tracks.size()) return;
-            clipboard_ = *clip;
+            // Paste binds audio by asset; holding it here would keep a replaced show's media open.
+            clipboard_ = *clip; clipboard_->audio.reset();
             clipboardVisual_ = c_.project.show.tracks[clip->track].visual;
             c_.report("Copied clip. Paste places it at the playhead on the selected track.");
         }
@@ -630,21 +633,25 @@ void MainWindow::updatePlayback() {
         (c_.needsMidi() ? (c_.midi.connected() ? " · MIDI connected" : c_.midiDestination().isEmpty() ? " · MIDI needs a device" : " · MIDI reconnects on Play") : "") +
         (c_.transport.clipped() ? " · CLIPPING" : "") + (c_.device.underruns() ? QString(" · %1 underruns").arg(c_.device.underruns()) : "") +
         (c_.transport.bufferWaits() ? QString(" · %1 audio waits").arg(c_.transport.bufferWaits()) : "") +
+        (c_.transport.audioGaps() ? QString(" · %1 audio gaps").arg(c_.transport.audioGaps()) : "") +
         (c_.transport.readRetries() ? QString(" · %1 disk retries").arg(c_.transport.readRetries()) : "") +
         (c_.lateFrames ? QString(" · %1 video waits").arg(c_.lateFrames) : ""));
     midiDestination_->setText(c_.midi.connected() ? "Destination: " + c_.midi.name() : c_.midiDestination().isEmpty() ? "Choose a MIDI device once; Play reconnects it automatically." : "On Play: reconnect to " + c_.midiDestination());
     health_->setToolTip(c_.device.running() ? "Audio: " + c_.audioName + "\nMIDI: " + (c_.midi.connected() ? c_.midi.name() : c_.needsMidi() ? "Choose a destination in Outputs" : "Not needed for this show") : "Play connects your remembered audio interface, or your default speakers on first use.");
     outputsButton_->setText(c_.needsMidi() && !c_.midi.connected() && c_.midiDestination().isEmpty() ? "Outputs · MIDI needed" : "Outputs");
     if (state == State::Held) {
-        const int index = c_.transport.heldMarker();
-        hint_->setText("HOLD — " + (index >= 0 && static_cast<std::size_t>(index) < c_.project.show.markers.size() ? QString::fromStdString(c_.project.show.markers[index].name) : "") + "  ·  Press Space to continue" + async);
+        const int index = c_.transport.heldMarker(); const QString media = c_.missingMediaWarning();
+        hint_->setText("HOLD — " + (index >= 0 && static_cast<std::size_t>(index) < c_.project.show.markers.size() ? QString::fromStdString(c_.project.show.markers[index].name) : "") + "  ·  Press Space to continue" + async +
+            // A hold must not hide a problem: missing media keeps its own line next to any other.
+            (media.isEmpty() ? QString() : "  ·  ⚠  " + media) +
+            (c_.playbackProblem.isEmpty() || c_.playbackProblem == media ? QString() : "  ·  ⚠  " + c_.playbackProblem));
     } else if (!c_.playbackProblem.isEmpty()) hint_->setText("⚠  " + c_.playbackProblem + (c_.showMode ? " Leave Show mode to change Outputs." : ""));
     else if (c_.project.show.clips.empty() && c_.project.show.markers.empty()) hint_->setText("Start with + Import media or + Text. Press Play to use your speakers automatically.");
     else hint_->setText(c_.showMode ? "SHOW MODE  ·  Space: play / pause  ·  Escape twice: Stop All" : "Space: play / pause  ·  Escape: Stop All  ·  Ruler: seek  ·  Edges: trim");
     const bool problem = state != State::Held && !c_.playbackProblem.isEmpty();
     hint_->setStyleSheet(state == State::Held ? "color: #e5c47d; font-weight: 600;" :
         problem ? "color: #ffd7d2; background: #5a2523; border-radius: 4px; padding: 6px 8px;" : "color: #8fa8c9;");
-    health_->setStyleSheet(c_.transport.clipped() || c_.device.underruns() || c_.transport.bufferWaits() || c_.transport.readRetries() || c_.lateFrames ? "color: #f0a66e;" : "color: #92a8c6;");
+    health_->setStyleSheet(c_.transport.clipped() || c_.device.underruns() || c_.transport.bufferWaits() || c_.transport.audioGaps() || c_.transport.readRetries() || c_.lateFrames ? "color: #f0a66e;" : "color: #92a8c6;");
     inspector_->setEnabled(c_.canEdit(false));
     const auto picture = c_.compose(); preview_->setPicture(picture); if (output_) output_->setPicture(picture);
 }
@@ -888,7 +895,8 @@ void MainWindow::dropEvent(QDropEvent* event) {
 }
 void MainWindow::relinkMedia(bool afterOpening) {
     QStringList missing;
-    for (const auto& a : c_.project.assets) if (a.offline) missing << a.name + "  —  " + a.problem;
+    // Files can vanish after opening too: anything playback needs and cannot find is offered.
+    for (const auto& a : c_.project.assets) if (Controller::needsRelink(a)) missing << a.name + "  —  " + (a.offline ? a.problem : "The file is no longer at " + a.path);
     if (missing.isEmpty()) { if (!afterOpening) c_.report("All media is online."); return; }
     if (!c_.canEdit()) return;
     const quint64 initialRev = c_.projectRevision();
@@ -905,7 +913,7 @@ void MainWindow::relinkMedia(bool afterOpening) {
     if (!c_.canEdit() || c_.projectRevision() != initialRev) { c_.report("Relink cancelled because the show changed."); return; }
     // Search by file name below the chosen folder, then load matches off the GUI thread.
     QMap<QString, QString> wanted; // Lower-case file name → asset id.
-    for (const auto& a : c_.project.assets) if (a.offline) wanted.insert(QFileInfo(a.path).fileName().toLower(), a.id);
+    for (const auto& a : c_.project.assets) if (Controller::needsRelink(a)) wanted.insert(QFileInfo(a.path).fileName().toLower(), a.id);
     if (wanted.isEmpty()) { c_.report("All media is online."); return; }
     const quint64 lease = c_.acquireBusy();
     if (!lease) { c_.report("Wait for the current file operation to finish"); return; }
@@ -915,12 +923,17 @@ void MainWindow::relinkMedia(bool afterOpening) {
     connect(watcher, &QFutureWatcher<MediaResult>::finished, this, [this, watcher, progress, lease, expectedRev] {
         const auto result = watcher->result(); c_.releaseBusy(lease); progress->deleteLater(); watcher->deleteLater();
         if (!c_.canEdit() || c_.projectRevision() != expectedRev) { c_.report("Relink discarded because the show changed while searching."); return; }
-        if (!result.assets.empty()) c_.edit([&](Project& p) { for (const auto& a : result.assets) p.assets.insert(a.id, a); });
-        int remaining = 0; for (const auto& a : c_.project.assets) remaining += a.offline;
-        const QString summary = QString("Relinked %1 media file%2.").arg(result.assets.size()).arg(result.assets.size() == 1 ? "" : "s") +
+        // A replacement the show cannot use (shorter than a clip needs) is rejected as a whole; say why.
+        auto errors = result.errors; std::size_t relinked = 0;
+        if (!result.assets.empty()) {
+            if (c_.edit([&](Project& p) { for (const auto& a : result.assets) p.assets.insert(a.id, a); })) relinked = result.assets.size();
+            else errors << "The found files do not fit the show: " + c_.status;
+        }
+        int remaining = 0; for (const auto& a : c_.project.assets) remaining += Controller::needsRelink(a);
+        const QString summary = QString("Relinked %1 media file%2.").arg(relinked).arg(relinked == 1 ? "" : "s") +
             (remaining ? QString(" %1 still missing.").arg(remaining) : "");
-        if (!result.errors.isEmpty()) QMessageBox::warning(this, "Some media could not be relinked", summary + "\n\n" + result.errors.join("\n\n"));
-        c_.report(summary); if (!remaining) c_.playbackProblem.clear();
+        if (!errors.isEmpty()) QMessageBox::warning(this, "Some media could not be relinked", summary + "\n\n" + errors.join("\n\n"));
+        c_.report(summary); if (!remaining && !c_.armFailed()) c_.playbackProblem.clear(); // Still disarmed: keep that warning.
     });
     const auto offline = c_.project.assets;
     watcher->setFuture(QtConcurrent::run([folder, wanted, offline]() {
@@ -933,6 +946,45 @@ void MainWindow::relinkMedia(bool afterOpening) {
                 auto a = loadMedia(path); const auto& entry = offline[wanted.value(key)];
                 a.id = entry.id; a.name = entry.name; result.assets.push_back(std::move(a));
             } catch (const std::exception& e) { result.errors << QFileInfo(path).fileName() + ": " + QString::fromUtf8(e.what()); }
+        }
+        return result;
+    }));
+}
+void MainWindow::reloadAudio(AudioPreparation previous) {
+    // Undo and redo can bring back assets the show no longer holds; they are prepared too.
+    const auto paths = c_.audioSources();
+    if (paths.isEmpty()) { c_.report(audioPreparation() == AudioPreparation::Prepared ? "Audio will be prepared when imported." : "Audio will stream from media files."); return; }
+    const quint64 lease = c_.acquireBusy();
+    if (!lease) {
+        // The show keeps its sources, so the preference does too.
+        c_.setAudioPreparation(previous); c_.report("Audio sources were not changed: wait for the current file operation to finish"); return;
+    }
+    const bool preparing = audioPreparation() == AudioPreparation::Prepared;
+    auto* progress = new QProgressDialog(preparing ? "Preparing audio for playback…" : "Switching audio to stream from media files…", QString(), 0, 0, this);
+    progress->setWindowModality(Qt::WindowModal); progress->setMinimumDuration(0); progress->show();
+    using Reloaded = std::pair<QMap<QString, std::shared_ptr<const AudioData>>, QStringList>;
+    auto* watcher = new QFutureWatcher<Reloaded>(this);
+    connect(watcher, &QFutureWatcher<Reloaded>::finished, this, [this, watcher, progress, preparing, previous, lease] {
+        const auto [audio, errors] = watcher->result(); c_.releaseBusy(lease); progress->deleteLater(); watcher->deleteLater();
+        const auto outcome = audio.isEmpty() ? Controller::AudioSwap::Applied : c_.replaceAudio(audio);
+        if (outcome == Controller::AudioSwap::Rejected) {
+            // The show could not use the reloaded audio; it keeps its sources, so the preference does too.
+            const auto reason = c_.status; c_.setAudioPreparation(previous);
+            c_.report("Audio sources were not changed: " + reason); return;
+        }
+        if (outcome == Controller::AudioSwap::ArmFailed) return; // The new sources stay; the failure stays on screen.
+        if (!errors.isEmpty()) QMessageBox::warning(this, "Some audio kept its previous preparation", errors.join("\n\n"));
+        else c_.report(QString("Audio sources set to %1; reloaded %2 audio sources.").arg(preparing ? "Prepared cache" : "Stream").arg(audio.size()));
+    });
+    watcher->setFuture(QtConcurrent::run([paths, preparation = audioPreparation()]() {
+        Reloaded result;
+        for (const auto& path : paths) {
+            try {
+                auto audio = loadMedia(path, preparation).audio;
+                if (!audio) throw std::runtime_error("The file no longer contains audio");
+                result.first.insert(path, std::move(audio));
+            }
+            catch (const std::exception& e) { result.second << QFileInfo(path).fileName() + ": " + QString::fromUtf8(e.what()); }
         }
         return result;
     }));
@@ -1076,6 +1128,41 @@ void MainWindow::outputSettings() {
     connect(audioApply, &QPushButton::clicked, &dialog, useAudio);
     connect(devices, &QComboBox::activated, &dialog, useAudio);
     auto* routing = new QLabel("Track routing is edited in the track inspector.\nGuide and Click start disconnected. For one interface with four outputs,\nuse Main 1/2, Guide 3/Off, Click 4/Off. Windows: prefer the interface's ASIO driver."); routing->setWordWrap(true); form->addRow(routing);
+    auto* playbackBox = new QGroupBox("Playback · audio reliability"); auto* playbackForm = new QFormLayout(playbackBox); layout->addWidget(playbackBox);
+    auto* sources = new QComboBox; sources->setObjectName("audioSourcePreparation");
+    sources->addItem("Stream from media files · fast import", static_cast<int>(AudioPreparation::Stream));
+    sources->addItem("Prepared cache · steadiest playback", static_cast<int>(AudioPreparation::Prepared));
+    sources->setCurrentIndex(sources->findData(static_cast<int>(audioPreparation())));
+    sources->setToolTip("Streaming decodes compressed audio while the show plays, so imports are quick while building a show.\n"
+        "Prepared decodes everything once into a disk cache before playback; choose it on the show machine before a performance.");
+    auto* late = new QComboBox; late->setObjectName("lateAudioPolicy");
+    late->addItem("Freeze show time until it is ready", static_cast<int>(LateAudio::Freeze));
+    late->addItem("Keep time and leave a short gap", static_cast<int>(LateAudio::Gap));
+    late->setCurrentIndex(late->findData(static_cast<int>(c_.transport.lateAudio())));
+    late->setToolTip("Freeze keeps every track, cue and hold aligned, but the show runs slightly late.\n"
+        "Gap keeps the show on time with outside clocks (a band, timecode, external video); only the late sound drops out briefly.");
+    playbackForm->addRow("Audio sources", sources); playbackForm->addRow("If audio is late", late);
+    auto* clearCache = button("Clear audio cache"); clearCache->setObjectName("clearAudioCache");
+    auto showCacheSize = [clearCache] { clearCache->setText("Clear audio cache · " + QLocale().formattedDataSize(detail::audioCacheBytes())); };
+    showCacheSize(); playbackForm->addRow(clearCache);
+    clearCache->setToolTip("Removes prepared audio and waveform files the open show is not using. Other shows prepare or measure their audio again when opened.");
+    connect(clearCache, &QPushButton::clicked, &dialog, [this, showCacheSize] {
+        const auto before = detail::audioCacheBytes(); detail::trimAudioCache(0); const auto after = detail::audioCacheBytes();
+        // What remains is in use (by this show or another running instance), the small source index, or
+        // everything when another instance is trimming at the same moment.
+        c_.report("Freed " + QLocale().formattedDataSize(std::max<qint64>(0, before - after)) + " of audio cache." +
+            (after > 0 ? " " + QLocale().formattedDataSize(after) + " remains in the cache." : QString()));
+        showCacheSize();
+    });
+    connect(late, &QComboBox::activated, &dialog, [&] { c_.setLateAudio(static_cast<LateAudio>(late->currentData().toInt())); });
+    connect(sources, &QComboBox::activated, &dialog, [&] {
+        const auto chosen = static_cast<AudioPreparation>(sources->currentData().toInt()), previous = audioPreparation();
+        // Choosing the current mode again retries sources still on the other one (after a failed reload).
+        if (chosen == previous && !c_.audioDiffersFrom(chosen)) return;
+        if (!c_.canEdit()) { sources->setCurrentIndex(sources->findData(static_cast<int>(previous))); return; }
+        // The reload's outcome (possibly restoring previous) is reported in the editor, not this dialog.
+        c_.setAudioPreparation(chosen); dialog.reject(); reloadAudio(previous);
+    });
     auto* midiBox = new QGroupBox("MIDI · control lights, instruments or other apps"); auto* midiForm = new QFormLayout(midiBox); layout->addWidget(midiBox);
     auto* midiHint = new QLabel("Only needed for cues that send MIDI. Choose a destination once; selecting it connects immediately and Play reconnects it next time.");
     midiHint->setWordWrap(true); midiForm->addRow(midiHint);
@@ -1120,8 +1207,10 @@ void MainWindow::outputSettings() {
         }
         wasEditable = editable;
         const QString reason = editable ? QString() : "Use Stop All before changing audio or MIDI connections; this stops any running async audio or video.";
-        for (QWidget* control : std::initializer_list<QWidget*>{api, devices, channels, buffer, midiPort, midiConnect, refreshPorts}) {
-            control->setEnabled(editable); control->setToolTip(reason);
+        for (QWidget* control : std::initializer_list<QWidget*>{api, devices, channels, buffer, sources, midiPort, midiConnect, refreshPorts}) {
+            // The lock reason replaces a control's own guidance only while locked.
+            if (!control->property("guidance").isValid()) control->setProperty("guidance", control->toolTip());
+            control->setEnabled(editable); control->setToolTip(editable ? control->property("guidance").toString() : reason);
         }
         const bool audioAvailable = devices->currentData().isValid();
         audioApply->setEnabled(editable && audioAvailable);

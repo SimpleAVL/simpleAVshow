@@ -86,6 +86,7 @@ private:
     void invalidatePreviews();
     QString importId_, importState_, importError_;
     std::vector<MediaAsset> imported_;
+    AudioPreparation importPreparation_ = AudioPreparation::Stream;
     void acceptConnection();
     void dispatch(const QJsonObject& request, const QString& bearerToken, const QString& clientScope,
                   std::shared_ptr<std::atomic<bool>> cancelled,

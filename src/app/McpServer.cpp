@@ -649,6 +649,11 @@ QJsonObject McpServer::environmentReport() const {
         {"clipped", c_.transport.clipped()},
         {"buffer_waits", static_cast<int>(c_.transport.bufferWaits())},
         {"read_retries", static_cast<int>(c_.transport.readRetries())},
+        // Late-audio policy and source preparation are operator choices in Outputs (read-only here).
+        {"late_audio", c_.transport.lateAudio() == LateAudio::Gap ? "gap" : "freeze"},
+        {"audio_gaps", static_cast<int>(c_.transport.audioGaps())},
+        {"audio_sources", audioPreparation() == AudioPreparation::Prepared ? "prepared" : "stream"},
+        {"armed", c_.transport.armed() && !c_.armFailed()},
         {"late_video_frames", static_cast<int>(c_.lateFrames)},
         {"playback_problem", c_.playbackProblem},
         {"probed", safeToProbe}
@@ -2009,6 +2014,8 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, const QStrin
             checkWrite(a);
             if (importState_ != "ready") fail("Import job is not ready to commit");
             if (c_.showEpoch() != importShowEpoch_) fail("Staged import belongs to a different show; re-import media for the current show");
+            // Staged audio was prepared for the preference at import time; committing it under another would mix the two.
+            if (importPreparation_ != audioPreparation()) fail("The operator changed Audio sources since this import was prepared. Import the files again");
             if (!c_.edit([&](Project& p) { for (const auto& asset : imported_) p.assets.insert(asset.id, asset); })) fail(c_.status);
             importState_ = "committed";
             const QString summary = QString("Agent imported %1 media file%2.").arg(imported_.size()).arg(imported_.size() == 1 ? "" : "s");
@@ -2038,6 +2045,7 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, const QStrin
         importCancelled_ = std::make_shared<std::atomic<bool>>(false);
         importId_ = newId(); importState_ = "preparing"; importError_.clear(); imported_.clear();
         importShowEpoch_ = c_.showEpoch();
+        importPreparation_ = audioPreparation();
         importOwnerBearer_ = bearerToken;
         ++activeAsyncJobs_;
         const quint64 jobGen = generation_;
@@ -2074,7 +2082,7 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, const QStrin
             importError_ = prepared.error; imported_ = prepared.assets; importState_ = importError_.isEmpty() ? "ready" : "failed";
             c_.report(importState_ == "ready" ? "Agent media is prepared and waiting to be added to the show." : "Agent media preparation failed: " + importError_);
         });
-        watcher->setFuture(QtConcurrent::run([paths, editCancelled, importCancelled] {
+        watcher->setFuture(QtConcurrent::run([paths, editCancelled, importCancelled, preparation = importPreparation_] {
             Prepared result;
             auto isCancelled = [editCancelled, importCancelled]() { return editCancelled->load() || importCancelled->load(); };
             try {
@@ -2084,7 +2092,7 @@ void McpServer::callTool(const QString& name, const QJsonObject& a, const QStrin
                         result.assets.clear();
                         return result;
                     }
-                    result.assets.push_back(loadMedia(path, isCancelled));
+                    result.assets.push_back(loadMedia(path, preparation, isCancelled));
                 }
             } catch (const std::exception& e) { result.error = QString::fromUtf8(e.what()); result.assets.clear(); }
             return result;

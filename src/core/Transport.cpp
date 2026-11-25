@@ -80,6 +80,24 @@ void Transport::cut(std::size_t i) noexcept {
 }
 void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
     if (!show || show->duration <= 0 || show->duration > maxFrame) throw std::invalid_argument("Invalid show duration");
+    // Failing partway (out of memory, no worker thread) must not leave voices without their buffers:
+    // the transport disarms instead, rendering silence until a configure succeeds.
+    armed_.store(false);
+    try { load(std::move(show), position); } catch (...) { disarm(); throw; }
+    armed_.store(true);
+}
+void Transport::disarm() noexcept {
+    stopAudioWorker();
+    show_.reset(); buffers_.clear(); voices_.clear(); releases_.clear(); releasing_.clear();
+    starts_.clear(); markers_.clear(); active_.clear(); pictures_.clear();
+    publishedSourceCount_ = 0; publishedSources_.reset(); state_ = State::Stopped; heldMarker_ = -1;
+    publishedState_.store(State::Stopped); publishedVoices_.store(0); armed_.store(false);
+    pendingStart_ = {}; // Rollback snapshots refer to the dropped show's voices.
+    // Queued cues belong to the dropped show; a new epoch also tells consumers to discard any in flight.
+    MidiEvent event; while (midi_.pop(event)) {}
+    epoch_.fetch_add(1);
+}
+void Transport::load(std::shared_ptr<const Show> show, Frame position) {
     stopAudioWorker();
     audioReadFailed_.store(false);
     // Edits re-arm often: unchanged disk clips keep their read-ahead and only retarget their entry.
@@ -127,7 +145,7 @@ void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
     locate(position_);
     state_ = State::Stopped; heldMarker_ = -1;
     epoch_.fetch_add(1);
-    clipped_.store(false); overflow_.store(false); bufferWaits_.store(0); readRetries_.store(0);
+    clipped_.store(false); overflow_.store(false); bufferWaits_.store(0); readRetries_.store(0); audioGaps_.store(0); sinceSeek_ = seekGrace;
     if (std::any_of(buffers_.begin(), buffers_.end(), [](const auto& buffer) { return bool(buffer); })) {
         audioStop_.store(false);
         audioWorker_ = std::thread([this] {
@@ -414,7 +432,7 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
             if (!show_->clips[i].contains(next)) { cut(i); voices_[i] = {}; }
             else if (voices_[i].audible && next != position_ && !show_->tracks[show_->clips[i].track].async) cut(i); // A normal source jumps.
         }
-        position_ = next; heldMarker_ = -1; locate(next);
+        position_ = next; heldMarker_ = -1; locate(next); sinceSeek_ = 0;
         if (state_ != State::Playing) state_ = State::Paused;
         // Operator seeks commit immediately; revocable agent seeks defer bumping the global MIDI
         // epoch until the seek actually commits so a rolled-back seek never drops earlier Operator MIDI.
@@ -637,7 +655,8 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
         if (pendingStart.seekRollbackCount > 0) epoch_.fetch_add(1);
         pendingStart.seekRollbackCount = 0;
     }
-    float peak = 0; bool waiting = false;
+    float peak = 0; bool waiting = false, gapCounted = false;
+    const bool gap = lateAudio_.load(std::memory_order_relaxed) == LateAudio::Gap;
     // Stay on the start-of-callback transaction boundary until a sample actually commits
     // (!waiting && !rolledBackOnReady), so a rollback on f == 0 still dispatches restored
     // Operator hold-resume MIDI before advancing to the next frame in the same callback.
@@ -669,6 +688,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 rollbackRevokedSeeks(pendingStart, false);
             }
             const bool advancingAtBoundary = state_ == State::Playing;
+            bool gapped = false; // This frame left a late voice silent.
             // Defer consuming markers/MIDI, starting dormant async voices, and removing expired clips
             // until disk readiness and live authorization both succeed so a cache miss (including on
             // a seek into an async clip at a hold) never leaves holds consumed while voices stay Dormant.
@@ -717,8 +737,9 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             bool ready = true;
             bool hasExpired = false;
             const bool playNormal = state_ == State::Playing && !holdAtPos;
-            // Resolve all sources before mixing: a cache miss freezes the whole
-            // sample clock, so tracks remain aligned and no source frames are lost.
+            // Resolve all sources before mixing. Under Freeze a miss stops the whole sample
+            // clock, so tracks remain aligned and no source frames are lost; under Gap only
+            // the late voice falls silent while show time and async cursors keep moving.
             // Do NOT mutate Dormant async voices to Running or Finished until !waiting && !rolledBackOnReady.
             if (!willEnd) for (std::size_t cursor = 0; cursor < active_.size(); ++cursor) {
                 const auto i = active_[cursor]; const auto& clip = show_->clips[i]; const auto& track = show_->tracks[clip.track]; auto& voice = voices_[i];
@@ -746,14 +767,22 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 if (track.async && voice.state == VoiceState::Running) voice.source = source; // Keep loops' cursors bounded, including long holds.
                 if (track.muted || track.visual) continue;
                 if (buffers_[i]) {
-                    if (!buffers_[i]->sample(source, voice.left, voice.right)) { ready = false; continue; }
+                    if (!buffers_[i]->sample(source, voice.left, voice.right)) {
+                        if (gap) { voice.missed = gapped = true; continue; }
+                        ready = false; continue;
+                    }
                 } else {
                     voice.left = clip.audio->samples[source * 2]; voice.right = clip.audio->samples[source * 2 + 1];
                 }
-                if (!voice.audible && !track.async && source != clip.offset) voice.attack = fadeFrames; // Entering mid-source fades in.
+                // Entering mid-source, or returning after a gap, fades in.
+                if (!voice.audible && ((!track.async && source != clip.offset) || voice.missed)) voice.attack = fadeFrames;
+                voice.missed = false;
                 voice.at = source; voice.ready = true;
             }
-            if (!ready) { bufferWaits_.fetch_add(1, std::memory_order_relaxed); waiting = true; }
+            // Health counters skip misses within seekGrace device frames of a seek, judged at the missed frame.
+            const bool counted = sinceSeek_ + static_cast<Frame>(f) >= seekGrace;
+            if (!ready) { if (counted) bufferWaits_.fetch_add(1, std::memory_order_relaxed); waiting = true; }
+            gapCounted = gapCounted || (gapped && counted);
             bool seekRolledBackOnReady = false;
             if (!waiting && startBoundary && (pendingStart.seekRollbackCount > 0 || pendingStart.active || pendingStart.wasHeld)) {
                 if (rollbackRevokedSeeks(pendingStart, true)) { rolledBackOnReady = true; seekRolledBackOnReady = true; }
@@ -931,6 +960,8 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             if (state_ == State::Playing) ++position_;
         }
     }
+    if (gapCounted) audioGaps_.fetch_add(1, std::memory_order_relaxed);
+    sinceSeek_ = std::min(seekGrace, sinceSeek_ + static_cast<Frame>(count));
     publish(peak);
 }
 void Transport::publish(float peak) noexcept {

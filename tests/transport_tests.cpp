@@ -230,7 +230,7 @@ int main() {
             storage->delay.store(30);
             const Frame destination = frames(30 * 3600) + 123;
             t.command({Action::Seek, destination}); checkedRender(t, out, 1, 2);
-            expect(t.position() == destination && t.bufferWaits() == 1, "seek miss freezes sample clock");
+            expect(t.position() == destination && t.bufferWaits() == 0, "seek miss freezes sample clock without counting a wait");
             near(out[0], (PatternStorage::value(1) + .2) * (fade - 1) / fade, "all tracks wait together; only the old frames fade out");
             for (int i = 0; i < 1000 && t.position() == destination; ++i) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1)); checkedRender(t, out, 1, 2);
@@ -239,6 +239,53 @@ int main() {
             std::vector<float> after(fade * 2); checkedRender(t, after.data(), fade, 2);
             near(after[(fade - 1) * 2], PatternStorage::value(destination + fade) + .1 * (1 + (destination + fade) % 4), "recovery skips no samples on either track");
             expect(!storage->callbackReads.load(), "seek never reads disk on callback");
+        }},
+        {"gap policy keeps show time running and returns the late track in sync", [] {
+            auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto p = show(false); p->duration = storage->length(); p->clips[0].duration = p->duration; p->clips[0].audio = diskAudio(storage);
+            auto companion = p->clips[0]; companion.audio = audio({.1f, .2f, .3f, .4f}); companion.loop = true; p->clips.push_back(companion);
+            Transport t; t.setLateAudio(LateAudio::Gap); t.configure(p); play(t); float out[2]; checkedRender(t, out, 1, 2);
+            storage->delay.store(30);
+            const Frame destination = frames(30 * 3600) + 123;
+            t.command({Action::Seek, destination}); checkedRender(t, out, 1, 2);
+            expect(t.position() == destination + 1 && t.bufferWaits() == 0 && t.audioGaps() == 0, "a seek miss leaves an uncounted gap instead of freezing");
+            near(out[0], (PatternStorage::value(1) + .2) * (fade - 1) / fade + .1 * (1 + destination % 4) / fade, "the resident track keeps playing on time");
+            std::this_thread::sleep_for(std::chrono::milliseconds(200)); // The late block arrives.
+            std::vector<float> after(fade * 2 * 2); checkedRender(t, after.data(), fade * 2, 2);
+            const Frame last = destination + fade * 2;
+            near(after[(fade * 2 - 1) * 2], PatternStorage::value(last) + .1 * (1 + last % 4), "the late track returns at show time, not where it stopped");
+            t.setLateAudio(LateAudio::Freeze); expect(t.lateAudio() == LateAudio::Freeze, "policy switches live");
+            expect(!storage->callbackReads.load(), "gaps never read disk on callback");
+        }},
+        {"the seek grace ends at its frame, not at the next callback", [] {
+            auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto p = show(false); p->duration = storage->length(); p->clips[0].duration = p->duration; p->clips[0].audio = diskAudio(storage);
+            Transport t; t.setLateAudio(LateAudio::Gap); t.configure(p); play(t);
+            storage->delay.store(300); // The sought block stays late for the whole test.
+            t.command({Action::Seek, frames(30 * 3600)}); std::vector<float> out(2048 * 2);
+            for (int i = 0; i < 5; ++i) checkedRender(t, out.data(), 2048, 2);
+            expect(t.audioGaps() == 0, "gaps inside the grace are not counted");
+            checkedRender(t, out.data(), 2048, 2); // Frames 10240-12287 straddle the 12000-frame grace.
+            expect(t.audioGaps() == 1, "a gap past the grace counts even mid-callback");
+        }},
+        {"arming: a rejected show keeps the armed one, nothing plays unarmed", [] {
+            Transport t; expect(!t.armed(), "a new transport is not armed");
+            std::vector<float> out; render(t, 4, out); expect(out[0] == 0 && t.state() == State::Stopped, "unarmed renders silence");
+            t.configure(show()); expect(t.armed(), "configure arms");
+            auto invalid = show(); invalid->duration = 0;
+            try { t.configure(invalid); expect(false, "invalid show accepted"); } catch (const std::invalid_argument&) {}
+            expect(t.armed(), "a show rejected before loading leaves the armed one"); play(t); render(t, 1, out); near(out[0], .1, "and it still plays");
+        }},
+        {"late sources count as waits or gaps only outside the seek grace", [] {
+            for (const auto policy : {LateAudio::Freeze, LateAudio::Gap}) {
+                auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));
+                auto p = show(false); p->duration = storage->length(); p->clips[0].duration = p->duration; p->clips[0].audio = diskAudio(storage);
+                Transport t; t.setLateAudio(policy); t.configure(p); play(t);
+                // Playing faster than a slow disk reads drains the read-ahead during steady playback.
+                storage->delay.store(50); std::vector<float> out(AudioBuffer::blockFrames * 2);
+                for (int i = 0; i < 8 && !(t.bufferWaits() || t.audioGaps()); ++i) checkedRender(t, out.data(), AudioBuffer::blockFrames, 2);
+                expect(policy == LateAudio::Freeze ? t.bufferWaits() > 0 && !t.audioGaps() : t.audioGaps() > 0 && !t.bufferWaits(), "a steady-state miss is counted");
+            }
         }},
         {"disk async loop keeps offset through hold, pause, seek, and Stop All", [] {
             auto storage = std::make_shared<PatternStorage>(17003);
