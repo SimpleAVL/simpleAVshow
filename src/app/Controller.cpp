@@ -12,6 +12,14 @@
 #include <set>
 
 namespace sav {
+namespace {
+// What a failed video layer shows: its last picture if it ever drew one, otherwise nothing.
+QString videoFallback(bool hadPicture) {
+    return hadPicture ? QStringLiteral(" The picture holds its last frame; audio continues.")
+                      : QStringLiteral(" This clip shows nothing until its file can be read again; audio continues.");
+}
+}
+
 Controller::Controller(QObject* parent) : QObject(parent), project(newProject()), device(transport) {
     midiName_ = QSettings().value("midi/port").toString();
     transport.setLateAudio(QSettings().value("audio/late").toString() == "gap" ? LateAudio::Gap : LateAudio::Freeze);
@@ -677,7 +685,7 @@ QImage Controller::compose() {
                         error = it->second->error();
                         if (!error.isEmpty() && !videoErrors_.contains(c.id)) {
                             videoErrors_.insert(c.id);
-                            report("Video error in " + a.name + ": " + error + " The picture holds its last frame; audio continues.");
+                            report("Video error in " + a.name + ": " + error + videoFallback(!source.isNull() || clipFrames_.contains(c.id)));
                             playbackProblem = videoProblems_[c.id] = status;
                         }
                         if (!error.isEmpty()) recovering_.erase(c.id); // Failed again: no longer polled every frame.
@@ -719,7 +727,7 @@ QImage Controller::compose() {
         const auto found = std::find_if(project.show.clips.begin(), project.show.clips.end(), [&](const Clip& c) { return c.id == clip; });
         const auto asset = found == project.show.clips.end() ? project.assets.cend() : project.assets.constFind(QString::fromStdString(found->assetId));
         videoErrors_.insert(clip); recovering_.erase(clip);
-        report("Video error in " + (asset == project.assets.cend() ? QString("a video") : asset->name) + ": " + error + " The picture holds its last frame; audio continues.");
+        report("Video error in " + (asset == project.assets.cend() ? QString("a video") : asset->name) + ": " + error + videoFallback(clipFrames_.contains(clip)));
         playbackProblem = videoProblems_[clip] = status;
     }
     if (waiting) {
