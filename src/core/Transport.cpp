@@ -92,7 +92,7 @@ void Transport::disarm() noexcept {
     starts_.clear(); markers_.clear(); active_.clear(); pictures_.clear();
     publishedSourceCount_ = 0; publishedSources_.reset(); state_ = State::Stopped; heldMarker_ = -1;
     publishedState_.store(State::Stopped); publishedVoices_.store(0); armed_.store(false);
-    pendingStart_ = {}; // Rollback snapshots refer to the dropped show's voices.
+    pendingStart_ = PendingPlayStart(); // Rollback snapshots refer to the dropped show's voices.
     // Queued cues belong to the dropped show; a new epoch also tells consumers to discard any in flight.
     MidiEvent event; while (midi_.pop(event)) {}
     epoch_.fetch_add(1);
@@ -106,7 +106,7 @@ void Transport::load(std::shared_ptr<const Show> show, Frame position) {
     const auto retired = std::move(show_); auto reusable = std::move(buffers_);
     show_ = std::move(show);
     urgentStop_.store(false, std::memory_order_release);
-    pendingStart_ = {};
+    pendingStart_ = PendingPlayStart();
     commands_.clear(); applied_ = 0; commandsApplied_.store(0, std::memory_order_release); midi_.reset(std::max(std::size_t{1024}, show_->markers.size()));
     voices_.assign(show_->clips.size(), {}); releases_.assign(show_->clips.size(), {});
     releasing_.clear(); releasing_.reserve(show_->clips.size());
@@ -446,7 +446,7 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
         break;
     }
     case Action::StopAll:
-        pendingStart = {};
+        pendingStart = PendingPlayStart();
         applyStopAll();
         break;
     }
@@ -454,7 +454,7 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
 }
 
 void Transport::applyStopAll() noexcept {
-    pendingStart_ = {};
+    pendingStart_ = PendingPlayStart();
     for (std::size_t i = 0; i < voices_.size(); ++i) cut(i);
     std::fill(voices_.begin(), voices_.end(), Voice{}); state_ = State::Stopped; heldMarker_ = -1;
     epoch_.fetch_add(1); clipped_.store(false); prime();
@@ -576,7 +576,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
         };
         for (std::size_t i = startIndex; i < countQueued; ++i) {
             if (urgentStop_.load(std::memory_order_acquire)) {
-                pendingStart = {};
+                pendingStart = PendingPlayStart();
                 applyUrgentStop(i);
                 break;
             }
@@ -607,7 +607,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
     if (pendingStart.seekRollbackCount > 0 || pendingStart.active || pendingStart.wasHeld) {
         if (urgentStop_.load(std::memory_order_acquire)) {
             applyUrgentStop(countQueued);
-            pendingStart = {};
+            pendingStart = PendingPlayStart();
         } else {
             rollbackRevokedSeeks(pendingStart, true);
             // Do not bump the global MIDI epoch_ on revoked agent rollback: any MIDI emitted by the

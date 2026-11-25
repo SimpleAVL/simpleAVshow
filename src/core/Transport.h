@@ -68,7 +68,7 @@ struct PendingPlayStart {
     bool seekCueActive = false;
     CommandSource seekCueSource = CommandSource::Operator;
     std::uint64_t seekCueEpoch = 0;
-    SeekRollback seekRollbacks[2]{};
+    SeekRollback seekRollbacks[2]; // Each element uses its member initializers.
     int seekRollbackCount = 0;
 };
 }
@@ -176,7 +176,7 @@ private:
         if (command.source == CommandSource::ExternalAgent) return command.sourceEpoch == validExt;
         return command.sourceEpoch == validChat;
     }
-    // Declared at namespace scope: GCC rejects `= {}` resets of nested structs with member initializers.
+    // Reset with `= PendingPlayStart()`, not `= {}`: GCC 13.3 rejects the braced form for this aggregate.
     using SeekRollback = transport_detail::SeekRollback;
     using PendingPlayStart = transport_detail::PendingPlayStart;
     PendingPlayStart pendingStart_;
