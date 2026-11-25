@@ -17,6 +17,7 @@ public:
     void zoomToFit();
     void selectClip(QString id);
     void selectMarker(QString id);
+    void selectTrack(int index);
     void refresh();
     // The automation property drawn and edited on the selected clip (other clips show volume/opacity).
     void setCurveProperty(int property);
@@ -48,10 +49,12 @@ private:
     static constexpr int header = 190, ruler = 58, row = 56;
     double zoom_ = 22;
     double scrollScale_ = 1;
-    int dragMode_ = 0, dragClip_ = -1, dragMarker_ = -1, dragTrack_ = 0;
+    int dragMode_ = 0, dragClip_ = -1, dragMarker_ = -1, dragTrack_ = 0, lastTrackedIndex_ = 0;
+    std::string dragClipId_, dragMarkerId_, curveClipId_, selectedTrackId_;
     Frame dragStart_ = 0, dragDuration_ = 0, dragOffset_ = 0, dragTime_ = 0;
     QPoint press_;
     bool dragging_ = false, autoScroll_ = false;
+    void cancelDrag();
     Frame playhead_ = 0;
     // Keyframe editing: the clip and property being edited, its working copy, and the frozen value scale.
     enum class CurveDrag { None, Point, Bend };

@@ -52,6 +52,54 @@ bool AudioDevice::open(RtAudio::Api api, unsigned device, unsigned channels, uns
         return true;
     } catch (const std::exception& e) { error = QString::fromUtf8(e.what()); close(); return false; }
 }
+bool AudioDevice::openByName(RtAudio::Api api, const QString& wantedName, const QString& fallbackRemembered,
+                             unsigned channels, unsigned buffer, QString& resolvedName, QString& error,
+                             unsigned* resolvedId) {
+    close();
+    try {
+        failed_.store(false); { std::lock_guard lock(errorMutex_); error_.clear(); }
+        audio_ = std::make_unique<RtAudio>(api, [this](RtAudioErrorType type, const std::string& text) {
+            if (type == RTAUDIO_NO_ERROR || type == RTAUDIO_WARNING) return;
+            { std::lock_guard lock(errorMutex_); error_ = QString::fromStdString(text); }
+            failed_.store(true);
+        });
+        std::vector<DeviceDescription> list;
+        for (unsigned id : audio_->getDeviceIds()) {
+            const auto info = audio_->getDeviceInfo(id);
+            if (info.outputChannels) list.push_back({id, QString::fromStdString(info.name), info.outputChannels, info.isDefaultOutput});
+        }
+        std::optional<DeviceDescription> chosen;
+        const QString lookupName = wantedName.isEmpty() ? fallbackRemembered : wantedName;
+        if (lookupName.isEmpty()) {
+            chosen = playbackDevice(list, {});
+        } else {
+            // RtAudio assigns device IDs per-instance, so duplicate display names cannot be distinguished
+            // reliably across probe/open cycles. Refuse ambiguous names instead of guessing the wrong output.
+            std::vector<DeviceDescription> exactMatches, ciMatches;
+            for (const auto& d : list) {
+                if (d.name == lookupName) exactMatches.push_back(d);
+                else if (d.name.compare(lookupName, Qt::CaseInsensitive) == 0) ciMatches.push_back(d);
+            }
+            const auto& matches = !exactMatches.empty() ? exactMatches : ciMatches;
+            if (matches.size() > 1)
+                throw std::runtime_error(QString("Multiple audio devices share the name “%1”; choose the interface manually in Outputs").arg(lookupName).toStdString());
+            if (matches.size() == 1) chosen = matches.front();
+            else if (!wantedName.isEmpty()) throw std::runtime_error(("Audio device not found: " + wantedName).toStdString());
+        }
+        if (!chosen) throw std::runtime_error("No available audio output device found");
+        if (channels < 1 || channels > chosen->channels)
+            throw std::runtime_error(QString("Requested %1 channels, but %2 provides %3 outputs").arg(channels).arg(chosen->name).arg(chosen->channels).toStdString());
+        RtAudio::StreamParameters output; output.deviceId = chosen->id; output.nChannels = channels; output.firstChannel = 0;
+        RtAudio::StreamOptions options; options.streamName = "SimpleAVShow"; options.flags = RTAUDIO_SCHEDULE_REALTIME;
+        channels_ = channels; buffer_ = buffer; underruns_.store(0);
+        if (audio_->openStream(&output, nullptr, RTAUDIO_FLOAT32, sampleRate, &buffer_, callback, this, &options) != RTAUDIO_NO_ERROR)
+            throw std::runtime_error(audio_->getErrorText());
+        if (audio_->startStream() != RTAUDIO_NO_ERROR) throw std::runtime_error(audio_->getErrorText());
+        resolvedName = chosen->name;
+        if (resolvedId) *resolvedId = chosen->id;
+        return true;
+    } catch (const std::exception& e) { error = QString::fromUtf8(e.what()); close(); return false; }
+}
 void AudioDevice::close() {
     if (audio_) {
         if (audio_->isStreamRunning()) audio_->stopStream();

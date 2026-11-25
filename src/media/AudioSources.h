@@ -2,6 +2,7 @@
 #include "core/Model.h"
 #include <QByteArray>
 #include <QString>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -67,7 +68,9 @@ constexpr qint64 automaticAudioCacheBudget = -1;
 void trimAudioCache(qint64 maxBytes = automaticAudioCacheBudget);
 // Bytes in the audio cache directory: prepared caches plus waveform sidecars.
 qint64 audioCacheBytes();
-std::shared_ptr<const AudioData> loadPcmWave(const QString& path);
+std::shared_ptr<const AudioData> loadPcmWave(const QString& path, const std::function<bool()>& isCancelled = {});
+// Rebinds a copied WAV's storage path on a worker thread (sharing blockHashes_ via shared_ptr and copying peaks off the GUI thread).
+std::shared_ptr<const AudioData> rebindPcmWavePath(const std::shared_ptr<const AudioData>& existing, const QString& newPath, qint64 knownSize = -1);
 
 // The decoded length and waveform of a streamed source. Keyed by content and decoder
 // revision like the prepared cache, so reopening or moving the file skips the decode pass.

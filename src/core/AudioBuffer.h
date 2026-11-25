@@ -28,6 +28,15 @@ public:
     // blocks. Returns whether the entry block is already resident.
     bool retarget(Frame frame) noexcept;
     bool matches(const AudioData* data, Frame offset, bool loop) const noexcept { return data_.get() == data && offset_ == offset && loop_ == loop; }
+    bool matchesContent(const AudioData* data, Frame offset, bool loop) const noexcept {
+        if (offset_ != offset || loop_ != loop || !data || !data_) return false;
+        if (data_.get() == data) return true;
+        const void* oldId = data_->storage ? data_->storage->contentIdentity() : nullptr;
+        const void* newId = data->storage ? data->storage->contentIdentity() : nullptr;
+        return oldId && oldId == newId;
+    }
+    // While the callback and worker are stopped: switch storage pointer for an identical-content rebound source.
+    void rebindData(std::shared_ptr<const AudioData> data) noexcept { data_ = std::move(data); }
 private:
     enum Ownership { Empty, Writing, Ready, Reading };
     struct Slot {

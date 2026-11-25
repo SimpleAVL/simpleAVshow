@@ -29,22 +29,57 @@ const QByteArray& page() {
 }
 }
 
-RemoteServer::RemoteServer(Controller& controller, QObject* parent) : QObject(parent), c_(controller) {
+RemoteServer::RemoteServer(Controller& controller, QObject* parent) : QObject(parent), c_(controller), server_(std::make_unique<QTcpServer>(this)) {
     key_ = QSettings().value("remote/key").toString();
     if (!validKey(key_)) { key_ = newKey(); QSettings().setValue("remote/key", key_); }
-    connect(&server_, &QTcpServer::newConnection, this, &RemoteServer::acceptConnection);
+    connect(server_.get(), &QTcpServer::newConnection, this, &RemoteServer::acceptConnection);
 }
 bool RemoteServer::start(quint16 port) {
     if (running()) return true;
     // Phones reach the computer through its network address, so this listens beyond loopback.
-    if (!server_.listen(QHostAddress::AnyIPv4, port)) return false;
-    QSettings().setValue("remote/port", server_.serverPort());
+    if (!server_->listen(QHostAddress::AnyIPv4, port)) return false;
+    QSettings().setValue("remote/port", server_->serverPort());
     c_.report("Phone remote enabled. Anyone with its link on this network can control playback.");
     emit stateChanged(); return true;
 }
 void RemoteServer::stop() {
-    server_.close(); closeConnections(); seen_.clear();
+    if (server_) server_->close();
+    closeConnections(); seen_.clear();
     emit stateChanged();
+}
+bool RemoteServer::reconfigure(bool enable, quint16 targetPort, bool rotateKey, QString& error) {
+    if (!enable) {
+        const bool wasRunning = running();
+        if (targetPort >= 1024) QSettings().setValue("remote/port", targetPort);
+        if (rotateKey) changeKey();
+        if (wasRunning) { stop(); c_.report("Phone remote disabled."); }
+        else if (targetPort >= 1024) emit stateChanged();
+        return true;
+    }
+    if (running() && port() == targetPort) {
+        if (rotateKey) changeKey();
+        return true;
+    }
+    // Bind the replacement listener before closing the active listener or rotating the key.
+    auto replacement = std::make_unique<QTcpServer>(this);
+    if (!replacement->listen(QHostAddress::AnyIPv4, targetPort)) {
+        error = replacement->errorString();
+        return false;
+    }
+    const bool wasRunning = running();
+    if (server_) server_->close();
+    closeConnections();
+    seen_.clear();
+    server_ = std::move(replacement);
+    connect(server_.get(), &QTcpServer::newConnection, this, &RemoteServer::acceptConnection);
+    QSettings().setValue("remote/port", server_->serverPort());
+    if (rotateKey) {
+        key_ = newKey();
+        QSettings().setValue("remote/key", key_);
+    }
+    if (!wasRunning) c_.report("Phone remote enabled. Anyone with its link on this network can control playback.");
+    emit stateChanged();
+    return true;
 }
 void RemoteServer::changeKey() {
     key_ = newKey(); QSettings().setValue("remote/key", key_);
@@ -85,21 +120,21 @@ QJsonObject RemoteServer::state() const {
     return result;
 }
 bool RemoteServer::command(const QString& action, const QString& from) {
-    const State state = c_.transport.state();
+    const State state = c_.effectiveState();
     const QString by = from.isEmpty() ? QString("Phone remote") : "Phone remote " + from;
     if (c_.busy) return false;
     if (action == "go" && state != State::Playing) {
         // Report first so a failed start's own explanation replaces it in the status bar.
-        c_.report(by + (state == State::Held ? ": Continue" : ": Play")); c_.toggle(); return true;
+        c_.report(by + (state == State::Held ? ": Continue" : ": Play")); return c_.play();
     }
-    if (action == "pause" && state == State::Playing) { c_.report(by + ": Pause"); c_.toggle(); return true; }
-    if (action == "stop") { c_.report(by + ": Stop All"); c_.stopAll(); return true; }
+    if (action == "pause" && state == State::Playing) { c_.report(by + ": Pause"); return c_.pause(); }
+    if (action == "stop") { c_.report(by + ": Stop All"); return c_.stopAll(); }
     return false;
 }
 
 void RemoteServer::acceptConnection() {
-    while (server_.hasPendingConnections()) {
-        auto* socket = server_.nextPendingConnection(); socket->setParent(this);
+    while (server_ && server_->hasPendingConnections()) {
+        auto* socket = server_->nextPendingConnection(); socket->setParent(this);
         if (findChildren<QTcpSocket*>().size() > 32) { socket->abort(); socket->deleteLater(); continue; }
         socket->setReadBufferSize(maxHeader + maxBody);
         connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);

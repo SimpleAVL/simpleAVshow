@@ -4,6 +4,7 @@
 #include <QString>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <thread>
 
@@ -26,12 +27,17 @@ enum class AudioPreparation { Stream, Prepared };
 void setAudioPreparation(AudioPreparation preparation) noexcept;
 AudioPreparation audioPreparation() noexcept;
 // Prepares audio for the current preference, or for one captured when a batch began.
-MediaAsset loadMedia(const QString& path);
-MediaAsset loadMedia(const QString& path, AudioPreparation preparation);
+// isCancelled is polled while probing and decoding; a cancelled load throws.
+MediaAsset loadMedia(const QString& path, const std::function<bool()>& isCancelled = {});
+MediaAsset loadMedia(const QString& path, AudioPreparation preparation, const std::function<bool()>& isCancelled = {});
 // Closes streamed-audio decoders unused for a few seconds, wherever their sources are held (an armed
 // show, undo history), so files are not kept open indefinitely; a later read reopens and seeks.
 // Decoders of files that are gone close too, after a check that runs in the background unless wait.
 void closeIdleStreams(bool wait = false);
+// Decodes a single video frame at time (seconds) for offline previews without disturbing active readers.
+// Returns a null image (and populates optional error) if the target timestamp cannot be reached.
+QImage videoFrameAt(const QString& path, double time, QSize maximum = QSize(1920, 1080), QString* error = nullptr,
+                    const std::function<bool()>& isCancelled = {});
 
 // One worker per video clip. No decoding or disk access on the audio thread.
 // Corrupt packets and transient read/seek failures are skipped and counted; only

@@ -6,23 +6,27 @@
 #include "app/ProgramView.h"
 #include <QMainWindow>
 #include <QElapsedTimer>
+#include <QPointer>
 #include <optional>
 #include <set>
 
 class QListWidget; class QLabel; class QPushButton; class QComboBox; class QDoubleSpinBox;
 class QSpinBox; class QLineEdit; class QCheckBox; class QTextEdit; class QTableWidget;
-class QStackedWidget; class QGroupBox; class QScrollArea; class QAction;
+class QStackedWidget; class QGroupBox; class QScrollArea; class QAction; class QSplitter; class QScreen;
 
 namespace sav {
+class AgentChatPanel;
 class MidiMessageEditor;
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(QWidget* parent = nullptr);
+    ~MainWindow() override;
     Controller& controller() { return c_; }
     McpServer& mcpServer() { return mcp_; }
     RemoteServer& remoteServer() { return remote_; }
-    void openPath(const QString& path);
+    AgentChatPanel* agentChatPanel() { return agentChat_; }
+    void openPath(const QString& path, bool discardPreviousAutosave = false);
     // Offers the untitled-show sidecar left by a crash; call once after startup.
     void offerUntitledRecovery();
 protected:
@@ -40,9 +44,12 @@ private:
     QWidget* outputWindow_ = nullptr;
     QListWidget *library_ = nullptr, *cues_ = nullptr;
     QLabel *clock_ = nullptr, *state_ = nullptr, *next_ = nullptr, *health_ = nullptr, *hint_ = nullptr, *projectLabel_ = nullptr;
-    QPushButton *play_ = nullptr, *showButton_ = nullptr, *outputsButton_ = nullptr, *openOutputButton_ = nullptr, *agentButton_ = nullptr, *remoteButton_ = nullptr;
+    QPushButton *play_ = nullptr, *showButton_ = nullptr, *outputsButton_ = nullptr, *openOutputButton_ = nullptr, *agentButton_ = nullptr, *agentChatButton_ = nullptr, *remoteButton_ = nullptr;
     QAction* outputsAction_ = nullptr;
     QAction* exportPackageAction_ = nullptr;
+    QAction* agentChatAction_ = nullptr;
+    AgentChatPanel* agentChat_ = nullptr;
+    QSplitter* workspaceSplit_ = nullptr;
     QStackedWidget* inspector_ = nullptr;
     QScrollArea* inspectorScroll_ = nullptr;
     QLineEdit *trackName_ = nullptr, *markerName_ = nullptr;
@@ -58,15 +65,19 @@ private:
     QTextEdit* clipText_ = nullptr;
     QTableWidget* curveTable_ = nullptr;
     QGroupBox *audioTransform_ = nullptr, *videoTransform_ = nullptr, *trackAudio_ = nullptr;
-    bool refreshing_ = false, outputLost_ = false, inspectorDirty_ = false, automatic_ = false;
+    bool refreshing_ = false, outputLost_ = false, inspectorDirty_ = false, automatic_ = false, openingOutput_ = false, outputWasNonEditor_ = false;
     // Fields changed since the inspector last showed the model; automatic commits apply only these.
     std::set<QWidget*> touched_;
     std::optional<Clip> clipboard_;
+    bool clipboardVisual_ = false;
     QElapsedTimer escape_;
     bool use(QWidget* field) const { return !automatic_ || touched_.contains(field); }
     std::string inspectedClip_, inspectedMarker_;
     int inspectedTrack_ = -1;
-    QString outputScreen_;
+    QPointer<QScreen> outputTargetScreen_;
+    QVector<QPointer<QScreen>> outputTwinScreens_;
+    QMetaObject::Connection outputScreenConn_;
+    QString outputScreen_, outputScreenManufacturer_, outputScreenModel_, outputScreenSerial_;
     void buildInspector();
     void refresh();
     void updatePlayback();
@@ -98,15 +109,17 @@ private:
     void deleteSelection();
     void projectSettings();
     void agentSettings();
+    void setAgentChatVisible(bool visible);
     void remoteSettings();
     void outputSettings();
-    void openOutput(int screen);
+    void openOutput(int screen, bool confirmEditorCover = true);
+    void onOutputWindowScreenChanged(QScreen* screen);
     void screensChanged();
     void requestShowMode(bool enabled);
     void save(bool as = false);
     void exportPackage();
     void writePackage(const QString& path);
-    bool checkDiscard();
+    bool checkDiscard(quint64* confirmedRev = nullptr, bool discardAutosaveNow = true, bool* shouldDiscardAutosave = nullptr);
     Clip* selectedClip();
     Marker* selectedMarker();
 };

@@ -2,24 +2,42 @@
 #include <RtMidi.h>
 #include <QStringList>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 
 namespace sav {
 class MidiOutput {
 public:
+    MidiOutput();
+    ~MidiOutput();
+    MidiOutput(const MidiOutput&) = delete;
+    MidiOutput& operator=(const MidiOutput&) = delete;
+
     QStringList ports();
+    // Non-opening check using the same alias/case ranking as openByName() (for preflight/hotplug).
+    bool hasPortByName(const QString& name) const;
     bool open(int port, QString& error);
-    bool send(const std::vector<unsigned char>& message, QString& error);
+    // Resolves and opens a port by name (binding directly to the endpoint identity on CoreMIDI).
+    bool openByName(const QString& name, QString& error);
+    bool send(const std::vector<unsigned char>& message, QString& error,
+              const std::function<bool()>& allowSubmit = {});
     void close();
+    // Interrupts any bounded WinMM SysEx wait immediately when stopping the MIDI worker thread.
+    void requestAbortSend() noexcept { abortSend_.store(true, std::memory_order_release); }
+    void clearAbortSend() noexcept { abortSend_.store(false, std::memory_order_release); }
     // A failed send marks the port lost; the controller reconnects it by name.
-    bool connected() const { return output_ && output_->isPortOpen() && !lost_.load(); }
+    bool connected() const;
     QString name() const { return name_; }
 private:
+    struct CoreMidiState;
+    struct WinMmState;
+    std::unique_ptr<CoreMidiState> coreMidi_;
+    std::unique_ptr<WinMmState> winMm_;
     std::unique_ptr<RtMidiOut> output_;
     QString name_;
     std::string error_; // Written by RtMidi on the thread using output_.
-    std::atomic<bool> lost_{false};
+    std::atomic<bool> lost_{false}, abortSend_{false};
     static void onError(RtMidiError::Type type, const std::string& text, void* self);
 };
 bool validMidi(const std::vector<unsigned char>& message);

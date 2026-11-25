@@ -81,12 +81,25 @@ if(SAV_BUILD_APP)
   add_library(sav_desktop
     src/app/Project.cpp src/app/ProjectPackage.cpp src/app/Controller.cpp
     src/app/Timeline.cpp src/app/ProgramView.cpp src/app/MainWindow.cpp
-    src/app/MidiMessageEditor.cpp src/app/McpServer.cpp src/app/RemoteServer.cpp
+    src/app/MidiMessageEditor.cpp src/app/McpServer.cpp src/app/McpProxy.cpp
+    src/app/AcpClient.cpp src/app/AgentChatPanel.cpp src/app/RemoteServer.cpp
     src/media/Media.cpp src/media/AudioSources.cpp src/media/AudioDevice.cpp src/media/MidiOutput.cpp
   )
   target_include_directories(sav_desktop PUBLIC src ${RTMIDI_HEADER_DIR} PRIVATE ${FFMPEG_INCLUDE_DIR})
   qt_add_resources(sav_desktop remote PREFIX "/remote" BASE src/app FILES src/app/remote.html)
+  qt_add_resources(sav_desktop docs PREFIX "/docs" BASE docs FILES
+    docs/README.md docs/getting-started.md docs/editing-a-show.md
+    docs/audio-and-outputs.md docs/cues-and-midi.md docs/running-a-show.md
+    docs/remote-control.md docs/saving-and-recovery.md docs/agent-collaboration.md
+    docs/reference-and-troubleshooting.md docs/hardware-validation.md
+  )
   target_link_libraries(sav_desktop PUBLIC sav_core Qt6::Widgets Qt6::Concurrent Qt6::Network ${SAV_RTAUDIO} ${SAV_RTMIDI} PRIVATE ${SAV_FFMPEG} LibArchive::LibArchive)
+  if(APPLE)
+    target_link_libraries(sav_desktop PRIVATE "-framework CoreMIDI" "-framework CoreFoundation")
+  endif()
+  if(WIN32)
+    target_link_libraries(sav_desktop PRIVATE winmm)
+  endif()
   if(MSVC)
     target_compile_options(sav_desktop PUBLIC /utf-8)
     target_compile_definitions(sav_desktop PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -120,6 +133,17 @@ if(SAV_BUILD_APP)
   target_link_libraries(mcp_tests PRIVATE sav_desktop Qt6::Test)
   add_test(NAME mcp COMMAND mcp_tests)
   set_tests_properties(mcp PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+  add_executable(mock_acp_agent tests/mock_acp_agent.cpp)
+  target_link_libraries(mock_acp_agent PRIVATE Qt6::Core)
+  add_executable(acp_tests tests/acp_tests.cpp)
+  target_link_libraries(acp_tests PRIVATE sav_desktop Qt6::Test)
+  target_compile_definitions(acp_tests PRIVATE
+    SAV_MOCK_ACP_AGENT="$<TARGET_FILE:mock_acp_agent>"
+    SAV_APP_EXECUTABLE="$<TARGET_FILE:simpleavshow>"
+  )
+  add_dependencies(acp_tests mock_acp_agent simpleavshow)
+  add_test(NAME acp COMMAND acp_tests)
+  set_tests_properties(acp PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
   add_executable(remote_tests tests/remote_tests.cpp)
   target_link_libraries(remote_tests PRIVATE sav_desktop Qt6::Test)
   add_test(NAME remote COMMAND remote_tests)

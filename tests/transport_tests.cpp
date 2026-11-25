@@ -268,6 +268,66 @@ int main() {
             checkedRender(t, out.data(), 2048, 2); // Frames 10240-12287 straddle the 12000-frame grace.
             expect(t.audioGaps() == 1, "a gap past the grace counts even mid-callback");
         }},
+        {"under Freeze, cues and holds wait for their audio", [] {
+            auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto p = show(false); p->duration = storage->length(); p->clips[0].duration = p->duration; p->clips[0].audio = diskAudio(storage);
+            const Frame cue = frames(30 * 3600), hold = frames(31 * 3600);
+            p->markers.push_back({"cue", "Cue", cue, false, MidiTiming::Arrival, {0x90, 60, 100}});
+            p->markers.push_back({"hold", "Hold", hold, true, MidiTiming::Resume, {0x90, 61, 100}});
+            Transport t; t.configure(p); std::vector<float> out(64 * 2); MidiEvent event;
+            storage->delay.store(60); // Every block read from here on is late.
+            t.command({Action::Seek, cue}); play(t);
+            checkedRender(t, out.data(), 16, 2);
+            expect(t.position() == cue && !t.takeMidi(event), "a cue at an uncached place waits with the audio");
+            for (int i = 0; i < 400 && t.position() == cue; ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); checkedRender(t, out.data(), 16, 2); }
+            int cues = 0; while (t.takeMidi(event)) cues += event.marker == 0;
+            expect(t.position() > cue && cues == 1, "the cue goes out once, with its first audio frame");
+            // Audio stops at a hold, so reaching one needs no audio; continuing from it does, and the hold's
+            // resume cue waits for that audio instead of going out while the show is still frozen.
+            t.command({Action::Seek, hold}); play(t);
+            checkedRender(t, out.data(), 16, 2);
+            expect(t.state() == State::Held && t.position() == hold, "the hold is taken at once");
+            play(t); checkedRender(t, out.data(), 16, 2);
+            expect(t.position() == hold && !t.takeMidi(event), "the resume cue waits while the audio after the hold loads");
+            for (int i = 0; i < 400 && t.position() == hold; ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); checkedRender(t, out.data(), 16, 2); }
+            int resumes = 0; while (t.takeMidi(event)) resumes += event.marker == 1;
+            expect(t.position() > hold && resumes == 1, "continuing sends the resume cue once");
+        }},
+        {"revoked agent commands are dropped, applied ones are kept, and an emergency stop always lands", [] {
+            auto p = show(false); p->duration = 2000;
+            Transport t; t.configure(p); std::vector<float> out(64 * 2);
+            // A session's queued commands are dropped once it is revoked; the operator's are not.
+            t.command({Action::Seek, 500, CommandSource::ChatAgent, t.chatAgentEpoch()});
+            t.command({Action::Play, 0, CommandSource::ChatAgent, t.chatAgentEpoch()});
+            t.invalidateChatAgentCommands();
+            t.command({Action::Seek, 300, CommandSource::Operator, 0});
+            checkedRender(t, out.data(), 16, 2);
+            expect(t.position() == 300 && t.state() == State::Paused, "revoked chat seek and play are dropped");
+            expect(t.commandsApplied() == 3, "dropped commands still count as handled");
+            // Revoking one domain leaves the other's commands alone.
+            t.command({Action::Play, 0, CommandSource::ExternalAgent, t.externalAgentEpoch()});
+            t.invalidateChatAgentCommands();
+            checkedRender(t, out.data(), 16, 2);
+            expect(t.state() == State::Playing, "an external client's play survives revoking the chat");
+            // Nothing applied is undone: playback an agent started keeps going after its session ends.
+            t.invalidateAllAgentCommands();
+            const Frame playing = t.position();
+            checkedRender(t, out.data(), 16, 2);
+            expect(t.state() == State::Playing && t.position() > playing, "revocation does not stop or rewind playback");
+            // A new command from the agent carries the new epoch and works.
+            t.command({Action::Pause, 0, CommandSource::ChatAgent, t.chatAgentEpoch()});
+            checkedRender(t, out.data(), 16, 2);
+            expect(t.state() == State::Paused, "commands after revocation use the new epoch");
+            // Emergency Stop All (a full queue): queued commands are moot except the last seek, and nothing
+            // but Stop All is accepted until it lands.
+            play(t); checkedRender(t, out.data(), 16, 2);
+            t.command({Action::Seek, 900, CommandSource::Operator, 0});
+            t.command({Action::Play, 0, CommandSource::Operator, 0});
+            t.requestStopAll();
+            expect(t.stopAllPending() && !t.command({Action::Play, 0, CommandSource::Operator, 0}), "only Stop All is queued while one is pending");
+            checkedRender(t, out.data(), 16, 2);
+            expect(!t.stopAllPending() && t.state() == State::Stopped && t.position() == 900, "emergency stop lands at the last seek");
+        }},
         {"arming: a rejected show keeps the armed one, nothing plays unarmed", [] {
             Transport t; expect(!t.armed(), "a new transport is not armed");
             std::vector<float> out; render(t, 4, out); expect(out[0] == 0 && t.state() == State::Stopped, "unarmed renders silence");
@@ -450,7 +510,7 @@ int main() {
             for (auto shape : {CurveShape::Curve, CurveShape::SCurve}) {
                 Envelope straight{{{0, 0, shape, 0}, {10, 1}}}; near(straight.at(3, 1), .3, "zero bend is linear");
             }
-        }}
+        }},
     };
     for (const auto& [name, test] : tests) {
         try { test(); ++passed; std::cout << "PASS " << name << '\n'; }

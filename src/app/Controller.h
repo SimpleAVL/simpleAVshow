@@ -11,6 +11,8 @@
 #include <set>
 #include <functional>
 #include <map>
+#include <mutex>
+#include <optional>
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -25,7 +27,7 @@ public:
     Transport transport;
     AudioDevice device;
     MidiOutput midi;
-    bool showMode = false, dirty = false, busy = false;
+    bool showMode = false, dirty = false, busy = false, preflightLock = false;
     QString path, status = "Press Play to use your speakers. Choose show equipment in Outputs.", audioName;
     QString playbackProblem;
     // While disarmed after a failed arm, the position Play will arm at (seeks move it).
@@ -33,19 +35,39 @@ public:
     // The operator's next cue: later than the playhead, or at it unless that hold is already holding.
     const Marker* nextCue() const;
     bool canEdit(bool report = true);
+    // Exclusive busy lease so operator dialogs and async MCP file jobs cannot step on each other.
+    quint64 acquireBusy();
+    void releaseBusy(quint64 lease);
+    quint64 projectRevision() const { return projectRevision_; }
+    quint64 historyEpoch() const { return historyEpoch_; }
+    quint64 showEpoch() const { return showEpoch_; }
     bool edit(const std::function<void(Project&)>& mutation);
     void undo();
     void redo();
-    void replace(Project next, QString projectPath = {});
-    void toggle();
-    void seek(Frame position);
-    void stopAll();
+    std::size_t undoCount() const { return undo_.size(); }
+    std::size_t redoCount() const { return redo_.size(); }
+    void replace(Project next, QString projectPath = {}, bool markDirty = false);
+    bool toggle();
+    bool play(CommandSource source = CommandSource::Operator);
+    bool pause(CommandSource source = CommandSource::Operator);
+    bool seek(Frame position, CommandSource source = CommandSource::Operator);
+    bool stopAll(CommandSource source = CommandSource::Operator);
+    // Reflects still-authorized queued transport commands immediately before the next audio callback publishes them.
+    State effectiveState() const;
+    Frame effectivePosition() const;
+    bool playInFlight() const;
     bool configureAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer);
+    bool configureAudioByName(RtAudio::Api api, const QString& wantedName, unsigned channels, unsigned buffer);
+    RtAudio::Api activeAudioApi() const { return api_; }
+    bool audioConfigured() const { return configured_; }
     bool configureMidi(int port);
-    bool testMidi(const std::vector<unsigned char>& message);
+    bool configureMidiByName(const QString& portName);
+    bool testMidi(const std::vector<unsigned char>& message, const QString& owner = {},
+                  std::shared_ptr<std::atomic<bool>> ownerCancelled = {});
+    void cancelPendingTestMidi(const QString& owner = {});
     bool needsMidi() const;
     // Offline sources and vanished videos used on the timeline.
-    QStringList missingMedia() const;
+    QStringList missingMedia(bool probeFilesystem = true) const;
     // The missing files the last background check found, among those the show still uses; no disk access.
     QStringList lastMissingMedia() const;
     // The warning for what the last check during a show found missing; empty when nothing is.
@@ -56,7 +78,7 @@ public:
     // needs it (a video, or audio read from its original rather than a prepared cache).
     static bool needsRelink(const MediaAsset& asset);
     // Problems worth fixing before a performance; empty when the show is ready.
-    QStringList preflight();
+    QStringList preflight(bool probeHardware = true);
     // Playback preferences for this machine, remembered across sessions.
     void setLateAudio(LateAudio policy);
     void setAudioPreparation(AudioPreparation preparation);
@@ -72,15 +94,23 @@ public:
     QString midiDestination() const { return midiName_; }
     void setShowMode(bool enabled);
     QImage compose();
-    void save(QString target);
+    // Side-effect-free composition at an arbitrary show time (safe during playback and Show mode).
+    // Pre-decoded video frames keyed by clip ID may be supplied from a worker thread so the GUI thread stays non-blocking.
+    static QImage composeProjectAt(const Project& project, Frame position, QSize maximum = QSize(), const QMap<std::string, QImage>* videoFrames = nullptr);
+    QImage composeAt(Frame position, QSize maximum = QSize(), const QMap<std::string, QImage>* videoFrames = nullptr) const {
+        return composeProjectAt(project, position, maximum, videoFrames);
+    }
+    bool save(QString target, bool allowOverwrite = true);
     // Saving an opened package or generated media copies files; MainWindow runs that part on a worker.
     bool savingCopiesMedia() const;
     static QString mediaDirectory(const QString& target);
-    void commitSave(Project candidate, QString target);
+    bool commitSave(Project candidate, QString target, bool allowOverwrite = true);
     void report(QString message);
     // Sidecar for crash recovery: next to the show, or in app data while untitled.
     QString autosavePath() const;
     static QString untitledAutosavePath();
+    const QString& recoveredAutosavePath() const { return recoveredAutosavePath_; }
+    void setRecoveredAutosavePath(QString sidecarPath) { recoveredAutosavePath_ = std::move(sidecarPath); }
     void discardAutosave();
     bool routesValid() const;
     bool armFailed() const { return armFailed_; }
@@ -95,6 +125,7 @@ private:
     unsigned deviceId_ = 0, channels_ = 2, buffer_ = 512;
     bool configured_ = false;
     QString midiName_;
+    QString recoveredAutosavePath_;
     QString midiProblem_; // The playback problem MIDI last reported; a reconnect clears only that.
     // The last arm failed: nothing is armed, and Play arms at pendingPosition_ (updated by seeks).
     // armProblem_ is the playback problem it reported; a later successful arm clears only that.
@@ -132,7 +163,19 @@ private:
     std::map<std::string, std::unique_ptr<VideoReader>> videos_;
     std::shared_ptr<const Show> armed_;
     std::thread midiThread_;
-    std::atomic<bool> midiStop_{true};
+    std::atomic<bool> midiStop_{true}, showModeAtomic_{false}, testMidiInFlight_{false};
+    std::atomic<std::uint64_t> testMidiGen_{1};
+    struct PendingTestMidi {
+        std::vector<unsigned char> bytes;
+        std::uint64_t epoch = 0;
+        std::uint64_t gen = 0;
+        QString owner;
+        std::shared_ptr<std::atomic<bool>> ownerCancelled;
+    };
+    std::mutex testMidiMutex_;
+    std::shared_ptr<std::atomic<bool>> inFlightTestCancel_;
+    QString inFlightTestOwner_;
+    std::deque<PendingTestMidi> testMidiQueue_;
     QElapsedTimer midiWatch_, stall_;
     std::uint64_t heartbeat_ = 0;
     std::set<std::string> videoErrors_;
@@ -140,8 +183,18 @@ private:
     Frame lastComposed_ = -1;
     std::vector<Frame> lastClocks_;
     std::deque<Project> undo_, redo_;
-    bool arm(Frame position); // False when preparing playback failed; see armFailed_.
-    void armOrThrow(Frame position);
+    quint64 busyLease_ = 0, nextBusyLease_ = 1, projectRevision_ = 0, historyEpoch_ = 0, showEpoch_ = 0;
+    struct PendingTransportCommand {
+        std::uint64_t seq = 0;
+        Command command;
+    };
+    std::uint64_t commandsPosted_ = 0, operatorStopSeq_ = 0;
+    std::deque<PendingTransportCommand> pendingCommands_;
+    std::pair<State, Frame> predictTransport(bool* hasPendingPlay = nullptr) const;
+    bool postTransportCommand(Command cmd);
+    // False when preparing playback failed; see armFailed_. Without a position, arms at the effective one.
+    bool arm(std::optional<Frame> position = std::nullopt);
+    void armOrThrow(std::optional<Frame> position);
     void startMidiThread();
     void watchMidi();
     void stopMidiThread();

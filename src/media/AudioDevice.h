@@ -18,12 +18,19 @@ public:
     std::vector<std::pair<RtAudio::Api, QString>> apis() const;
     std::vector<DeviceDescription> devices(RtAudio::Api api);
     bool open(RtAudio::Api api, unsigned device, unsigned channels, unsigned buffer, QString& error);
+    // Resolves device by name (or default/remembered when wantedName is empty) on the same RtAudio
+    // instance that opens the stream, preventing cross-instance ID drift after hot-plug.
+    bool openByName(RtAudio::Api api, const QString& wantedName, const QString& fallbackRemembered,
+                    unsigned channels, unsigned buffer, QString& resolvedName, QString& error,
+                    unsigned* resolvedId = nullptr);
     void close();
     // Stops callbacks while keeping the stream open, so re-arming avoids a slow driver reopen (ASIO).
     void pause() { if (audio_ && audio_->isStreamRunning()) audio_->stopStream(); }
     bool resume() { return audio_ && !failed_.load() && audio_->isStreamOpen() && (audio_->isStreamRunning() || audio_->startStream() == RTAUDIO_NO_ERROR); }
     // A reported stream error (e.g. an unplugged interface) counts as stopped even if RtAudio still says running.
     bool running() const { return audio_ && !failed_.load() && audio_->isStreamRunning(); }
+    // True while the driver stream may still invoke the audio callback, even after an error report.
+    bool streamActive() const { return audio_ && audio_->isStreamRunning(); }
     // Increments once per device callback; a running stream whose count stalls has stopped delivering audio.
     std::uint64_t callbacks() const { return callbacks_.load(std::memory_order_relaxed); }
     QString lastError() const { std::lock_guard lock(errorMutex_); return error_; }

@@ -61,7 +61,8 @@ la_int64_t seekBytes(archive* a, void* context, la_int64_t offset, int whence) {
     }
     return file.pos();
 }
-void addFile(archive* writer, const QString& name, const QString& source) {
+void addFile(archive* writer, const QString& name, const QString& source, const std::function<bool()>& isCancelled) {
+    if (isCancelled && isCancelled()) throw std::runtime_error("Package export cancelled");
     QFile input(source);
     if (!input.open(QIODevice::ReadOnly)) throw std::runtime_error("Cannot read media: " + source.toStdString() + ": " + input.errorString().toStdString());
     const auto size = input.size();
@@ -75,6 +76,7 @@ void addFile(archive* writer, const QString& name, const QString& source) {
     QByteArray buffer(static_cast<int>(chunkSize), '\0');
     qint64 remaining = size;
     while (remaining > 0) {
+        if (isCancelled && isCancelled()) throw std::runtime_error("Package export cancelled");
         const auto count = input.read(buffer.data(), std::min(remaining, chunkSize));
         if (count <= 0) throw std::runtime_error("Media could not be read completely: " + source.toStdString());
         qint64 written = 0;
@@ -103,10 +105,11 @@ Reader openPackage(ReadContext& input) {
     checkArchive(reader.get(), archive_read_open(reader.get(), &input, nullptr, readBytes, nullptr));
     return reader;
 }
-template <class Write> void readEntry(archive* reader, const QString& name, qint64 size, Write write) {
+template <class Write> void readEntry(archive* reader, const QString& name, qint64 size, Write write, const std::function<bool()>& isCancelled = {}) {
     qint64 remaining = size;
     QByteArray buffer(static_cast<int>(chunkSize), '\0');
     for (;;) {
+        if (isCancelled && isCancelled()) throw std::runtime_error("Package load cancelled");
         const auto count = archive_read_data(reader, buffer.data(), static_cast<size_t>(buffer.size()));
         if (count < 0) checkArchive(reader, ARCHIVE_FATAL);
         if (count == 0) break;
@@ -177,23 +180,33 @@ void removeStalePackageDirectories() {
 
 bool isProjectPackage(const QString& path) { return path.endsWith(".savpack", Qt::CaseInsensitive); }
 
-void writeProjectPackage(const Project& project, const QString& path) {
+void writeProjectPackage(const Project& project, const QString& path,
+                         const std::function<bool()>& isCancelled,
+                         const QString& finalTargetPath) {
+    if (isCancelled && isCancelled()) throw std::runtime_error("Package export cancelled");
     validate(project);
     QTemporaryDir staging(QDir::tempPath() + "/simpleavshow-export-XXXXXX");
     if (!staging.isValid()) throw std::runtime_error("Cannot create package staging directory");
+    const QString canonicalStaging = QFileInfo(staging.path()).canonicalFilePath();
+    const QDir stagingDir(canonicalStaging.isEmpty() ? staging.path() : canonicalStaging);
     Project candidate = project;
     // Existing sources stream directly into the archive; only generated media needs staging.
     candidate.packageDirectory.reset();
-    materializeProjectMedia(candidate, staging.filePath("generated"));
+    materializeProjectMedia(candidate, stagingDir.filePath("generated"), isCancelled);
     QMap<QString, QString> names;
     QMap<QString, QString> sources;
     const auto target = QFileInfo(path).absoluteFilePath();
     const auto targetCanonical = QFileInfo(path).canonicalFilePath();
+    const auto finalTarget = finalTargetPath.isEmpty() ? QString() : QFileInfo(finalTargetPath).absoluteFilePath();
+    const auto finalCanonical = finalTargetPath.isEmpty() ? QString() : QFileInfo(finalTargetPath).canonicalFilePath();
     for (auto& asset : candidate.assets) {
+        if (isCancelled && isCancelled()) throw std::runtime_error("Package export cancelled");
         const QFileInfo source(asset.path);
         const auto canonical = source.canonicalFilePath();
         if (!source.isFile() || canonical.isEmpty()) throw std::runtime_error("Media file is missing: " + asset.path.toStdString());
-        if (source.absoluteFilePath() == target || (!targetCanonical.isEmpty() && canonical == targetCanonical))
+        if (source.absoluteFilePath() == target || (!targetCanonical.isEmpty() && canonical == targetCanonical) ||
+            (!finalTarget.isEmpty() && source.absoluteFilePath() == finalTarget) ||
+            (!finalCanonical.isEmpty() && canonical == finalCanonical))
             throw std::runtime_error("Package destination would overwrite a media source");
         if (!names.contains(canonical)) {
             QString extension = source.suffix().toLower();
@@ -202,10 +215,11 @@ void writeProjectPackage(const Project& project, const QString& path) {
             const auto name = "media/" + newId() + "." + extension;
             names.insert(canonical, name); sources.insert(name, asset.path);
         }
-        asset.path = staging.filePath(names.value(canonical));
+        asset.path = stagingDir.filePath(names.value(canonical));
     }
-    const auto manifest = staging.filePath("project.savshow");
+    const auto manifest = stagingDir.filePath("project.savshow");
     writeProject(candidate, manifest);
+    if (isCancelled && isCancelled()) throw std::runtime_error("Package export cancelled");
     QSaveFile output(path);
     if (!output.open(QIODevice::WriteOnly)) throw std::runtime_error(output.errorString().toStdString());
     std::unique_ptr<archive, decltype(&archive_write_free)> writer(archive_write_new(), archive_write_free);
@@ -216,13 +230,15 @@ void writeProjectPackage(const Project& project, const QString& path) {
     checkArchive(writer.get(), archive_write_zip_set_compression_store(writer.get()));
     checkArchive(writer.get(), archive_write_set_bytes_in_last_block(writer.get(), 1));
     checkArchive(writer.get(), archive_write_open(writer.get(), &output, nullptr, writeBytes, nullptr));
-    addFile(writer.get(), "project.savshow", manifest);
-    for (auto it = sources.cbegin(); it != sources.cend(); ++it) addFile(writer.get(), it.key(), it.value());
+    addFile(writer.get(), "project.savshow", manifest, isCancelled);
+    for (auto it = sources.cbegin(); it != sources.cend(); ++it) addFile(writer.get(), it.key(), it.value(), isCancelled);
     checkArchive(writer.get(), archive_write_close(writer.get()));
+    if (isCancelled && isCancelled()) throw std::runtime_error("Package export cancelled");
     if (!output.commit()) throw std::runtime_error(output.errorString().toStdString());
 }
 
-Project readProjectPackage(const QString& path) {
+Project readProjectPackage(const QString& path, const std::function<bool()>& isCancelled) {
+    if (isCancelled && isCancelled()) throw std::runtime_error("Package load cancelled");
     ReadContext input;
     input.file.setFileName(path);
     if (!input.file.open(QIODevice::ReadOnly)) throw std::runtime_error(input.file.errorString().toStdString());
@@ -236,6 +252,7 @@ Project readProjectPackage(const QString& path) {
         auto reader = openPackage(input);
         archive_entry* entry = nullptr;
         for (;;) {
+            if (isCancelled && isCancelled()) throw std::runtime_error("Package load cancelled");
             const auto result = archive_read_next_header(reader.get(), &entry);
             if (result == ARCHIVE_EOF) break;
             checkArchive(reader.get(), result);
@@ -253,7 +270,7 @@ Project readProjectPackage(const QString& path) {
             if (isManifest) {
                 if (size > maxManifestSize) throw std::runtime_error("Package project file is too large");
                 manifest.reserve(static_cast<qsizetype>(size)); hasManifest = true;
-                readEntry(reader.get(), name, size, [&](const char* data, qint64 count) { manifest.append(data, count); });
+                readEntry(reader.get(), name, size, [&](const char* data, qint64 count) { manifest.append(data, count); }, isCancelled);
                 continue;
             }
             if (size > std::numeric_limits<qint64>::max() - required) throw std::runtime_error("Package is too large");
@@ -286,6 +303,7 @@ Project readProjectPackage(const QString& path) {
     auto reader = openPackage(input);
     archive_entry* entry = nullptr;
     for (;;) {
+        if (isCancelled && isCancelled()) throw std::runtime_error("Package load cancelled");
         const auto result = archive_read_next_header(reader.get(), &entry);
         if (result == ARCHIVE_EOF) break;
         checkArchive(reader.get(), result);
@@ -296,11 +314,11 @@ Project readProjectPackage(const QString& path) {
         if (!output.open(QIODevice::WriteOnly | QIODevice::NewOnly)) throw std::runtime_error(output.errorString().toStdString());
         readEntry(reader.get(), name, media.value(name), [&](const char* data, qint64 count) {
             if (output.write(data, count) != count) throw std::runtime_error(output.errorString().toStdString());
-        });
+        }, isCancelled);
         if (!output.flush()) throw std::runtime_error("Incomplete package entry: " + name.toStdString());
     }
     checkArchive(reader.get(), archive_read_close(reader.get()));
-    loadProjectMedia(project);
+    loadProjectMedia(project, isCancelled);
     project.packageDirectory = std::move(directory);
     return project;
 }

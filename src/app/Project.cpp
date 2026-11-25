@@ -1,4 +1,5 @@
 #include "app/Project.h"
+#include "media/AudioSources.h"
 #include "media/MidiOutput.h"
 #include <QDir>
 #include <QFile>
@@ -7,14 +8,49 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QTemporaryFile>
 #include <QUuid>
 #include <QPainter>
 #include <QDataStream>
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
 #include <set>
 #include <limits>
 #include <stdexcept>
+#ifdef Q_OS_WIN
+#include <io.h>
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#ifdef Q_OS_LINUX
+#include <linux/fs.h>
+#include <sys/syscall.h>
+#endif
+#endif
 
 namespace sav {
+namespace {
+bool nativeSameFsRename(const QString& src, const QString& dst, QString& error) {
+#ifdef Q_OS_WIN
+    const std::wstring s = src.toStdWString();
+    const std::wstring d = dst.toStdWString();
+    // Never pass MOVEFILE_COPY_ALLOWED so GUI-thread publish cannot fall back to a synchronous cross-volume copy.
+    if (!MoveFileExW(s.c_str(), d.c_str(), 0)) {
+        error = QString("Win32 error %1").arg(GetLastError());
+        return false;
+    }
+    return true;
+#else
+    if (::rename(QFile::encodeName(src).constData(), QFile::encodeName(dst).constData()) != 0) {
+        error = QString::fromLocal8Bit(std::strerror(errno));
+        return false;
+    }
+    return true;
+#endif
+}
+}
 QString newId() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
 QString timecode(Frame position, double fps) {
     const auto whole = position / sampleRate;
@@ -52,6 +88,58 @@ std::vector<std::string> linkedClips(const Project& p, const std::string& id) {
     for (const auto& c : p.show.clips) if (c.id == id) link = c.link;
     if (!link.empty()) for (const auto& c : p.show.clips) if (c.link == link && c.id != id) ids.push_back(c.id);
     return ids;
+}
+std::string splitLinked(Project& p, const std::string& id, Frame time, const std::string& tailId, bool rejectShapedCut) {
+    const auto primary = std::find_if(p.show.clips.begin(), p.show.clips.end(), [&](const Clip& c) { return c.id == id; });
+    if (primary == p.show.clips.end()) throw std::runtime_error("Unknown clip ID");
+    if (time <= primary->start || time >= primary->end()) throw std::runtime_error("Split time must fall strictly inside the clip");
+    const auto ids = linkedClips(p, id);
+    for (const auto& c : p.show.clips) {
+        if (std::find(ids.begin(), ids.end(), c.id) == ids.end()) continue;
+        if (c.loop) throw std::runtime_error("Looping clips cannot be split; their loop starts at the clip's source in");
+        if (rejectShapedCut && time > c.start && time < c.end()) {
+            const Frame cut = time - c.start;
+            for (int property = 0; property < 6; ++property) {
+                const auto* e = envelope(c, property);
+                const auto right = std::upper_bound(e->points.begin(), e->points.end(), cut,
+                    [](Frame t, const Keyframe& k) { return t < k.time; });
+                if (right != e->points.begin() && right != e->points.end()) {
+                    const auto& prev = *(right - 1);
+                    if (prev.time < cut && (prev.shape == CurveShape::SCurve || prev.shape == CurveShape::Curve) && prev.bend != 0)
+                        throw std::runtime_error("Cannot split inside a shaped Curve or S-curve automation segment without altering its curve; adjust or flatten that segment first");
+                }
+            }
+        }
+    }
+    const auto link = primary->link.empty() ? std::string() : newId().toStdString();
+    std::string second;
+    std::vector<Clip> tails;
+    for (auto& c : p.show.clips) {
+        if (std::find(ids.begin(), ids.end(), c.id) == ids.end()) continue;
+        if (c.start >= time) {
+            // A linked partner wholly after the cut belongs to the tail half.
+            c.link = link;
+            continue;
+        }
+        if (c.end() <= time) continue; // Wholly before the cut: stays with the head half.
+        const Frame cut = time - c.start;
+        Clip tail = c;
+        tail.id = (c.id == ids.front() && !tailId.empty()) ? tailId : newId().toStdString();
+        tail.link = link; tail.start = time; tail.duration = c.duration - cut; tail.offset = c.offset + cut;
+        if (c.id == ids.front()) second = tail.id;
+        // Clip-relative automation continues across the cut with the value at the cut.
+        for (int property = 0; property < 6; ++property) {
+            auto* head = envelope(c, property); auto* rest = envelope(tail, property);
+            if (head->points.empty()) continue;
+            Keyframe at = cutPoint(*head, cut, propertyValue(c, property)); at.time = 0;
+            rest->points.clear(); rest->points.push_back(at);
+            for (auto point : head->points) if (point.time > cut) { point.time -= cut; rest->points.push_back(point); }
+            std::erase_if(head->points, [=](const Keyframe& point) { return point.time >= cut; }); head->points.push_back({cut, at.value});
+        }
+        c.duration = cut; tails.push_back(std::move(tail));
+    }
+    p.show.clips.insert(p.show.clips.end(), tails.begin(), tails.end());
+    return second;
 }
 Envelope* envelope(Clip& clip, int property) {
     switch (property) { case 0: return &clip.volume; case 1: return &clip.balance; case 2: return &clip.positionX;
@@ -251,22 +339,42 @@ int readInt(const QJsonObject& o, const char* key, int fallback) {
     if (std::floor(n) != n || n < std::numeric_limits<int>::min() || n > std::numeric_limits<int>::max()) invalidField(key);
     return static_cast<int>(n);
 }
-MediaAsset loadAsset(const MediaAsset& entry) {
+MediaAsset loadAsset(const MediaAsset& entry, const std::function<bool()>& isCancelled = {}) {
+    if (isCancelled && isCancelled()) throw std::runtime_error("Project load cancelled");
     try {
-        auto a = loadMedia(entry.path);
+        auto a = loadMedia(entry.path, isCancelled);
         a.id = entry.id; if (!entry.name.isEmpty()) a.name = entry.name;
         return a;
     } catch (const std::exception& e) {
+        if (isCancelled && isCancelled()) throw;
         // One missing or damaged file must not prevent opening the show.
         MediaAsset a = entry; a.offline = true; a.problem = QString::fromUtf8(e.what());
         if (a.name.isEmpty()) a.name = QFileInfo(a.path).fileName();
         return a;
     }
 }
+QString canonicalizeDirectoryPath(const QString& dirPath) {
+    if (dirPath.isEmpty()) return dirPath;
+    QDir dir(dirPath);
+    QStringList trailing;
+    QString canonicalAncestor = dir.canonicalPath();
+    while (canonicalAncestor.isEmpty()) {
+        const QString current = dir.absolutePath();
+        const QString leaf = dir.dirName();
+        if (leaf.isEmpty() || !dir.cdUp() || dir.absolutePath() == current) break;
+        trailing.prepend(leaf);
+        canonicalAncestor = dir.canonicalPath();
+    }
+    if (canonicalAncestor.isEmpty()) return QDir::cleanPath(QDir(dirPath).absolutePath());
+    QDir rebuilt(canonicalAncestor);
+    for (const QString& segment : trailing) rebuilt.setPath(rebuilt.filePath(segment));
+    return rebuilt.path();
+}
 }
 QJsonObject projectJson(const Project& p, const QString& directory) {
     QJsonArray tracks, clips, markers, assets;
-    const QDir dir(directory);
+    const QString canonicalBase = canonicalizeDirectoryPath(directory);
+    const QDir dir(canonicalBase);
     for (const auto& t : p.show.tracks) tracks.append(QJsonObject{
         {"id", QString::fromStdString(t.id)}, {"name", QString::fromStdString(t.name)}, {"visual", t.visual}, {"async", t.async},
         {"muted", t.muted}, {"gain", t.gain}, {"pan", t.pan}, {"left", t.left}, {"right", t.right}});
@@ -285,24 +393,223 @@ QJsonObject projectJson(const Project& p, const QString& directory) {
         markers.append(QJsonObject{{"id", QString::fromStdString(m.id)}, {"name", QString::fromStdString(m.name)},
             {"time", static_cast<double>(m.time)}, {"hold", m.hold}, {"timing", m.timing == MidiTiming::Arrival ? "arrival" : "resume"}, {"message", bytes}});
     }
+    auto isCanonicalAncestor = [](const QString& ancestor, const QString& target) {
+        if (ancestor.isEmpty() || target.isEmpty()) return false;
+        if (ancestor == target) return true;
+        const QString prefix = ancestor.endsWith('/') ? ancestor : (ancestor + '/');
+        return target.startsWith(prefix);
+    };
+    const QString cleanBase = directory.isEmpty() ? QString() : QDir::cleanPath(QDir(directory).absolutePath());
     for (const auto& a : p.assets) {
-        assets.append(QJsonObject{{"id", a.id}, {"name", a.name}, {"path", directory.isEmpty() ? a.path : dir.relativeFilePath(a.path)}});
+        QString assetPath = a.path;
+        if (!directory.isEmpty() && !assetPath.isEmpty()) {
+            // If the asset path is already lexically inside the manifest directory (e.g.
+            // root/show/media/title.png with media -> root), compute the relative path directly
+            // without dereferencing any media directory or file symlinks.
+            const QString cleanAsset = QDir::cleanPath(QFileInfo(assetPath).absoluteFilePath());
+            if (isCanonicalAncestor(cleanBase, cleanAsset)) {
+                assetPath = QDir(cleanBase).relativeFilePath(cleanAsset);
+            } else {
+                // Walk top-down through the asset's parent directory segments, advancing only while
+                // each prefix's canonical path is an ancestor of canonicalBase (and stopping as
+                // soon as it equals canonicalBase or diverges). This reconciles shared OS symlink
+                // aliases (/var -> /private/var, /tmp -> /private/tmp) without ever stepping into
+                // or dereferencing a media directory symlink in a divergent branch or below base
+                // (e.g. show/media -> volume-a saved into volume-a/pictures).
+                const QFileInfo assetInfo(assetPath);
+                const QString absDir = QDir::cleanPath(assetInfo.absolutePath());
+                QString matchedCanonical;
+                qsizetype matchedLen = 0;
+                qsizetype pos = 0;
+                if (absDir.startsWith("//")) {
+                    const qsizetype s1 = absDir.indexOf('/', 2);
+                    const qsizetype s2 = s1 >= 0 ? absDir.indexOf('/', s1 + 1) : -1;
+                    pos = s2 >= 0 ? s2 + 1 : absDir.size();
+                } else if (absDir.size() >= 3 && absDir[1] == ':' && absDir[2] == '/') {
+                    pos = 3;
+                } else if (absDir.startsWith('/')) {
+                    pos = 1;
+                }
+                auto checkPrefix = [&](qsizetype endPos) -> int {
+                    const QString sub = absDir.left(endPos);
+                    // Only follow root-level OS directory aliases (e.g. /var -> /private/var,
+                    // /tmp -> /private/tmp); never dereference user-created directory symlinks
+                    // (e.g. sibling media -> vol-a) into their current target.
+                    const bool isRootChild = sub.lastIndexOf('/') == 0 && sub.size() > 1;
+                    if (QFileInfo(sub).isSymLink() && !isRootChild) return 0;
+                    const QString can = QDir(sub).canonicalPath();
+                    if (!isCanonicalAncestor(can, canonicalBase)) return 0;
+                    matchedCanonical = can;
+                    matchedLen = endPos;
+                    return can == canonicalBase ? 2 : 1;
+                };
+                if (pos > 0 && checkPrefix(pos) == 1) {
+                    while (pos < absDir.size()) {
+                        const qsizetype slash = absDir.indexOf('/', pos);
+                        const qsizetype endPos = slash >= 0 ? slash : absDir.size();
+                        if (checkPrefix(endPos) != 1) break;
+                        pos = slash >= 0 ? slash + 1 : absDir.size();
+                    }
+                }
+                if (!matchedCanonical.isEmpty()) {
+                    QString remainder = absDir.mid(matchedLen);
+                    while (remainder.startsWith('/')) remainder.remove(0, 1);
+                    QDir rebuilt(matchedCanonical);
+                    if (!remainder.isEmpty()) rebuilt.setPath(rebuilt.filePath(remainder));
+                    assetPath = dir.relativeFilePath(rebuilt.filePath(assetInfo.fileName()));
+                } else {
+                    assetPath = QDir(directory).relativeFilePath(assetPath);
+                }
+            }
+        }
+        assets.append(QJsonObject{{"id", a.id}, {"name", a.name}, {"path", assetPath}});
     }
     QJsonObject root{{"format", "simpleavshow"}, {"version", 1}, {"title", p.title}, {"width", p.width}, {"height", p.height}, {"fps", p.fps},
         {"duration", static_cast<double>(p.show.duration)}, {"tracks", tracks}, {"clips", clips}, {"markers", markers}, {"assets", assets}};
     return root;
 }
-void writeProject(const Project& p, const QString& path) {
+namespace {
+QString canonicalManifestDirectory(const QString& filePath) {
+    const QFileInfo fi(filePath);
+    // Only follow the manifest file's symlink target when the manifest itself is a symlink;
+    // regular files keep their literal parent path spelling (e.g. /var/folders/... on macOS).
+    if (fi.isSymLink()) {
+        if (const QString canonicalFile = fi.canonicalFilePath(); !canonicalFile.isEmpty())
+            return QFileInfo(canonicalFile).absolutePath();
+    }
+    return fi.absolutePath();
+}
+}
+void writeProject(const Project& p, const QString& path, bool allowOverwrite) {
+    constexpr qint64 compactThresholdBytes = 32 * 1024 * 1024;
     validate(p);
     for (const auto& a : p.assets)
         if (a.path.isEmpty()) throw std::runtime_error("Use Export demo first to save generated media");
-    const auto root = projectJson(p, QFileInfo(path).absolutePath());
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error(file.errorString().toStdString());
-    const auto bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
-    if (file.write(bytes) != bytes.size() || !file.commit()) throw std::runtime_error(file.errorString().toStdString());
+    const QFileInfo targetInfo(path);
+    if (allowOverwrite && targetInfo.isSymLink()) {
+        const QString canonical = targetInfo.canonicalFilePath();
+        if (!canonical.isEmpty() && !canonical.endsWith(".savshow", Qt::CaseInsensitive))
+            throw std::runtime_error("Refusing to overwrite symlink target that is not a .savshow file");
+    }
+    const QString resolvedPath = (allowOverwrite && targetInfo.isSymLink() && !targetInfo.canonicalFilePath().isEmpty())
+        ? targetInfo.canonicalFilePath()
+        : path;
+    const auto normalizedPath = [](const QString& pth) {
+        const QFileInfo fi(pth);
+        const QString can = fi.canonicalFilePath();
+        return can.isEmpty() ? QDir::cleanPath(fi.absoluteFilePath()) : can;
+    };
+    const QString resolvedNorm = normalizedPath(resolvedPath);
+    for (const auto& a : p.assets) {
+        if (!a.path.isEmpty() && normalizedPath(a.path) == resolvedNorm)
+            throw std::runtime_error("Cannot overwrite a media file referenced by this show");
+    }
+    auto root = projectJson(p, canonicalManifestDirectory(resolvedPath));
+    root.insert("pathBase", "canonical");
+    QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    if (bytes.size() > compactThresholdBytes) bytes = QJsonDocument(root).toJson(QJsonDocument::Compact);
+    if (!allowOverwrite && (QFileInfo::exists(path) || QFileInfo(path).isSymLink()))
+        throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
+    const QFileInfo existingTarget(resolvedPath);
+    const bool hadExistingTarget = allowOverwrite && existingTarget.exists();
+    if (hadExistingTarget && !existingTarget.isWritable())
+        throw std::runtime_error("Destination file is read-only");
+    // The manifest is written to a sibling file that is closed before it is renamed into place: Windows
+    // refuses to rename a file that is still open, and an unrenamed temporary is removed on any failure.
+    struct TemporaryName {
+        QString path;
+        bool keep = false;
+        ~TemporaryName() { if (!keep && !path.isEmpty()) QFile::remove(path); }
+    } temp{QFileInfo(resolvedPath).absolutePath() + "/.simpleavshow-save-" + QUuid::createUuid().toString(QUuid::Id128) + ".tmp"};
+    {
+        QFile file(temp.path);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::NewOnly)) { temp.path.clear(); throw std::runtime_error(file.errorString().toStdString()); }
+        if (file.write(bytes) != bytes.size() || !file.flush()) throw std::runtime_error(file.errorString().toStdString());
+        // Sync file data to durable storage before the rename so a power cut cannot leave an empty manifest.
+        if (const int fd = file.handle(); fd >= 0) {
+#ifdef Q_OS_WIN
+            if (HANDLE h = reinterpret_cast<HANDLE>(_get_osfhandle(fd)); h != INVALID_HANDLE_VALUE) {
+                if (!FlushFileBuffers(h))
+                    throw std::runtime_error("Cannot sync project file to disk (Win32 error " + std::to_string(GetLastError()) + ")");
+            }
+#elif defined(Q_OS_MACOS)
+            if (::fcntl(fd, F_FULLFSYNC) != 0 && ::fsync(fd) != 0)
+                throw std::runtime_error(std::string("Cannot sync project file to disk: ") + std::strerror(errno));
+#else
+            if (::fsync(fd) != 0)
+                throw std::runtime_error(std::string("Cannot sync project file to disk: ") + std::strerror(errno));
+#endif
+        }
+        file.close();
+        if (file.error() != QFileDevice::NoError) throw std::runtime_error(file.errorString().toStdString());
+    }
+    const QString& tempPath = temp.path;
+    if (hadExistingTarget) {
+        // Preserve existing file permissions rather than widening private manifests (e.g. 0600 -> 0644).
+        QFile::setPermissions(tempPath, existingTarget.permissions());
+    }
+#ifdef Q_OS_WIN
+    // A scanner or indexer briefly opening the new file makes the rename fail with a sharing violation; retry.
+    const auto move = [&](const QString& to, DWORD flags) -> DWORD {
+        const std::wstring srcW = QDir::toNativeSeparators(tempPath).toStdWString();
+        const std::wstring dstW = QDir::toNativeSeparators(to).toStdWString();
+        for (int attempt = 0;; ++attempt) {
+            if (MoveFileExW(srcW.c_str(), dstW.c_str(), flags)) return ERROR_SUCCESS;
+            const DWORD err = GetLastError();
+            if ((err != ERROR_SHARING_VIOLATION && err != ERROR_LOCK_VIOLATION && err != ERROR_ACCESS_DENIED) || attempt >= 40) return err;
+            Sleep(50);
+        }
+    };
+#endif
+    if (allowOverwrite) {
+        // Atomic rename replaces the target entry directly and never follows a symlink created after pre-checks.
+#ifdef Q_OS_WIN
+        if (const DWORD err = move(resolvedPath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH); err != ERROR_SUCCESS)
+            throw std::runtime_error("Cannot save project file (Win32 error " + std::to_string(err) + ")");
+#else
+        if (::rename(QFile::encodeName(tempPath).constData(), QFile::encodeName(resolvedPath).constData()) != 0) {
+            throw std::runtime_error(std::string("Cannot save project file: ") + std::strerror(errno));
+        }
+#endif
+        temp.keep = true;
+        return;
+    }
+#ifdef Q_OS_WIN
+    if (const DWORD err = move(path, MOVEFILE_WRITE_THROUGH); err != ERROR_SUCCESS) {
+        if (err == ERROR_ALREADY_EXISTS || err == ERROR_FILE_EXISTS)
+            throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
+        throw std::runtime_error("Cannot save project file (Win32 error " + std::to_string(err) + ")");
+    }
+    temp.keep = true;
+#else
+    const QByteArray src = QFile::encodeName(tempPath);
+    const QByteArray dst = QFile::encodeName(path);
+#ifdef Q_OS_MACOS
+    if (::renamex_np(src.constData(), dst.constData(), RENAME_EXCL) == 0) {
+        temp.keep = true;
+        return;
+    }
+    if (errno == EEXIST)
+        throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
+#elif defined(Q_OS_LINUX) && defined(SYS_renameat2) && defined(RENAME_NOREPLACE)
+    if (::syscall(SYS_renameat2, AT_FDCWD, src.constData(), AT_FDCWD, dst.constData(), RENAME_NOREPLACE) == 0) {
+        temp.keep = true;
+        return;
+    }
+    if (errno == EEXIST)
+        throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
+#endif
+    if (::link(src.constData(), dst.constData()) == 0) {
+        return; // The temporary name is removed while dst keeps the linked inode.
+    }
+    if (errno == EEXIST)
+        throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
+    if (errno == EPERM || errno == EOPNOTSUPP || errno == ENOTSUP || errno == EXDEV || errno == ENOSYS || errno == EINVAL)
+        throw std::runtime_error("This filesystem does not support atomic no-overwrite save; choose another location or pass overwrite: true");
+    throw std::runtime_error(std::string("Cannot save project file: ") + std::strerror(errno));
+#endif
 }
-Project parseProject(const QByteArray& json, const QString& directory) {
+Project parseProject(const QByteArray& json, const QString& directory, const QString& aliasDirectory) {
     QJsonParseError parseError; const auto doc = QJsonDocument::fromJson(json, &parseError);
     if (parseError.error != QJsonParseError::NoError || !doc.isObject()) throw std::runtime_error("Invalid project JSON");
     const auto root = doc.object();
@@ -310,12 +617,27 @@ Project parseProject(const QByteArray& json, const QString& directory) {
     for (const char* name : {"tracks", "clips", "markers", "assets"}) if (!root[name].isArray()) throw std::runtime_error("Missing project array");
     Project p; p.title = readString(root, "title"); p.width = readInt(root, "width", 0); p.height = readInt(root, "height", 0); p.fps = readNumber(root, "fps", 0);
     p.show.duration = readFrame(root, "duration");
-    const QDir dir(directory);
+    const QDir canonicalDir(directory);
+    const QDir aliasDir(aliasDirectory);
+    // Manifests saved with pathBase == "canonical" always resolve against their canonical manifest
+    // directory; legacy manifests without pathBase opened through a symlink preserve origin/main
+    // alias-directory resolution first and fall back to the canonical directory if absent.
+    const bool useLegacyAliasFirst = !aliasDirectory.isEmpty() && root["pathBase"].toString() != "canonical";
     for (auto value : root["assets"].toArray()) {
         const auto o = readObject(value); MediaAsset a; a.id = readString(o, "id"); a.name = readString(o, "name");
         if (a.id.isEmpty() || p.assets.contains(a.id)) throw std::runtime_error("Duplicate or missing asset ID");
         const auto source = readString(o, "path"); if (source.isEmpty()) invalidField("path");
-        a.path = dir.absoluteFilePath(source); p.assets.insert(a.id, std::move(a));
+        QString resolved;
+        if (useLegacyAliasFirst && !QDir::isAbsolutePath(source)) {
+            resolved = aliasDir.absoluteFilePath(source);
+            if (!QFileInfo::exists(resolved)) {
+                const QString canonicalCandidate = canonicalDir.absoluteFilePath(source);
+                if (QFileInfo::exists(canonicalCandidate)) resolved = canonicalCandidate;
+            }
+        } else {
+            resolved = canonicalDir.absoluteFilePath(source);
+        }
+        a.path = resolved; p.assets.insert(a.id, std::move(a));
     }
     for (auto value : root["tracks"].toArray()) {
         const auto o = readObject(value);
@@ -349,33 +671,122 @@ Project parseProject(const QByteArray& json, const QString& directory) {
     }
     return p;
 }
-void loadProjectMedia(Project& p) {
-    for (auto& a : p.assets) a = loadAsset(a);
+void loadProjectMedia(Project& p, const std::function<bool()>& isCancelled) {
+    for (auto& a : p.assets) {
+        if (isCancelled && isCancelled()) throw std::runtime_error("Project load cancelled");
+        a = loadAsset(a, isCancelled);
+    }
+    if (isCancelled && isCancelled()) throw std::runtime_error("Project load cancelled");
     bindAudio(p); validate(p);
 }
-Project readProject(const QString& path) {
-    if (isProjectPackage(path)) return readProjectPackage(path);
+Project readProject(const QString& path, const std::function<bool()>& isCancelled) {
+    if (isCancelled && isCancelled()) throw std::runtime_error("Project load cancelled");
+    if (isProjectPackage(path)) return readProjectPackage(path, isCancelled);
+    constexpr qint64 maxLeadingWhitespaceBytes = 1024 * 1024;
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) throw std::runtime_error(file.errorString().toStdString());
-    Project p = parseProject(file.readAll(), QFileInfo(path).absolutePath());
-    loadProjectMedia(p); return p;
+    // Reject non-JSON binary files immediately before allocating a manifest buffer,
+    // while allowing an optional UTF-8 BOM and leading JSON whitespace.
+    qint64 contentStart = 0;
+    {
+        char bom[3]{};
+        const qint64 nBom = file.peek(bom, 3);
+        if (nBom == 3 && static_cast<unsigned char>(bom[0]) == 0xef &&
+            static_cast<unsigned char>(bom[1]) == 0xbb && static_cast<unsigned char>(bom[2]) == 0xbf) {
+            contentStart = 3;
+            file.seek(3);
+        }
+        bool foundObject = false;
+        QByteArray chunk(4096, '\0');
+        qint64 scanned = 0;
+        while (!file.atEnd() && scanned < maxLeadingWhitespaceBytes) {
+            const qint64 n = file.read(chunk.data(), chunk.size());
+            if (n <= 0) break;
+            scanned += n;
+            for (qint64 i = 0; i < n; ++i) {
+                const char ch = chunk[static_cast<qsizetype>(i)];
+                if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') continue;
+                if (ch == '{') { foundObject = true; break; }
+                throw std::runtime_error("Invalid project JSON");
+            }
+            if (foundObject) break;
+        }
+        if (!foundObject) throw std::runtime_error("Invalid project JSON");
+        if (!file.seek(contentStart)) throw std::runtime_error(file.errorString().toStdString());
+    }
+    const QByteArray bytes = file.readAll();
+    const QString canonicalDir = canonicalManifestDirectory(path);
+    const QFileInfo openInfo(path);
+    const QString aliasDir = openInfo.absolutePath();
+    const QString aliasBase = (openInfo.isSymLink() && !aliasDir.isEmpty() && aliasDir != canonicalDir)
+        ? aliasDir
+        : QString();
+    Project p = parseProject(bytes, canonicalDir, aliasBase);
+    loadProjectMedia(p, isCancelled); return p;
 }
-void materializeProjectMedia(Project& p, const QString& directory) {
+namespace {
+void copyFileCancellable(const QString& source, const QString& target, const std::function<bool()>& isCancelled) {
+    QFile in(source);
+    if (!in.open(QIODevice::ReadOnly)) throw std::runtime_error("Cannot read packaged media: " + source.toStdString());
+    QSaveFile out(target);
+    if (!out.open(QIODevice::WriteOnly)) throw std::runtime_error("Cannot copy packaged media: " + target.toStdString());
+    QByteArray buffer(1024 * 1024, '\0');
+    while (!in.atEnd()) {
+        if (isCancelled && isCancelled()) throw std::runtime_error("Save cancelled");
+        const qint64 n = in.read(buffer.data(), buffer.size());
+        if (n < 0) throw std::runtime_error("Cannot read packaged media: " + source.toStdString());
+        if (n == 0) break;
+        if (out.write(buffer.constData(), n) != n) throw std::runtime_error("Cannot write packaged media: " + target.toStdString());
+    }
+    if (isCancelled && isCancelled()) throw std::runtime_error("Save cancelled");
+    if (!out.commit()) throw std::runtime_error("Cannot finalize packaged media: " + target.toStdString());
+}
+
+void writeGeneratedAsset(const MediaAsset& a, const QString& target, const std::function<bool()>& isCancelled) {
+    QSaveFile file(target);
+    if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error(file.errorString().toStdString());
+    if (a.image) {
+        if (isCancelled && isCancelled()) throw std::runtime_error("Save cancelled");
+        if (!a.still.save(&file, "PNG")) throw std::runtime_error("Cannot save generated image");
+    } else if (a.audio && !a.audio->storage) {
+        QDataStream out(&file); out.setByteOrder(QDataStream::LittleEndian);
+        const quint16 channels = a.audio->mono ? 1 : 2;
+        const auto size = static_cast<quint64>(a.audio->length()) * channels * 2;
+        if (size > std::numeric_limits<quint32>::max() - 36) throw std::runtime_error("Generated audio is too large for WAV export");
+        const auto bytes = static_cast<quint32>(size);
+        out.writeRawData("RIFF", 4); out << quint32(bytes + 36); out.writeRawData("WAVEfmt ", 8);
+        out << quint32(16) << quint16(1) << channels << quint32(sampleRate) << quint32(sampleRate * channels * 2) << quint16(channels * 2) << quint16(16);
+        out.writeRawData("data", 4); out << bytes;
+        const std::size_t step = a.audio->mono ? 2 : 1;
+        for (std::size_t i = 0; i < a.audio->samples.size(); i += step) {
+            if (((i / step) & 0xffff) == 0 && isCancelled && isCancelled()) throw std::runtime_error("Save cancelled");
+            out << static_cast<qint16>(std::clamp(a.audio->samples[i], -1.f, 1.f) * 32767);
+        }
+        if (out.status() != QDataStream::Ok) throw std::runtime_error("Cannot write generated audio");
+    } else {
+        throw std::runtime_error("Asset has no source file");
+    }
+    if (isCancelled && isCancelled()) throw std::runtime_error("Save cancelled");
+    if (!file.commit()) throw std::runtime_error(file.errorString().toStdString());
+}
+}
+
+void materializeProjectMedia(Project& p, const QString& directory, const std::function<bool()>& isCancelled) {
     QDir dir(directory);
     const bool existed = dir.exists();
     QMap<QString, QString> copied;
     QStringList created;
     try {
         for (auto& a : p.assets) {
+            if (isCancelled && isCancelled()) throw std::runtime_error("Save cancelled");
             const bool extracted = p.packageDirectory && !a.path.isEmpty() &&
                 QFileInfo(a.path).absoluteFilePath().startsWith(p.packageDirectory->path() + "/");
             if (!a.path.isEmpty() && !extracted) continue;
             if (!QDir().mkpath(dir.absolutePath())) throw std::runtime_error("Cannot create media directory");
             if (extracted) {
                 if (!copied.contains(a.path)) {
-                    // QFile::copy writes a temporary file and renames it, so a failed copy leaves nothing behind.
                     const QString target = dir.filePath(newId() + "." + QFileInfo(a.path).suffix());
-                    if (!QFile::copy(a.path, target)) throw std::runtime_error("Cannot copy packaged media: " + a.path.toStdString());
+                    copyFileCancellable(a.path, target, isCancelled);
                     created.append(target); copied.insert(a.path, target);
                 }
                 a.path = copied.value(a.path);
@@ -385,24 +796,7 @@ void materializeProjectMedia(Project& p, const QString& directory) {
                 continue;
             }
             const QString target = dir.filePath(newId() + (a.image ? ".png" : ".wav"));
-            QSaveFile file(target);
-            if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error(file.errorString().toStdString());
-            if (a.image) {
-                if (!a.still.save(&file, "PNG")) throw std::runtime_error("Cannot save generated image");
-            } else if (a.audio && !a.audio->storage) {
-                QDataStream out(&file); out.setByteOrder(QDataStream::LittleEndian);
-                const quint16 channels = a.audio->mono ? 1 : 2;
-                const auto size = static_cast<quint64>(a.audio->length()) * channels * 2;
-                if (size > std::numeric_limits<quint32>::max() - 36) throw std::runtime_error("Generated audio is too large for WAV export");
-                const auto bytes = static_cast<quint32>(size);
-                out.writeRawData("RIFF", 4); out << quint32(bytes + 36); out.writeRawData("WAVEfmt ", 8);
-                out << quint32(16) << quint16(1) << channels << quint32(sampleRate) << quint32(sampleRate * channels * 2) << quint16(channels * 2) << quint16(16);
-                out.writeRawData("data", 4); out << bytes;
-                for (std::size_t i = 0; i < a.audio->samples.size(); i += a.audio->mono ? 2 : 1)
-                    out << static_cast<qint16>(std::clamp(a.audio->samples[i], -1.f, 1.f) * 32767);
-                if (out.status() != QDataStream::Ok) throw std::runtime_error("Cannot write generated audio");
-            } else throw std::runtime_error("Asset has no source file");
-            if (!file.commit()) throw std::runtime_error(file.errorString().toStdString());
+            writeGeneratedAsset(a, target, isCancelled);
             created.append(target); a.path = target;
         }
     } catch (...) {
@@ -412,5 +806,93 @@ void materializeProjectMedia(Project& p, const QString& directory) {
     }
     p.packageDirectory.reset();
     bindAudio(p);
+}
+
+StagedProjectMedia stageProjectMedia(const Project& p, const QString& stagingDirectory,
+                                     const QString& finalTargetDirectory,
+                                     const std::function<bool()>& isCancelled) {
+    if (isCancelled && isCancelled()) throw std::runtime_error("Save cancelled");
+    QDir dir(stagingDirectory);
+    QDir finalDir(finalTargetDirectory);
+    if (!QDir().mkpath(dir.absolutePath())) throw std::runtime_error("Cannot create media staging directory");
+    StagedProjectMedia staged;
+    QMap<QString, QString> copiedNames;
+    QMap<QString, qint64> stagedSizes;
+    for (auto it = p.assets.cbegin(); it != p.assets.cend(); ++it) {
+        if (isCancelled && isCancelled()) throw std::runtime_error("Save cancelled");
+        const auto& a = it.value();
+        const bool extracted = p.packageDirectory && !a.path.isEmpty() &&
+            QFileInfo(a.path).absoluteFilePath().startsWith(p.packageDirectory->path() + "/");
+        if (!a.path.isEmpty() && !extracted) continue;
+        if (extracted) {
+            if (!copiedNames.contains(a.path)) {
+                const QString fileName = newId() + "." + QFileInfo(a.path).suffix();
+                const QString stagedPath = dir.filePath(fileName);
+                copyFileCancellable(a.path, stagedPath, isCancelled);
+                copiedNames.insert(a.path, fileName);
+                stagedSizes.insert(fileName, QFileInfo(stagedPath).size());
+            }
+            const QString fileName = copiedNames.value(a.path);
+            staged.assetFileNames.insert(it.key(), fileName);
+            // Pre-build rebound WaveStorage + peaks on the worker thread so GUI publish is pointer-swap only.
+            if (a.audio) {
+                if (auto rebound = detail::rebindPcmWavePath(a.audio, finalDir.filePath(fileName), stagedSizes.value(fileName, -1)))
+                    staged.reboundAudio.insert(it.key(), std::move(rebound));
+            }
+        } else {
+            const QString fileName = newId() + (a.image ? ".png" : ".wav");
+            writeGeneratedAsset(a, dir.filePath(fileName), isCancelled);
+            staged.assetFileNames.insert(it.key(), fileName);
+        }
+    }
+    return staged;
+}
+
+void PublishedMediaRollback::rollback() const {
+    for (const auto& file : movedFiles) QFile::remove(file);
+    if (directoryCreated && !targetDirectory.isEmpty()) QDir().rmdir(targetDirectory);
+}
+
+PublishedMediaRollback publishStagedProjectMedia(Project& p, const QString& stagingDirectory, const QString& targetDirectory, const StagedProjectMedia& staged) {
+    PublishedMediaRollback rollback;
+    if (staged.assetFileNames.isEmpty()) {
+        p.packageDirectory.reset();
+        bindAudio(p);
+        return rollback;
+    }
+    QDir stageDir(stagingDirectory);
+    QDir targetDir(targetDirectory);
+    rollback.targetDirectory = targetDir.absolutePath();
+    rollback.directoryCreated = !targetDir.exists();
+    QMap<QString, QString> publishedNames;
+    try {
+        if (!QDir().mkpath(targetDir.absolutePath())) throw std::runtime_error("Cannot create media directory");
+        for (auto it = staged.assetFileNames.cbegin(); it != staged.assetFileNames.cend(); ++it) {
+            const QString& fileName = it.value();
+            if (!publishedNames.contains(fileName)) {
+                const QString src = stageDir.filePath(fileName);
+                const QString dst = targetDir.filePath(fileName);
+                QString renameErr;
+                if (!nativeSameFsRename(src, dst, renameErr))
+                    throw std::runtime_error("Cannot publish staged media atomically: " + dst.toStdString() + " (" + renameErr.toStdString() + ")");
+                rollback.movedFiles.append(dst);
+                publishedNames.insert(fileName, dst);
+            }
+        }
+        for (auto it = staged.assetFileNames.cbegin(); it != staged.assetFileNames.cend(); ++it) {
+            auto assetIt = p.assets.find(it.key());
+            if (assetIt == p.assets.end()) continue;
+            assetIt->path = publishedNames.value(it.value());
+            if (const auto rebound = staged.reboundAudio.constFind(it.key()); rebound != staged.reboundAudio.cend()) {
+                assetIt->audio = rebound.value();
+            }
+        }
+    } catch (...) {
+        rollback.rollback();
+        throw;
+    }
+    p.packageDirectory.reset();
+    bindAudio(p);
+    return rollback;
 }
 }

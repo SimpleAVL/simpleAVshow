@@ -3,6 +3,7 @@
 #include <QTcpServer>
 #include <QElapsedTimer>
 #include <QHash>
+#include <memory>
 
 namespace sav {
 // An opt-in web remote for phones and tablets on the local network. The page and its
@@ -13,9 +14,11 @@ public:
     explicit RemoteServer(Controller& controller, QObject* parent = nullptr);
     bool start(quint16 port = 48124);
     void stop();
-    bool running() const { return server_.isListening(); }
-    quint16 port() const { return server_.serverPort(); }
-    QString errorString() const { return server_.errorString(); }
+    // Atomically binds any replacement port before stopping the current listener or rotating the key.
+    bool reconfigure(bool enable, quint16 port, bool rotateKey, QString& error);
+    bool running() const { return server_ && server_->isListening(); }
+    quint16 port() const { return server_ ? server_->serverPort() : 0; }
+    QString errorString() const { return server_ ? server_->errorString() : QString(); }
     // The secret path segment. It is remembered across launches so phones can bookmark the page.
     QString key() const { return key_; }
     // Replaces the key, invalidating bookmarks and closing open connections.
@@ -32,7 +35,7 @@ signals:
     void stateChanged();
 private:
     Controller& c_;
-    QTcpServer server_;
+    std::unique_ptr<QTcpServer> server_;
     QString key_;
     QHash<QString, QElapsedTimer> seen_;
     void acceptConnection();

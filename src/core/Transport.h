@@ -17,7 +17,8 @@ enum class Action { Play, Pause, Seek, StopAll };
 // ready, so tracks, cues and holds stay aligned. Gap keeps show time running and silences only
 // the late voices, so the show stays in step with outside clocks (a band, timecode, video).
 enum class LateAudio { Freeze, Gap };
-struct Command { Action action; Frame position = 0; };
+enum class CommandSource : std::uint8_t { Operator = 0, ExternalAgent = 1, ChatAgent = 2 };
+struct Command { Action action; Frame position = 0; CommandSource source = CommandSource::Operator; std::uint64_t sourceEpoch = 0; };
 struct MidiEvent { int marker = -1; Frame time = 0; std::uint64_t epoch = 0; };
 
 class Transport {
@@ -27,7 +28,31 @@ public:
     // The device and MIDI consumer MUST be stopped before configure.
     // The Show remains immutable until the device is closed.
     void configure(std::shared_ptr<const Show> show, Frame position = 0);
-    bool command(Command command) noexcept { return commands_.push(command); }
+    bool command(Command command) noexcept {
+        if (command.action != Action::StopAll && urgentStop_.load(std::memory_order_acquire)) return false;
+        return commands_.push(command);
+    }
+    // Agent commands carry their session's epoch; revoking a session (disconnect, New, Show mode, an
+    // operator Stop All) bumps it, and the audio thread drops that session's commands it has not applied
+    // yet. Nothing already applied is undone: playback an agent started keeps going until stopped.
+    // External MCP clients and the embedded chat have separate epochs.
+    std::uint64_t externalAgentEpoch() const noexcept { return externalAgentEpoch_.load(std::memory_order_acquire); }
+    std::uint64_t chatAgentEpoch() const noexcept { return chatAgentEpoch_.load(std::memory_order_acquire); }
+    void invalidateChatAgentCommands() noexcept { chatAgentEpoch_.fetch_add(1, std::memory_order_acq_rel); }
+    void invalidateAllAgentCommands() noexcept {
+        externalAgentEpoch_.fetch_add(1, std::memory_order_acq_rel);
+        chatAgentEpoch_.fetch_add(1, std::memory_order_acq_rel);
+    }
+    bool isSourceValid(CommandSource source, std::uint64_t sourceEpoch) const noexcept {
+        if (source == CommandSource::Operator) return true;
+        if (source == CommandSource::ExternalAgent) return sourceEpoch == externalAgentEpoch_.load(std::memory_order_acquire);
+        return sourceEpoch == chatAgentEpoch_.load(std::memory_order_acquire);
+    }
+    // Lock-free emergency Stop All that succeeds even when the bounded command queue is full.
+    void requestStopAll() noexcept { urgentStop_.store(true, std::memory_order_release); }
+    bool stopAllPending() const noexcept { return urgentStop_.load(std::memory_order_acquire); }
+    // Safe only when the audio stream is closed: clears pending commands, stops all voices, and resets counters.
+    void forceStopAll() noexcept;
     void render(float* output, unsigned count, unsigned channels) noexcept;
     bool takeMidi(MidiEvent& event) noexcept { return midi_.pop(event); }
     Frame position() const noexcept { return publishedPosition_.load(std::memory_order_acquire); }
@@ -53,6 +78,7 @@ public:
     unsigned readRetries() const noexcept { return readRetries_.load(); }
     bool audioReadFailed() const noexcept { return audioReadFailed_.load(); }
     std::uint64_t epoch() const noexcept { return epoch_.load(std::memory_order_acquire); }
+    std::uint64_t commandsApplied() const noexcept { return commandsApplied_.load(std::memory_order_acquire); }
     // False after a configure that failed partway: nothing plays until a configure succeeds.
     bool armed() const noexcept { return armed_.load(); }
     // Drops the show (the device MUST be stopped): silence until the next configure.
@@ -84,6 +110,8 @@ private:
     std::atomic<bool> armed_{false};
     Queue<Command, 128> commands_;
     DynamicQueue<MidiEvent> midi_;
+    // Resume cues of a hold that Play released, sent with the first frame that actually renders.
+    std::size_t resumeBegin_ = 0, resumeEnd_ = 0;
     Frame position_ = 0, sinceSeek_ = seekGrace; // Device frames rendered since the last seek, up to seekGrace.
     State state_ = State::Stopped;
     int heldMarker_ = -1;
@@ -91,9 +119,13 @@ private:
     std::atomic<State> publishedState_{State::Stopped};
     std::atomic<int> publishedMarker_{-1}, publishedVoices_{0};
     std::atomic<float> publishedPeak_{0};
-    std::atomic<bool> clipped_{false}, overflow_{false};
-    std::atomic<std::uint64_t> epoch_{0};
+    std::atomic<bool> clipped_{false}, overflow_{false}, urgentStop_{false};
+    std::atomic<std::uint64_t> epoch_{0}, externalAgentEpoch_{1}, chatAgentEpoch_{1};
+    std::uint64_t applied_ = 0;
+    std::atomic<std::uint64_t> commandsApplied_{0};
     void apply(Command command) noexcept;
+    void applyStopAll() noexcept;
+    void sendResumeCues() noexcept;
     void dispatch(int marker) noexcept;
     void publish(float peak) noexcept;
     void stopAudioWorker();

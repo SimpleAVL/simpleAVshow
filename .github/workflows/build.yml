@@ -255,11 +255,15 @@ jobs:
           $env:PATH = "$env:FFMPEG_ROOT/bin;$env:PATH"
           ctest --test-dir build -C Release --output-on-failure --timeout 300
           if ($LASTEXITCODE -ne 0) {
-            # Windows can drop a crashed test's buffered stdout; rerun the app suite into a file (QtTest flushes per line).
+            # Windows can drop a crashed test's buffered stdout; rerun the Qt suites into files (QtTest flushes per line).
+            # -nocrashhandler lets the tests' terminate handler print an uncaught exception's message to stderr.
             $env:QT_QPA_PLATFORM = 'offscreen'
-            & build/Release/app_tests.exe -o app-tests.txt,txt
-            Write-Host "app_tests exit code: $LASTEXITCODE"
-            if (Test-Path app-tests.txt) { Get-Content app-tests.txt | Select-String -NotMatch '^PASS' }
+            foreach ($suite in 'app', 'mcp', 'acp') {
+              & "build/Release/${suite}_tests.exe" -nocrashhandler -o "$suite-tests.txt,txt" 2> "$suite-stderr.txt"
+              Write-Host "${suite}_tests exit code: $LASTEXITCODE"
+              if (Test-Path "$suite-tests.txt") { Get-Content "$suite-tests.txt" | Select-String -NotMatch '^PASS' }
+              if (Test-Path "$suite-stderr.txt") { Get-Content "$suite-stderr.txt" | Select-String -NotMatch 'probeDevices|^\s*$' }
+            }
             exit 1
           }
       - run: cmake --install build --config Release --prefix "$pwd/dist"

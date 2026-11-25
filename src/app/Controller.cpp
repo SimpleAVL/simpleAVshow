@@ -42,8 +42,9 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
         if (configured_ && (!device.running() || stalled)) {
             const QString reason = stalled ? QString("stopped responding") : device.lastError().isEmpty() ? QString("stopped") : "failed: " + device.lastError();
             configured_ = false; device.close();
-            // Once the device is closed, it is safe to render a zero-sized control block.
-            transport.command({Action::StopAll}); transport.render(nullptr, 0, 0); pausedLive_ = false; resetMediaState();
+            // Once the device is closed, force-stop directly so even a full command queue cannot leave Playing behind.
+            transport.forceStopAll();
+            commandsPosted_ = 0; operatorStopSeq_ = 0; pendingCommands_.clear(); pausedLive_ = false; resetMediaState();
             report("Audio output " + reason + ". Press Play to reconnect, or choose another device in Outputs.");
             playbackProblem = status;
         }
@@ -116,9 +117,93 @@ QString Controller::untitledAutosavePath() {
     return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/Untitled.savshow.autosave";
 }
 QString Controller::autosavePath() const { return path.isEmpty() ? untitledAutosavePath() : path + ".autosave"; }
-void Controller::discardAutosave() { QFile::remove(autosavePath()); }
+void Controller::discardAutosave() {
+    QFile::remove(autosavePath());
+    if (!recoveredAutosavePath_.isEmpty()) {
+        QFile::remove(recoveredAutosavePath_);
+        recoveredAutosavePath_.clear();
+    }
+}
+quint64 Controller::acquireBusy() {
+    if (busy) return 0;
+    busy = true;
+    busyLease_ = nextBusyLease_++;
+    return busyLease_;
+}
+void Controller::releaseBusy(quint64 lease) {
+    if (lease != 0 && lease == busyLease_) {
+        busyLease_ = 0;
+        busy = false;
+    }
+}
+bool Controller::postTransportCommand(Command cmd) {
+    if (!transport.command(cmd)) { report("Transport command queue is full"); return false; }
+    const std::uint64_t applied = transport.commandsApplied();
+    while (!pendingCommands_.empty() && pendingCommands_.front().seq <= applied)
+        pendingCommands_.pop_front();
+    ++commandsPosted_;
+    pendingCommands_.push_back({commandsPosted_, cmd});
+    return true;
+}
+std::pair<State, Frame> Controller::predictTransport(bool* hasPendingPlay) const {
+    if (hasPendingPlay) *hasPendingPlay = false;
+    // Disarmed after a failed arm: nothing plays, and Play arms again where the operator last sought.
+    if (armFailed_) return {State::Stopped, pendingPosition_};
+    const std::uint64_t applied = transport.commandsApplied();
+    State state = transport.state();
+    Frame pos = transport.position();
+    if (transport.stopAllPending()) {
+        for (const auto& entry : pendingCommands_) {
+            if (entry.seq <= applied) continue;
+            if (entry.command.action == Action::Seek &&
+                transport.isSourceValid(entry.command.source, entry.command.sourceEpoch)) {
+                pos = std::clamp(entry.command.position, Frame{0}, project.show.duration);
+            }
+        }
+        return {State::Stopped, pos};
+    }
+    for (const auto& entry : pendingCommands_) {
+        if (entry.seq <= applied) continue;
+        const auto& cmd = entry.command;
+        if (!transport.isSourceValid(cmd.source, cmd.sourceEpoch)) continue;
+        switch (cmd.action) {
+        case Action::Play:
+            if (pos < project.show.duration || state == State::Held) {
+                state = State::Playing;
+                if (hasPendingPlay) *hasPendingPlay = true;
+            }
+            break;
+        case Action::Pause:
+            if (state == State::Playing) state = State::Paused;
+            break;
+        case Action::Seek:
+            pos = std::clamp(cmd.position, Frame{0}, project.show.duration);
+            if (state != State::Playing) state = State::Paused;
+            break;
+        case Action::StopAll:
+            state = State::Stopped;
+            if (hasPendingPlay) *hasPendingPlay = false;
+            break;
+        }
+    }
+    return {state, pos};
+}
+State Controller::effectiveState() const {
+    return predictTransport().first;
+}
+Frame Controller::effectivePosition() const {
+    return predictTransport().second;
+}
+bool Controller::playInFlight() const {
+    bool pendingPlay = false;
+    predictTransport(&pendingPlay);
+    return pendingPlay;
+}
 bool Controller::canEdit(bool reportFailure) {
-    const bool allowed = !showMode && !busy && transport.state() != State::Playing && transport.state() != State::Held &&
+    // Acquire commandsApplied() first so publishedState_ and publishedVoices_ reflect every applied command.
+    const bool playPending = playInFlight();
+    const bool allowed = !showMode && !busy && !playPending && !transport.stopAllPending() &&
+        transport.state() != State::Playing && transport.state() != State::Held &&
         transport.asyncVoices() == 0;
     if (!allowed && reportFailure) report(showMode ? "Leave show mode to edit" : "Use Stop All before editing; async audio or video may still be playing");
     return allowed;
@@ -127,36 +212,38 @@ bool Controller::edit(const std::function<void(Project&)>& mutation) {
     if (!canEdit()) return false;
     try {
         Project next = project; mutation(next); bindAudio(next); validate(next);
-        const Frame time = std::min(position(), next.show.duration);
         // The previous state moves into history rather than being copied again.
         undo_.push_back(std::move(project)); if (undo_.size() > 32) undo_.pop_front(); redo_.clear();
-        project = std::move(next); dirty = true; arm(time); emit changed(); return true;
+        project = std::move(next); dirty = true; ++projectRevision_; ++historyEpoch_; arm(); emit changed(); return true;
     } catch (const std::exception& e) { report(QString::fromUtf8(e.what())); return false; }
 }
-void Controller::replace(Project next, QString projectPath) {
+void Controller::replace(Project next, QString projectPath, bool markDirty) {
     validate(next);
     // Readers hold extracted package files open; Windows cannot remove them while open. The previous
     // project and its history (which may own an extraction) outlive re-arming, which releases the
     // transport's streamed decoders, and are destroyed at the end of this function.
     videos_.clear(); missingSeen_.clear(); clipFrames_.clear(); recovering_.clear(); videoProblems_.clear(); lastPicture_ = {};
     auto retired = std::move(project); auto retiredUndo = std::move(undo_), retiredRedo = std::move(redo_);
-    project = std::move(next); path = std::move(projectPath); dirty = false; playbackProblem.clear();
-    undo_.clear(); redo_.clear();
+    project = std::move(next); path = std::move(projectPath); dirty = markDirty; playbackProblem.clear();
+    recoveredAutosavePath_.clear();
+    undo_.clear(); redo_.clear(); ++projectRevision_; ++historyEpoch_; ++showEpoch_;
     if (arm(0)) report("Project ready. Space plays or pauses; Stop All stops async audio and video.");
     emit changed();
 }
 void Controller::undo() {
     if (!canEdit() || undo_.empty()) return;
-    redo_.push_back(std::move(project)); project = std::move(undo_.back()); undo_.pop_back(); dirty = true;
-    arm(std::min(position(), project.show.duration)); emit changed();
+    redo_.push_back(std::move(project)); project = std::move(undo_.back()); undo_.pop_back(); dirty = true; ++projectRevision_; ++historyEpoch_;
+    arm(); emit changed();
 }
 void Controller::redo() {
     if (!canEdit() || redo_.empty()) return;
-    undo_.push_back(std::move(project)); project = std::move(redo_.back()); redo_.pop_back(); dirty = true;
-    arm(std::min(position(), project.show.duration)); emit changed();
+    undo_.push_back(std::move(project)); project = std::move(redo_.back()); redo_.pop_back(); dirty = true; ++projectRevision_; ++historyEpoch_;
+    arm(); emit changed();
 }
-bool Controller::arm(Frame position) {
+bool Controller::arm(std::optional<Frame> position) {
     pausedLive_ = false; resetMediaState(); // Arming starts over from position, with the show as it is now.
+    // Where Play arms again if this fails before armOrThrow resolves the exact target.
+    pendingPosition_ = std::clamp(position ? *position : effectivePosition(), Frame{0}, project.show.duration);
     // Callers have already committed their change; a failure (out of memory, no worker thread) must not
     // escape into Qt or leave the previous snapshot playing. The stream closes (so the device watchdog
     // keeps quiet), the transport disarms, and Play or the next edit arms again at the kept position.
@@ -167,16 +254,21 @@ bool Controller::arm(Frame position) {
     } catch (const std::exception& e) {
         // The previous snapshot goes too, so nothing (a MIDI consumer started from Outputs) acts on it.
         stopMidiThread(); device.close(); configured_ = false; transport.disarm(); armed_.reset();
-        armFailed_ = true; pendingPosition_ = std::clamp(position, Frame{0}, project.show.duration);
+        commandsPosted_ = 0; operatorStopSeq_ = 0; pendingCommands_.clear();
+        armFailed_ = true;
         report("Playback could not be prepared: " + QString::fromUtf8(e.what()) + ". Press Play to try again.");
         playbackProblem = armProblem_ = status; return false;
     }
 }
-void Controller::armOrThrow(Frame position) {
+void Controller::armOrThrow(std::optional<Frame> position) {
     stopMidiThread();
     // The callback must be stopped before configure; a healthy stream only pauses.
     const bool keep = configured_ && device.running();
     if (keep) device.pause(); else device.close();
+    // Resolve the target position AFTER pausing the audio callback so any queued valid Seek
+    // (whether already applied by a racing callback or still pending in pendingCommands_) is preserved.
+    const Frame targetPosition = position ? *position : std::min(effectivePosition(), project.show.duration);
+    pendingPosition_ = std::clamp(targetPosition, Frame{0}, project.show.duration);
     // A video warning about readers being replaced goes with them.
     for (const auto& [clip, problem] : videoProblems_) {
         if (playbackProblem == problem) playbackProblem.clear();
@@ -190,11 +282,20 @@ void Controller::armOrThrow(Frame position) {
         const auto asset = project.assets.constFind(QString::fromStdString(clip.assetId));
         if (asset != project.assets.cend() && asset->video && !asset->offline) clip.videoLength = frames(asset->duration);
     }
-    armed_ = std::move(armed); transport.configure(armed_, position);
+    armed_ = std::move(armed); transport.configure(armed_, targetPosition);
+    commandsPosted_ = 0; operatorStopSeq_ = 0; pendingCommands_.clear();
     if (keep && device.resume()) stall_.restart();
     else if (configured_) {
         QString error;
-        if (!device.open(api_, deviceId_, channels_, buffer_, error)) { configured_ = false; report("Audio output unavailable: " + error); }
+        bool reopened = false;
+        if (!audioName.isEmpty()) {
+            QString resolvedName;
+            reopened = device.openByName(api_, audioName, audioName, channels_, buffer_, resolvedName, error, &deviceId_);
+            if (reopened) audioName = resolvedName;
+        } else {
+            reopened = device.open(api_, deviceId_, channels_, buffer_, error);
+        }
+        if (!reopened) { configured_ = false; report("Audio output unavailable: " + error); }
         stall_.restart();
     }
     startMidiThread();
@@ -202,15 +303,66 @@ void Controller::armOrThrow(Frame position) {
 void Controller::startMidiThread() {
     if (!armed_) return; // Nothing armed: no cues to send.
     const auto snapshot = armed_;
+    midi.clearAbortSend();
     midiStop_.store(false);
     // std::jthread is unavailable in the libc++ shipped with older macOS SDKs.
     midiThread_ = std::thread([this, snapshot] {
         while (!midiStop_.load()) {
             MidiEvent event;
-            while (transport.takeMidi(event)) {
+            while (!midiStop_.load(std::memory_order_acquire) && transport.takeMidi(event)) {
                 if (event.epoch != transport.epoch() || event.marker < 0 || static_cast<std::size_t>(event.marker) >= snapshot->markers.size()) continue;
                 const auto& marker = snapshot->markers[event.marker]; QString error;
-                if (!midi.send(marker.message, error)) {
+                auto allowCueSubmit = [&]() -> bool {
+                    return !midiStop_.load(std::memory_order_acquire) && event.epoch == transport.epoch();
+                };
+                if (!midi.send(marker.message, error, allowCueSubmit) && !midiStop_.load(std::memory_order_acquire)) {
+                    QMetaObject::invokeMethod(this, [this, error] { report(error); }, Qt::QueuedConnection);
+                }
+            }
+            for (;;) {
+                if (midiStop_.load()) break;
+                PendingTestMidi item;
+                std::shared_ptr<std::atomic<bool>> preSubmitCancel;
+                bool authorized = false;
+                {
+                    std::lock_guard lock(testMidiMutex_);
+                    if (testMidiQueue_.empty()) break;
+                    item = std::move(testMidiQueue_.front());
+                    testMidiQueue_.pop_front();
+                    authorized = !midiStop_.load(std::memory_order_acquire) &&
+                        !showModeAtomic_.load(std::memory_order_acquire) &&
+                        !(item.ownerCancelled && item.ownerCancelled->load(std::memory_order_acquire)) &&
+                        item.epoch == transport.epoch() &&
+                        item.gen == testMidiGen_.load(std::memory_order_acquire) &&
+                        transport.state() != State::Playing && transport.state() != State::Held;
+                    if (authorized) {
+                        preSubmitCancel = std::make_shared<std::atomic<bool>>(false);
+                        inFlightTestCancel_ = preSubmitCancel;
+                        inFlightTestOwner_ = item.owner;
+                        testMidiInFlight_.store(true, std::memory_order_release);
+                    }
+                }
+                if (!authorized) continue;
+                auto allowSubmit = [&]() -> bool {
+                    return !midiStop_.load(std::memory_order_acquire) &&
+                        !showModeAtomic_.load(std::memory_order_acquire) &&
+                        !(item.ownerCancelled && item.ownerCancelled->load(std::memory_order_acquire)) &&
+                        !(preSubmitCancel && preSubmitCancel->load(std::memory_order_acquire)) &&
+                        item.epoch == transport.epoch() &&
+                        item.gen == testMidiGen_.load(std::memory_order_acquire) &&
+                        transport.state() != State::Playing && transport.state() != State::Held;
+                };
+                QString error;
+                const bool sent = midi.send(item.bytes, error, allowSubmit);
+                testMidiInFlight_.store(false, std::memory_order_release);
+                {
+                    std::lock_guard lock(testMidiMutex_);
+                    if (inFlightTestCancel_ == preSubmitCancel) {
+                        inFlightTestCancel_.reset();
+                        inFlightTestOwner_.clear();
+                    }
+                }
+                if (!sent && !midiStop_.load()) {
                     QMetaObject::invokeMethod(this, [this, error] { report(error); }, Qt::QueuedConnection);
                 }
             }
@@ -220,6 +372,7 @@ void Controller::startMidiThread() {
 }
 void Controller::stopMidiThread() {
     midiStop_.store(true);
+    midi.requestAbortSend();
     if (midiThread_.joinable()) midiThread_.join();
 }
 bool Controller::routesValid() const {
@@ -229,20 +382,37 @@ bool Controller::routesValid() const {
     }
     return true;
 }
-void Controller::toggle() {
-    if (busy) return;
-    const State state = transport.state(); const bool playing = state == State::Playing;
-    const bool recovering = !playing && !playbackProblem.isEmpty();
+bool Controller::play(CommandSource source) {
+    if (busy) return false;
+    // Hold agent Play/Continue until the audio thread acknowledges any pending Operator Stop All
+    // so an agent cannot restart playback in the same callback as an Operator Stop All.
+    if (source != CommandSource::Operator &&
+        (transport.stopAllPending() || operatorStopSeq_ > transport.commandsApplied())) {
+        report("Operator Stop All is in progress; wait for playback to stop before starting.");
+        return false;
+    }
+    cancelPendingTestMidi();
+    const State state = transport.state();
+    const bool starting = state != State::Playing;
+    const bool recovering = starting && !playbackProblem.isEmpty();
     QString warning; // A problem this resume continues past; reconnecting a device must not clear it.
-    if (!playing) {
+    if (starting) {
         // A failed arm left nothing armed; preparing again (at any position sought since) comes first.
-        if ((armFailed_ || !transport.armed()) && !arm(armFailed_ ? pendingPosition_ : position())) return;
+        if ((armFailed_ || !transport.armed()) && !arm(armFailed_ ? std::optional<Frame>(pendingPosition_) : std::nullopt)) return false;
         playbackProblem.clear();
         // Re-arming retries sources that were briefly unavailable; changed sources still need reopening.
-        if (transport.audioReadFailed() && state != State::Held && !transport.asyncVoices() && !arm(position())) return;
-        if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and press Play to retry, or reopen the project to rebuild changed or damaged caches."); playbackProblem = status; return; }
+        if (transport.audioReadFailed() && state != State::Held && !transport.asyncVoices() && !arm()) return false;
+        if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and press Play to retry, or reopen the project to rebuild changed or damaged caches."); playbackProblem = status; return false; }
         // Resuming a live show never blocks on picture or MIDI; it warns and continues.
         const bool resuming = state == State::Held || transport.asyncVoices() || (state == State::Paused && device.running());
+        // Test MIDI is permitted while Paused (without async voices), so block playback start/resume
+        // from any non-Held, non-async state until an in-flight test transfer finishes on the MIDI worker.
+        const bool liveResume = state == State::Held || transport.asyncVoices();
+        if (!liveResume && needsMidi() && testMidiInFlight_.load(std::memory_order_acquire)) {
+            report("Wait for the in-flight MIDI test message to finish before starting playback.");
+            playbackProblem = status;
+            return false;
+        }
         // Continuing a live show does not look for missing files itself: a stalled share would hold up the
         // cue. It warns with what the background check last found. Paused after Stop All or a seek is a
         // fresh start and checks.
@@ -281,40 +451,112 @@ void Controller::toggle() {
             report(mediaWarning(missing));
             // Tracked as the missing-media warning, so an edit, relink or stop that resolves it clears it.
             playbackProblem = reportedProblem_ = warning = status;
-            if (!live) return; // Only a live show continues past missing media (it warned above).
+            if (!live) return false; // Only a live show continues past missing media (it warned above).
         }
-        if (needsMidi() && !prepareMidi()) { playbackProblem = midiProblem_ = status; if (!resuming) return; if (warning.isEmpty()) warning = status; }
-        if (!prepareAudio()) { playbackProblem = status; return; }
-        if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return; }
+        if (needsMidi() && !prepareMidi()) { playbackProblem = midiProblem_ = status; if (!resuming) return false; if (warning.isEmpty()) warning = status; }
+        if (!prepareAudio()) { playbackProblem = status; return false; }
+        if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return false; }
     }
-    const bool sent = transport.command({playing ? Action::Pause : Action::Play});
-    if (sent) pausedLive_ = playing;
-    if (sent && warning.isEmpty() && !playing) {
+    const std::uint64_t ep = source == CommandSource::ExternalAgent ? transport.externalAgentEpoch()
+        : source == CommandSource::ChatAgent ? transport.chatAgentEpoch() : 0;
+    // Always enqueue Action::Play so a Play queued immediately after a Pause is honored in arrival order.
+    if (!postTransportCommand({Action::Play, 0, source, ep})) return false;
+    if (source == CommandSource::Operator) operatorStopSeq_ = 0;
+    pausedLive_ = false;
+    if (starting && warning.isEmpty()) {
         // A video that still cannot play keeps its warning: Play resolves what it checked, not that.
         promoteVideoWarning();
         if (!playbackProblem.isEmpty()) warning = playbackProblem;
     }
-    if (!sent) report("Transport command queue is full");
-    else if (!warning.isEmpty()) { report(warning); playbackProblem = warning; }
+    if (!warning.isEmpty()) { report(warning); playbackProblem = warning; }
     else if (recovering) report("Playback resumed."); // Replaces the resolved problem in the status bar.
+    return true;
 }
-void Controller::seek(Frame time) {
-    if (busy || showMode) { report(showMode ? "Leave show mode to jump on the timeline" : "Media is loading"); return; }
+bool Controller::pause(CommandSource source) {
+    if (busy) return false;
+    const std::uint64_t ep = source == CommandSource::ExternalAgent ? transport.externalAgentEpoch()
+        : source == CommandSource::ChatAgent ? transport.chatAgentEpoch() : 0;
+    const bool wasPlaying = effectiveState() == State::Playing;
+    // Always enqueue Action::Pause (never Play) so a Pause queued behind Play runs in order and
+    // a Playing → Held transition can never accidentally resume a hold.
+    if (!postTransportCommand({Action::Pause, 0, source, ep})) return false;
+    if (wasPlaying) pausedLive_ = true; // Paused during playback: Play continues the live show.
+    if (!device.streamActive()) transport.render(nullptr, 0, 0);
+    return true;
+}
+bool Controller::toggle() {
+    if (busy) return false;
+    return effectiveState() == State::Playing ? pause() : play();
+}
+bool Controller::seek(Frame time, CommandSource source) {
+    if (busy || showMode) { report(showMode ? "Leave show mode to jump on the timeline" : "Media is loading"); return false; }
     // Disarmed after a failed arm: the transport cannot take the seek, so it is where Play arms again.
-    if (armFailed_) { pendingPosition_ = std::clamp(time, Frame{0}, project.show.duration); lastComposed_ = -1; return; }
-    if (!transport.command({Action::Seek, time})) report("Transport command queue is full");
-    if (!device.running()) transport.render(nullptr, 0, 0);
+    if (armFailed_) { pendingPosition_ = std::clamp(time, Frame{0}, project.show.duration); lastComposed_ = -1; pausedLive_ = false; return true; }
+    const std::uint64_t ep = source == CommandSource::ExternalAgent ? transport.externalAgentEpoch()
+        : source == CommandSource::ChatAgent ? transport.chatAgentEpoch() : 0;
+    if (!postTransportCommand({Action::Seek, time, source, ep})) return false;
+    if (!device.streamActive()) transport.render(nullptr, 0, 0);
     lastComposed_ = -1; pausedLive_ = false;
+    return true;
 }
-void Controller::stopAll() {
-    if (armFailed_) return; // Nothing is armed, so nothing plays; the transport could not take the command.
+bool Controller::stopAll(CommandSource source) {
+    // Nothing is armed after a failed arm, so nothing plays; the transport could not take the command.
+    if (armFailed_) { cancelPendingTestMidi(); return true; }
     pausedLive_ = false; resetMediaState();
-    if (!transport.command({Action::StopAll})) { report("Transport command queue is full"); return; }
-    if (!device.running()) transport.render(nullptr, 0, 0);
+    // The operator's Stop All also drops agent commands still queued (an agent's Play must not undo it);
+    // agents' later commands carry the new epoch and work as usual.
+    if (source == CommandSource::Operator) transport.invalidateAllAgentCommands();
+    // Post Stop All to the transport FIRST so operator Stop All is never delayed by MIDI work.
+    const std::uint64_t ep = source == CommandSource::ExternalAgent ? transport.externalAgentEpoch()
+        : source == CommandSource::ChatAgent ? transport.chatAgentEpoch() : 0;
+    const Command cmd{Action::StopAll, 0, source, ep};
+    if (!postTransportCommand(cmd)) {
+        if (source != CommandSource::Operator) return false;
+        // Emergency operator Stop All must never be rejected by a full bounded command queue.
+        transport.requestStopAll();
+    } else if (source == CommandSource::Operator) {
+        operatorStopSeq_ = commandsPosted_;
+    }
+    if (!device.streamActive()) transport.render(nullptr, 0, 0);
+    cancelPendingTestMidi();
+    return true;
 }
 bool Controller::configureAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer) {
     if (!canEdit()) return false;
     return openAudio(api, id, std::move(name), channels, buffer);
+}
+bool Controller::configureAudioByName(RtAudio::Api api, const QString& wantedName, unsigned channels, unsigned buffer) {
+    if (!canEdit()) return false;
+    const bool hadStream = configured_ && device.running();
+    const RtAudio::Api prevApi = api_;
+    const QString prevName = audioName;
+    const unsigned prevChannels = channels_, prevBuffer = buffer_;
+    QSettings settings;
+    QString resolvedName, error;
+    unsigned resolvedId = deviceId_;
+    if (device.openByName(api, wantedName, settings.value("audio/device").toString(), channels, buffer, resolvedName, error, &resolvedId)) {
+        api_ = api; deviceId_ = resolvedId; channels_ = channels; buffer_ = buffer; audioName = resolvedName; configured_ = true;
+        stall_.restart(); playbackProblem.clear();
+        settings.setValue("audio/api", static_cast<int>(api)); settings.setValue("audio/device", resolvedName);
+        settings.setValue("audio/channels", channels); settings.setValue("audio/buffer", buffer);
+        report(QString("%1 · %2 channels · 48 kHz · %3 samples").arg(resolvedName).arg(channels).arg(device.bufferFrames()));
+        return true;
+    }
+    configured_ = false;
+    if (hadStream && !prevName.isEmpty()) {
+        QString restoredName, restoreErr;
+        unsigned restoredId = deviceId_;
+        if (device.openByName(prevApi, prevName, prevName, prevChannels, prevBuffer, restoredName, restoreErr, &restoredId)) {
+            deviceId_ = restoredId;
+            configured_ = true; stall_.restart();
+            report("Audio output unavailable: " + error + " (kept previous connection: " + restoredName + ")");
+        } else {
+            report("Audio output unavailable: " + error + " (previous audio connection “" + prevName + "” was closed and could not be restored: " + restoreErr + ")");
+        }
+    } else {
+        report("Audio output unavailable: " + error);
+    }
+    return false;
 }
 bool Controller::openAudio(RtAudio::Api api, unsigned id, QString name, unsigned channels, unsigned buffer) {
     api_ = api; deviceId_ = id; channels_ = channels; buffer_ = buffer; audioName = name;
@@ -333,8 +575,23 @@ bool Controller::configureMidi(int port) {
     if (!canEdit()) return false;
     return openMidi(port);
 }
+bool Controller::configureMidiByName(const QString& portName) {
+    if (!canEdit()) return false;
+    const QString trimmed = portName.trimmed();
+    if (trimmed.isEmpty() || trimmed.compare("none", Qt::CaseInsensitive) == 0 || trimmed.compare("off", Qt::CaseInsensitive) == 0)
+        return openMidi(-1);
+    stopMidiThread();
+    cancelPendingTestMidi();
+    QString error;
+    const bool ok = midi.openByName(trimmed, error);
+    startMidiThread();
+    if (ok) { midiName_ = midi.name(); QSettings().setValue("midi/port", midiName_); playbackProblem.clear(); }
+    report(ok ? ("MIDI output: " + midi.name()) : error);
+    return ok;
+}
 bool Controller::openMidi(int port) {
     stopMidiThread();
+    cancelPendingTestMidi();
     QString error; const bool ok = midi.open(port, error); startMidiThread();
     // A reconnect resolves the MIDI problem only; a missing-media warning outlives it.
     if (ok) { midiName_ = midi.name(); QSettings().setValue("midi/port", midiName_); if (!midiProblem_.isEmpty() && playbackProblem == midiProblem_) playbackProblem.clear(); midiProblem_.clear(); }
@@ -387,7 +644,7 @@ Controller::AudioSwap Controller::replaceAudio(const QMap<QString, std::shared_p
     const auto outcome = arm(std::min(position(), project.show.duration)) ? AudioSwap::Applied : AudioSwap::ArmFailed;
     emit changed(); return outcome;
 }
-QStringList Controller::preflight() {
+QStringList Controller::preflight(bool probeHardware) {
     QStringList problems;
     if (dirty) problems << "The show has unsaved changes.";
     // Picture clips carry their video's audio but never play it; only audio tracks stream.
@@ -403,21 +660,39 @@ QStringList Controller::preflight() {
         problems << (audioPreparation() == AudioPreparation::Prepared
             ? "Audio streams from the original media files for " + streaming.join(", ") + ": preparing them failed. Fix the cause, then choose Prepared audio sources in Outputs again to retry; they keep streaming meanwhile."
             : QString("Audio streams from the original media files. For the steadiest playback, choose Prepared audio sources in Outputs."));
-    for (const auto& missing : missingMedia()) problems << "Media is missing: " + missing;
+    for (const auto& missing : missingMedia(probeHardware)) problems << "Media is missing: " + missing;
     if (needsMidi() && !midi.connected()) {
         const QString remembered = QSettings().value("midi/port").toString();
         if (remembered.isEmpty()) problems << "MIDI cues need a destination. Choose one in Outputs.";
-        else if (!midi.ports().contains(remembered)) problems << "MIDI destination “" + remembered + "” is missing.";
+        else if (!probeHardware) problems << "MIDI destination “" + remembered + "” is not connected.";
+        else if (!midi.hasPortByName(remembered)) problems << "MIDI destination “" + remembered + "” is missing.";
     }
-    // Probe audio drivers only while nothing is playing.
-    if (!device.running() && transport.state() != State::Playing && transport.state() != State::Held && !transport.asyncVoices()) {
+    // Probe audio drivers only while nothing is playing and hardware probing is permitted.
+    if (probeHardware && !device.running() && transport.state() != State::Playing && transport.state() != State::Held && !transport.asyncVoices()) {
         QSettings settings; const QString remembered = settings.value("audio/device").toString();
         const auto api = remembered.isEmpty() ? RtAudio::UNSPECIFIED : static_cast<RtAudio::Api>(settings.value("audio/api", 0).toInt());
         try {
-            if (!playbackDevice(device.devices(api), remembered))
+            const auto selected = playbackDevice(device.devices(api), remembered);
+            if (!selected) {
                 problems << (remembered.isEmpty() ? "No audio output is available." : "Audio output “" + remembered + "” is missing.");
+            } else {
+                unsigned required = 1;
+                for (const auto& track : project.show.tracks) if (!track.visual && !track.muted)
+                    required = std::max(required, static_cast<unsigned>(std::max(track.left, track.right) + 1));
+                if (required > selected->channels) {
+                    problems << QString("%1 has %2 outputs, but a track is routed to output %3. Choose a larger interface in Outputs or change track routing.")
+                        .arg(selected->name).arg(selected->channels).arg(required);
+                }
+            }
         } catch (const std::exception& e) { problems << "Cannot check audio outputs: " + QString::fromUtf8(e.what()); }
-    } else if (device.running() && !routesValid()) problems << "A track is routed to more outputs than the audio interface provides.";
+    } else if (!device.running()) {
+        const QString remembered = QSettings().value("audio/device").toString();
+        problems << (remembered.isEmpty()
+            ? QString("Audio output is not connected.")
+            : QString("Audio output “%1” is not connected.").arg(remembered));
+    } else if (!routesValid()) {
+        problems << "A track is routed to more outputs than the audio interface provides.";
+    }
     return problems;
 }
 bool Controller::needsRelink(const MediaAsset& a) {
@@ -438,8 +713,11 @@ void Controller::mediaToCheck(QStringList& offline, QStringList& needed) const {
     }
     if (!seen.isEmpty()) needed.removeIf([&](const QString& path) { return seen.contains(path); });
 }
-QStringList Controller::missingMedia() const {
+QStringList Controller::missingMedia(bool probeFilesystem) const {
     QStringList missing, needed; mediaToCheck(missing, needed); // Each file is looked up once, however many clips use it.
+    // Without probing (Show mode, where a stalled share must not block), report offline assets plus what
+    // the last background check confirmed missing.
+    if (!probeFilesystem) return lastMissingMedia(missing, needed);
     for (const auto& path : needed) if (!detail::present(path)) missing << path;
     return missing;
 }
@@ -521,7 +799,7 @@ void Controller::startMediaCheck(const std::shared_ptr<MediaCheck>& check, const
 }
 void Controller::watchMidi() {
     if (!needsMidi() || midiName_.isEmpty() || busy) return;
-    const bool present = midi.ports().contains(midiName_);
+    const bool present = midi.hasPortByName(midiName_);
     if (midi.connected() && !present) {
         stopMidiThread(); midi.close(); startMidiThread();
         report("MIDI destination “" + midiName_ + "” disconnected. Cues are skipped until it reconnects."); playbackProblem = midiProblem_ = status;
@@ -541,9 +819,25 @@ bool Controller::prepareMidi() {
     if (remembered.isEmpty()) {
         report("Choose a MIDI destination in Outputs once. It will reconnect automatically when you press Play."); return false;
     }
-    const auto ports = midi.ports(); const int port = ports.indexOf(remembered);
-    if (port < 0) { report("MIDI destination “" + remembered + "” is missing. Plug it in, or choose another destination in Outputs."); return false; }
-    return openMidi(port);
+    stopMidiThread();
+    QString error;
+    const bool ok = midi.openByName(remembered, error);
+    startMidiThread();
+    if (ok) {
+        midiName_ = midi.name();
+        playbackProblem.clear();
+        report("MIDI output: " + midi.name());
+        return true;
+    }
+    // Not found, or no MIDI system to look in (Linux without an ALSA sequencer): the destination is missing.
+    // Other failures (several ports with that name, a port that changed while opening) say what happened.
+    const bool ambiguous = error.startsWith("Multiple", Qt::CaseInsensitive);
+    if (!ambiguous && (error.contains("not found", Qt::CaseInsensitive) || !midi.hasPortByName(remembered))) {
+        const bool detail = !error.isEmpty() && !error.contains("not found", Qt::CaseInsensitive);
+        report("MIDI destination “" + remembered + "” is missing. Plug it in, or choose another destination in Outputs." +
+               (detail ? " (" + error + ")" : QString()));
+    } else report(error);
+    return false;
 }
 bool Controller::prepareAudio() {
     if (device.running()) return true;
@@ -571,16 +865,37 @@ bool Controller::prepareAudio() {
         return openAudio(api, selected->id, selected->name, channels, buffer);
     } catch (const std::exception& error) { report("Cannot prepare audio. Open Outputs to choose a device. " + QString::fromUtf8(error.what())); return false; }
 }
-bool Controller::testMidi(const std::vector<unsigned char>& bytes) {
+void Controller::cancelPendingTestMidi(const QString& owner) {
+    // Non-blocking: discard queued test messages and flag any dequeued pre-driver submission
+    // so it cancels before entering the driver, while letting an already submitted <=4 KiB
+    // message finish naturally instead of calling midiOutReset on the shared show port.
+    std::lock_guard lock(testMidiMutex_);
+    if (owner.isEmpty()) {
+        testMidiGen_.fetch_add(1, std::memory_order_release);
+        testMidiQueue_.clear();
+        if (inFlightTestCancel_) inFlightTestCancel_->store(true, std::memory_order_release);
+    } else {
+        std::erase_if(testMidiQueue_, [&](const PendingTestMidi& item) { return item.owner == owner; });
+        if (inFlightTestCancel_ && inFlightTestOwner_ == owner)
+            inFlightTestCancel_->store(true, std::memory_order_release);
+    }
+}
+bool Controller::testMidi(const std::vector<unsigned char>& bytes, const QString& owner,
+                          std::shared_ptr<std::atomic<bool>> ownerCancelled) {
     if (!canEdit() || bytes.empty()) return false;
     if (!validMidi(bytes)) { report("Complete the MIDI message before testing it."); return false; }
     if (!prepareMidi()) return false;
-    QString error;
-    stopMidiThread();
-    const bool sent = midi.send(bytes, error);
-    startMidiThread();
-    if (!sent) { report(error); return false; }
-    report("Test message sent to " + midi.name() + ". External devices may keep playing until they receive a stop message."); return true;
+    // Dispatch off the GUI thread so Windows WinMM SysEx completion waits never freeze operator controls.
+    {
+        std::lock_guard lock(testMidiMutex_);
+        if (testMidiQueue_.size() >= 4) {
+            report("Too many MIDI test messages are already queued; wait for them to finish.");
+            return false;
+        }
+        testMidiQueue_.push_back({bytes, transport.epoch(), testMidiGen_.load(std::memory_order_acquire), owner, std::move(ownerCancelled)});
+    }
+    report("Test message queued for " + midi.name() + ". External devices may keep playing until they receive a stop message.");
+    return true;
 }
 const Marker* Controller::nextCue() const {
     const Frame now = position(); const bool held = transport.state() == State::Held; const Marker* upcoming = nullptr;
@@ -588,7 +903,15 @@ const Marker* Controller::nextCue() const {
         if ((m.time > now || (m.time == now && !held)) && (!upcoming || m.time < upcoming->time)) upcoming = &m;
     return upcoming;
 }
-void Controller::setShowMode(bool enabled) { showMode = enabled; emit changed(); }
+void Controller::setShowMode(bool enabled) {
+    showMode = enabled;
+    showModeAtomic_.store(enabled, std::memory_order_release);
+    if (enabled) {
+        transport.invalidateAllAgentCommands();
+        cancelPendingTestMidi();
+    }
+    emit changed();
+}
 QImage Controller::compose() {
     const Frame position = this->position();
     // Pre-roll the next clip on each layer. Keep readers only for active/upcoming clips.
@@ -737,34 +1060,100 @@ QImage Controller::compose() {
     }
     lastComposed_ = frame; lastClocks_ = std::move(clocks); lastPicture_ = picture; return picture;
 }
+QImage Controller::composeProjectAt(const Project& project, Frame position, QSize maximum, const QMap<std::string, QImage>* videoFrames) {
+    QSize outSize(project.width, project.height);
+    if (maximum.isValid() && (outSize.width() > maximum.width() || outSize.height() > maximum.height()))
+        outSize = outSize.scaled(maximum, Qt::KeepAspectRatio);
+    QImage picture(outSize, QImage::Format_RGB32); picture.fill(Qt::black);
+    QPainter painter(&picture); painter.setRenderHint(QPainter::SmoothPixmapTransform); painter.setRenderHint(QPainter::TextAntialiasing);
+    painter.scale(static_cast<double>(outSize.width()) / std::max(1, project.width),
+                  static_cast<double>(outSize.height()) / std::max(1, project.height));
+    for (std::size_t track = 0; track < project.show.tracks.size(); ++track) {
+        if (!project.show.tracks[track].visual || project.show.tracks[track].muted) continue;
+        for (const auto& c : project.show.clips) {
+            if (c.track != static_cast<int>(track) || !c.contains(position)) continue;
+            const Frame local = position - c.start;
+            const double opacity = c.alpha.at(local, c.opacity);
+            if (opacity <= 0) continue;
+            painter.save(); painter.setOpacity(opacity);
+            painter.translate(project.width * (.5 + c.positionX.at(local, c.x)), project.height * (.5 + c.positionY.at(local, c.y)));
+            const double scale = c.size.at(local, c.scale); painter.scale(scale, scale);
+            const QRectF bounds(-project.width * .5, -project.height * .5, project.width, project.height);
+            if (!c.text.empty()) {
+                QFont font("Arial"); font.setPixelSize(project.height / 22); font.setWeight(QFont::Medium);
+                painter.setFont(font); painter.setPen(Qt::white);
+                painter.drawText(bounds.adjusted(project.width * .08, project.height * .08, -project.width * .08, -project.height * .08),
+                    Qt::AlignCenter | Qt::TextWordWrap, QString::fromStdString(c.text));
+            } else {
+                const auto asset = project.assets.constFind(QString::fromStdString(c.assetId));
+                if (asset != project.assets.cend() && !asset->offline) {
+                    QImage source = asset->still;
+                    if (asset->video) {
+                        if (videoFrames) {
+                            source = videoFrames->value(c.id);
+                        } else {
+                            double time = seconds(c.offset + local);
+                            if (c.loop) time = seconds(c.offset) + std::fmod(seconds(local), std::max(.001, asset->duration - seconds(c.offset)));
+                            source = videoFrameAt(asset->path, std::min(time, std::max(0., asset->duration - 1. / std::max(1., asset->fps))), outSize);
+                        }
+                    }
+                    if (!source.isNull()) {
+                        const QSizeF fitted = QSizeF(source.size()).scaled(bounds.size(), Qt::KeepAspectRatio);
+                        painter.drawImage(QRectF(-fitted.width() / 2, -fitted.height() / 2, fitted.width(), fitted.height()), source);
+                    }
+                }
+            }
+            painter.restore();
+        }
+    }
+    painter.end();
+    return picture;
+}
 QString Controller::mediaDirectory(const QString& target) {
     return QFileInfo(target).absolutePath() + "/" + QFileInfo(target).completeBaseName() + ".media";
 }
 bool Controller::savingCopiesMedia() const {
     return project.packageDirectory || std::any_of(project.assets.cbegin(), project.assets.cend(), [](const MediaAsset& a) { return a.path.isEmpty(); });
 }
-void Controller::save(QString target) {
-    if (!canEdit()) return;
-    try { Project candidate = project; materializeProjectMedia(candidate, mediaDirectory(target)); commitSave(std::move(candidate), target); }
-    catch (const std::exception& e) { report("Save failed: " + QString::fromUtf8(e.what())); }
+bool Controller::save(QString target, bool allowOverwrite) {
+    if (!canEdit()) return false;
+    try { Project candidate = project; materializeProjectMedia(candidate, mediaDirectory(target)); return commitSave(std::move(candidate), target, allowOverwrite); }
+    catch (const std::exception& e) { report("Save failed: " + QString::fromUtf8(e.what())); return false; }
 }
-void Controller::commitSave(Project candidate, QString target) {
+bool Controller::commitSave(Project candidate, QString target, bool allowOverwrite) {
     try {
         const auto sourceDirectory = project.packageDirectory;
+        const auto preSaveAssets = project.assets;
         const QString previous = path;
-        writeProject(candidate, target);
+        const bool sameTarget = [&] {
+            if (previous.isEmpty()) return false;
+            const QFileInfo ia(target), ib(previous);
+            const QString ca = ia.canonicalFilePath(), cb = ib.canonicalFilePath();
+            if (!ca.isEmpty() && !cb.isEmpty()) return ca == cb;
+            return QDir::cleanPath(ia.absoluteFilePath()) == QDir::cleanPath(ib.absoluteFilePath());
+        }();
+        if (!allowOverwrite && !sameTarget) {
+            const QString targetAutosave = target + ".autosave";
+            if (QFileInfo::exists(targetAutosave) || QFileInfo(targetAutosave).isSymLink())
+                throw std::runtime_error("Destination recovery file (.autosave) already exists; pass overwrite: true to replace it");
+        }
+        writeProject(candidate, target, allowOverwrite);
         // The media this Save moved (extracted package files, generated audio), by asset and previous path.
         QMap<QString, QString> moved;
         for (const auto& a : candidate.assets)
             if (const auto before = project.assets.constFind(a.id); before != project.assets.cend() && before->path != a.path) moved.insert(a.id, before->path);
-        project.assets = std::move(candidate.assets); bindAudio(project); project.packageDirectory.reset(); path = target; dirty = false;
+        project.assets = std::move(candidate.assets); bindAudio(project); project.packageDirectory.reset(); path = target; dirty = false; ++projectRevision_;
         // Undo must not restore temporary package paths or unsaved generated media. Only those follow the
-        // saved copy: other snapshots keep their own media, such as an asset before a relink, or audio a
-        // preparation reload left valid for that snapshot alone.
+        // saved copy, and only where a snapshot still holds the pre-save asset (same path and offline
+        // state): other snapshots keep their own media, such as an asset before a relink, or audio a
+        // preparation reload left valid for that snapshot alone. Each snapshot is checked against its
+        // OWN packageDirectory so a second save never deletes an extraction an Undo state still uses.
         for (auto* history : {&undo_, &redo_}) for (auto& snapshot : *history) {
             Project candidate = snapshot; bool extracted = false;
             for (auto it = candidate.assets.begin(); it != candidate.assets.end(); ++it) {
-                if (const auto from = moved.constFind(it.key()); from != moved.cend() && *from == it->path) {
+                const auto before = preSaveAssets.constFind(it.key());
+                if (const auto from = moved.constFind(it.key()); from != moved.cend() && *from == it->path &&
+                    before != preSaveAssets.cend() && it->offline == before->offline) {
                     const auto& saved = project.assets[it.key()]; it->path = saved.path; it->audio = saved.audio;
                 }
                 // Each snapshot keeps its own extraction alive while any of its media still lives there.
@@ -776,12 +1165,19 @@ void Controller::commitSave(Project candidate, QString target) {
             // and extraction instead of becoming a state undo cannot arm.
             try { validate(candidate); snapshot = std::move(candidate); } catch (const std::exception&) {}
         }
-        if (sourceDirectory) arm(position());
+        if (sourceDirectory) arm();
         // The edits now live in target; a sidecar left next to the previous file would offer them again.
-        for (const auto& saved : {target, previous}) if (!saved.isEmpty()) QFile::remove(saved + ".autosave");
+        // Only remove target's sidecar when overwriting or saving back to the same project path.
+        if (allowOverwrite || sameTarget) QFile::remove(target + ".autosave");
+        if (!previous.isEmpty()) QFile::remove(previous + ".autosave");
+        if (!recoveredAutosavePath_.isEmpty()) {
+            QFile::remove(recoveredAutosavePath_);
+            recoveredAutosavePath_.clear();
+        }
         QFile::remove(untitledAutosavePath());
         report("Saved " + QFileInfo(target).fileName()); emit changed();
-    } catch (const std::exception& e) { report("Save failed: " + QString::fromUtf8(e.what())); }
+        return true;
+    } catch (const std::exception& e) { report("Save failed: " + QString::fromUtf8(e.what())); return false; }
 }
 
 }

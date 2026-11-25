@@ -5,6 +5,7 @@
 #include "media/AudioSources.h"
 #include "media/MidiOutput.h"
 #include <QtTest>
+#include "ReportUncaught.h"
 #include <QTemporaryDir>
 #include <QFile>
 #include <QJsonDocument>
@@ -538,6 +539,18 @@ private slots:
         QVERIFY(c.edit([](Project& p) { Clip clip; clip.id = "v"; clip.assetId = "unused"; clip.track = 0; clip.duration = frames(1); p.show.clips.push_back(clip); }));
         QCOMPARE(c.missingMedia(), QStringList{"/nonexistent/unused.mov"});
     }
+    void unprobedMissingMediaIncludesConfirmedBackgroundResults() {
+        // Show mode never probes the filesystem; it must still report what the background check confirmed.
+        Controller c; auto project = newProject();
+        MediaAsset gone; gone.id = "gone"; gone.name = "Gone"; gone.video = true; gone.duration = 1; gone.path = "/nonexistent/gone.mov";
+        project.assets.insert(gone.id, gone);
+        Clip clip; clip.id = "v"; clip.assetId = "gone"; clip.track = 0; clip.duration = frames(1); project.show.clips.push_back(clip);
+        c.replace(project);
+        QVERIFY(c.missingMedia(false).isEmpty()); // Nothing confirmed yet, and nothing marked offline.
+        c.checkMediaInBackground(true);
+        QCOMPARE(c.missingMedia(false), QStringList{"/nonexistent/gone.mov"});
+        QCOMPARE(c.missingMedia(true), QStringList{"/nonexistent/gone.mov"});
+    }
     void missingMidiExplainsSetupAndDoesNotStartPlayback() {
         Controller c; auto project = newProject();
         project.show.markers = {{"midi", "Lighting cue", frames(1), false, MidiTiming::Arrival, {0xc0, 0}}};
@@ -931,6 +944,185 @@ private slots:
         QCOMPARE(c.status, QString("Exported menu-export.savpack"));
         for (const auto& asset : c.project.assets) QVERIFY(asset.path.isEmpty());
         const auto loaded = readProject(package); QCOMPARE(loaded.assets.size(), c.project.assets.size());
+    }
+    void packageExportWorksWithSymlinkedTempDirAndLegacySymlinkShowOpens() {
+#ifndef Q_OS_WIN
+        // Exporting a package when TMPDIR points to a symlink (e.g. /tmp -> /private/tmp on macOS)
+        // must produce relative media/ paths that readProjectPackage accepts on reopen.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString realTmp = dir.filePath("real-tmp");
+        const QString linkTmp = dir.filePath("link-tmp");
+        QVERIFY(QDir().mkpath(realTmp));
+        QVERIFY(QFile::link(realTmp, linkTmp));
+        const QByteArray oldTmpDir = qgetenv("TMPDIR");
+        qputenv("TMPDIR", linkTmp.toUtf8());
+        const QString package = dir.filePath("symlink-tmp.savpack");
+        try {
+            writeProjectPackage(demoProject(), package);
+            const auto reopened = readProject(package);
+            QCOMPARE(reopened.assets.size(), demoProject().assets.size());
+            for (const auto& a : reopened.assets) QVERIFY(!a.offline);
+        } catch (...) {
+            if (oldTmpDir.isEmpty()) qunsetenv("TMPDIR"); else qputenv("TMPDIR", oldTmpDir);
+            throw;
+        }
+        if (oldTmpDir.isEmpty()) qunsetenv("TMPDIR"); else qputenv("TMPDIR", oldTmpDir);
+
+        // Opening a legacy symlinked show (no pathBase) preserves origin/main alias-directory resolution
+        // even when a colliding file exists in targetDir, while falling back to targetDir when missing.
+        // Canonical shows written by writeProject() (pathBase == "canonical") always resolve against targetDir.
+        const QString aliasDir = dir.filePath("alias-dir");
+        const QString targetDir = dir.filePath("target-dir");
+        QVERIFY(QDir().mkpath(aliasDir));
+        QVERIFY(QDir().mkpath(targetDir));
+        QImage green(16, 16, QImage::Format_RGB32); green.fill(Qt::green);
+        QImage blue(16, 16, QImage::Format_RGB32); blue.fill(Qt::blue);
+        QVERIFY(green.save(aliasDir + "/cue.png"));
+        QVERIFY(blue.save(targetDir + "/cue.png"));
+        QVERIFY(blue.save(targetDir + "/canonical-only.png"));
+        Project legacyProj = newProject();
+        MediaAsset cueAsset = loadMedia(targetDir + "/cue.png");
+        MediaAsset canonicalOnlyAsset = loadMedia(targetDir + "/canonical-only.png");
+        legacyProj.assets.insert(cueAsset.id, cueAsset);
+        legacyProj.assets.insert(canonicalOnlyAsset.id, canonicalOnlyAsset);
+        // Also verify projectJson() produces clean relative paths even when passed a symlinked base directory.
+        const QString symlinkedBase = dir.filePath("link-target-dir");
+        QVERIFY(QFile::link(targetDir, symlinkedBase));
+        const QJsonObject relCheck = projectJson(legacyProj, symlinkedBase);
+        for (const auto& v : relCheck["assets"].toArray())
+            QVERIFY(!v.toObject()["path"].toString().contains(".."));
+        // Simulate a legacy origin/main manifest (no pathBase) in targetDir referencing "cue.png" and "canonical-only.png".
+        QJsonObject legacyRoot = projectJson(legacyProj, targetDir);
+        const QString targetShow = targetDir + "/show.savshow";
+        QFile mf(targetShow);
+        QVERIFY(mf.open(QIODevice::WriteOnly));
+        mf.write(QJsonDocument(legacyRoot).toJson());
+        mf.close();
+        const QString aliasShow = aliasDir + "/show.savshow";
+        QVERIFY(QFile::link(targetShow, aliasShow));
+        const Project loadedLegacy = readProject(aliasShow);
+        QVERIFY(!loadedLegacy.assets[cueAsset.id].offline);
+        QCOMPARE(QFileInfo(loadedLegacy.assets[cueAsset.id].path).canonicalFilePath(),
+                 QFileInfo(aliasDir + "/cue.png").canonicalFilePath());
+        QVERIFY(!loadedLegacy.assets[canonicalOnlyAsset.id].offline);
+        QCOMPARE(QFileInfo(loadedLegacy.assets[canonicalOnlyAsset.id].path).canonicalFilePath(),
+                 QFileInfo(targetDir + "/canonical-only.png").canonicalFilePath());
+        // Now save with writeProject() (sets pathBase == "canonical"): reopening via aliasShow must resolve targetDir/cue.png.
+        writeProject(legacyProj, targetShow);
+        const Project loadedCanonical = readProject(aliasShow);
+        QVERIFY(!loadedCanonical.assets[cueAsset.id].offline);
+        QCOMPARE(QFileInfo(loadedCanonical.assets[cueAsset.id].path).canonicalFilePath(),
+                 QFileInfo(targetDir + "/cue.png").canonicalFilePath());
+
+        // Saving a show with a symlinked media subdirectory (project/media -> ../vol-a) must store
+        // "media/title.png" verbatim so repointing the symlink to ../vol-b loads from vol-b on reopen.
+        const QString projDir = dir.filePath("sym-media-proj");
+        const QString volA = dir.filePath("vol-a");
+        const QString volB = dir.filePath("vol-b");
+        QVERIFY(QDir().mkpath(projDir));
+        QVERIFY(QDir().mkpath(volA));
+        QVERIFY(QDir().mkpath(volB));
+        QVERIFY(green.save(volA + "/title.png"));
+        QVERIFY(blue.save(volB + "/title.png"));
+        const QString mediaLink = projDir + "/media";
+        QVERIFY(QFile::link(volA, mediaLink));
+        Project symMediaProj = newProject();
+        MediaAsset titleAsset = loadMedia(mediaLink + "/title.png");
+        symMediaProj.assets.insert(titleAsset.id, titleAsset);
+        const QString symShowPath = projDir + "/show.savshow";
+        writeProject(symMediaProj, symShowPath);
+        {
+            QFile checkFile(symShowPath);
+            QVERIFY(checkFile.open(QIODevice::ReadOnly));
+            const auto doc = QJsonDocument::fromJson(checkFile.readAll()).object();
+            QCOMPARE(doc["assets"].toArray()[0].toObject()["path"].toString(), QString("media/title.png"));
+        }
+        QVERIFY(QFile::remove(mediaLink));
+        QVERIFY(QFile::link(volB, mediaLink));
+        const Project repointed = readProject(symShowPath);
+        QVERIFY(!repointed.assets[titleAsset.id].offline);
+        QCOMPARE(repointed.assets[titleAsset.id].still.pixelColor(0, 0), QColor(Qt::blue));
+
+        // Even when a media symlink points to an enclosing ancestor (root/show/media -> root),
+        // saving root/show/show.savshow must still store "media/title.png" rather than "../title.png".
+        const QString parentSymRoot = dir.filePath("parent-sym-root");
+        const QString parentSymShowDir = parentSymRoot + "/show";
+        QVERIFY(QDir().mkpath(parentSymShowDir));
+        QVERIFY(green.save(parentSymRoot + "/title.png"));
+        const QString parentMediaLink = parentSymShowDir + "/media";
+        QVERIFY(QFile::link(parentSymRoot, parentMediaLink));
+        Project parentSymProj = newProject();
+        MediaAsset parentSymAsset = loadMedia(parentMediaLink + "/title.png");
+        parentSymProj.assets.insert(parentSymAsset.id, parentSymAsset);
+        const QString parentSymShowPath = parentSymShowDir + "/show.savshow";
+        writeProject(parentSymProj, parentSymShowPath);
+        {
+            QFile checkFile(parentSymShowPath);
+            QVERIFY(checkFile.open(QIODevice::ReadOnly));
+            const auto doc = QJsonDocument::fromJson(checkFile.readAll()).object();
+            QCOMPARE(doc["assets"].toArray()[0].toObject()["path"].toString(), QString("media/title.png"));
+        }
+
+        // Save As into the target of a media symlink (show/media -> vol-a, asset show/media/pictures/title.png,
+        // saved as vol-a/pictures/new.savshow) must keep the show/media symlink rather than collapsing to "title.png".
+        const QString saveAsRoot = dir.filePath("saveas-sym-root");
+        const QString saveAsShowDir = saveAsRoot + "/show";
+        const QString saveAsVolA = saveAsRoot + "/vol-a";
+        const QString saveAsVolB = saveAsRoot + "/vol-b";
+        QVERIFY(QDir().mkpath(saveAsShowDir));
+        QVERIFY(QDir().mkpath(saveAsVolA + "/pictures"));
+        QVERIFY(QDir().mkpath(saveAsVolB + "/pictures"));
+        QVERIFY(green.save(saveAsVolA + "/pictures/title.png"));
+        QVERIFY(blue.save(saveAsVolB + "/pictures/title.png"));
+        const QString saveAsMediaLink = saveAsShowDir + "/media";
+        QVERIFY(QFile::link(saveAsVolA, saveAsMediaLink));
+        Project saveAsProj = newProject();
+        MediaAsset saveAsAsset = loadMedia(saveAsMediaLink + "/pictures/title.png");
+        saveAsProj.assets.insert(saveAsAsset.id, saveAsAsset);
+        const QString saveAsPath = saveAsVolA + "/pictures/new.savshow";
+        writeProject(saveAsProj, saveAsPath);
+        {
+            QFile checkFile(saveAsPath);
+            QVERIFY(checkFile.open(QIODevice::ReadOnly));
+            const auto doc = QJsonDocument::fromJson(checkFile.readAll()).object();
+            QCOMPARE(doc["assets"].toArray()[0].toObject()["path"].toString(), QString("../../show/media/pictures/title.png"));
+        }
+        QVERIFY(QFile::remove(saveAsMediaLink));
+        QVERIFY(QFile::link(saveAsVolB, saveAsMediaLink));
+        const Project saveAsRepointed = readProject(saveAsPath);
+        QVERIFY(!saveAsRepointed.assets[saveAsAsset.id].offline);
+        QCOMPARE(saveAsRepointed.assets[saveAsAsset.id].still.pixelColor(0, 0), QColor(Qt::blue));
+
+        // Sibling media symlink pointing directly at the manifest directory (media -> vol-a,
+        // asset media/title.png, saved as vol-a/show.savshow) must store "../media/title.png"
+        // rather than pinning to "title.png".
+        const QString sibRoot = dir.filePath("sib-sym-root");
+        const QString sibVolA = sibRoot + "/vol-a";
+        const QString sibVolB = sibRoot + "/vol-b";
+        QVERIFY(QDir().mkpath(sibVolA));
+        QVERIFY(QDir().mkpath(sibVolB));
+        QVERIFY(green.save(sibVolA + "/title.png"));
+        QVERIFY(blue.save(sibVolB + "/title.png"));
+        const QString sibMediaLink = sibRoot + "/media";
+        QVERIFY(QFile::link(sibVolA, sibMediaLink));
+        Project sibProj = newProject();
+        MediaAsset sibAsset = loadMedia(sibMediaLink + "/title.png");
+        sibProj.assets.insert(sibAsset.id, sibAsset);
+        const QString sibShowPath = sibVolA + "/show.savshow";
+        writeProject(sibProj, sibShowPath);
+        {
+            QFile checkFile(sibShowPath);
+            QVERIFY(checkFile.open(QIODevice::ReadOnly));
+            const auto doc = QJsonDocument::fromJson(checkFile.readAll()).object();
+            QCOMPARE(doc["assets"].toArray()[0].toObject()["path"].toString(), QString("../media/title.png"));
+        }
+        QVERIFY(QFile::remove(sibMediaLink));
+        QVERIFY(QFile::link(sibVolB, sibMediaLink));
+        const Project sibRepointed = readProject(sibShowPath);
+        QVERIFY(!sibRepointed.assets[sibAsset.id].offline);
+        QCOMPARE(sibRepointed.assets[sibAsset.id].still.pixelColor(0, 0), QColor(Qt::blue));
+#endif
     }
     void zip64AndCompressedPackagesCanBeOpened() {
         QTemporaryDir dir;
@@ -1511,6 +1703,30 @@ private slots:
         QTest::newRow("mp3-in-mpeg-ps") << QStringList{"-ar", "44100", "-c:a", "libmp3lame", "-f", "vob", "x.mpg"} << true;
         QTest::newRow("vorbis-native-44k") << QStringList{"-ar", "44100", "-c:a", "vorbis", "-strict", "experimental", "x.ogg"} << true;
     }
+    void cancellingAnImportAtAnyPointReportsCancellation() {
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
+        QTemporaryDir dir; const QString file = dir.filePath("tone.m4a"); QProcess process;
+        process.start(ffmpeg, QStringList{"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=4", "-c:a", "aac", file});
+        QVERIFY(process.waitForFinished(30000)); if (process.exitCode() != 0) QSKIP("aac encoder unavailable");
+        // Cancel after the n-th poll: wherever that lands (probing, opening the decoder, any read), the import
+        // fails as cancelled rather than with whatever FFmpeg makes of the interrupted read.
+        // Every attempt decodes from scratch: this file's summaries and caches are removed after each one.
+        QDir caches(detail::audioCacheDirectory()); const auto kept = caches.entryList(QDir::Files);
+        const auto forget = [&] { for (const auto& name : caches.entryList(QDir::Files)) if (!kept.contains(name)) caches.remove(name); };
+        for (const auto preparation : {AudioPreparation::Stream, AudioPreparation::Prepared}) {
+            int total = 0; const auto whole = loadMedia(file, preparation, [&] { ++total; return false; }); forget();
+            QVERIFY2(total > 8, "reads poll for cancellation");
+            for (int n = 0; n < total; n += std::max(1, total / 25)) {
+                int polls = 0;
+                try { (void)loadMedia(file, preparation, [&] { return ++polls > n; }); QFAIL("cancelled import succeeded"); }
+                catch (const std::exception& e) { QVERIFY2(QString::fromUtf8(e.what()).contains("cancelled", Qt::CaseInsensitive), e.what()); }
+                forget();
+            }
+            // Nothing a cancelled import left behind is reused: the next import is whole.
+            QCOMPARE(loadMedia(file, preparation).audio->length(), whole.audio->length()); forget();
+        }
+        setAudioPreparation(AudioPreparation::Stream);
+    }
     void streamedAudioMatchesPreparedCache() {
         QFETCH(QStringList, encode); QFETCH(bool, exact);
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
@@ -1535,9 +1751,12 @@ private slots:
             std::vector<float> a(count * 2), b(count * 2);
             prepared->storage->read(start, a.data(), count); streamed->storage->read(start, b.data(), count);
             if (!exact) {
-                // Placement: no shift fits better than none; level: differences stay small.
+                // Placement: no shift fits better than none; level: differences stay small. Placement only
+                // means something where there is signal: in the encoder's padding after the content both
+                // decodes are near silence, and the best shift fits the decoder's dither noise.
                 const auto error = [&](int lag) { double e = 0; for (std::size_t i = 64; i + 64 < count; ++i) e += std::abs(a[i * 2] - b[(i + lag) * 2]); return e; };
-                for (int lag = -48; lag <= 48 && count > 256; ++lag) if (lag) QVERIFY2(error(lag) > error(0), qPrintable(QString("read at %1 fits shifted by %2").arg(start).arg(lag)));
+                const bool audible = std::any_of(a.begin(), a.end(), [](float x) { return std::abs(x) > .01f; });
+                for (int lag = -48; lag <= 48 && count > 256 && audible; ++lag) if (lag) QVERIFY2(error(lag) > error(0), qPrintable(QString("read at %1 fits shifted by %2").arg(start).arg(lag)));
                 for (std::size_t i = 0; i < a.size(); ++i) QVERIFY2(std::abs(a[i] - b[i]) < .1f, qPrintable(QString("read at %1 differs by %2").arg(start).arg(a[i] - b[i])));
                 continue;
             }

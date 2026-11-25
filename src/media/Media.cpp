@@ -10,6 +10,7 @@
 #include <cstring>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
@@ -47,6 +48,24 @@ double mediaOrigin(const AVFormatContext* format) {
 }
 // Local files only: no format may reach the network on its own (an .sdp or HLS playlist would).
 AVDictionary* localOnly() { AVDictionary* options = nullptr; av_dict_set(&options, "protocol_whitelist", "file", 0); return options; }
+struct InterruptState {
+    std::function<bool()> isCancelled;
+    std::chrono::steady_clock::time_point deadline{};
+    bool hasDeadline = false;
+    bool triggered = false;
+    bool timedOut = false;
+};
+int avInterruptCallback(void* opaque) {
+    auto* state = static_cast<InterruptState*>(opaque);
+    if (!state) return 0;
+    if (state->isCancelled && state->isCancelled()) { state->triggered = true; return 1; }
+    if (state->hasDeadline && std::chrono::steady_clock::now() >= state->deadline) {
+        state->triggered = true;
+        state->timedOut = true;
+        return 1;
+    }
+    return 0;
+}
 // A media file opened by the app for FFmpeg rather than through FFmpeg's file protocol. On Windows that
 // protocol's C runtime open denies deleting or renaming the file while it is open. Streamed audio stays
 // open for the whole show, and streaming is the mode for building one, where an editor re-exporting a
@@ -73,6 +92,9 @@ public:
     SourceFile(const SourceFile&) = delete;
     SourceFile& operator=(const SourceFile&) = delete;
     AVIOContext* io() const noexcept { return io_; }
+    // Cancellation or a deadline that every read checks, so probing and demuxing through this file stop
+    // promptly (FFmpeg consults the format's interrupt callback only for its own protocols).
+    void setInterrupt(InterruptState* interrupt) noexcept { interrupt_ = interrupt; }
     // Identity and size of the file actually open, whatever is at its path by now, as far as the handle
     // can tell (some network servers report no identity).
     struct Opened { std::optional<detail::FileIdentity> identity; std::optional<qint64> size; };
@@ -100,8 +122,10 @@ private:
     void close() noexcept { if (fd_ >= 0) ::close(fd_); }
 #endif
     AVIOContext* io_ = nullptr;
+    InterruptState* interrupt_ = nullptr;
     static int read(void* opaque, std::uint8_t* buffer, int size) {
         const auto* self = static_cast<const SourceFile*>(opaque);
+        if (self->interrupt_ && avInterruptCallback(self->interrupt_)) return AVERROR_EXIT;
 #ifdef Q_OS_WIN
         DWORD got = 0;
         if (!ReadFile(self->handle_, buffer, static_cast<DWORD>(size), &got, nullptr)) return AVERROR(EIO);
@@ -141,8 +165,11 @@ const AVInputFormat* identify(const QString& path, AVIOContext* io) {
             throw std::runtime_error("Playlists, manifests and split recordings that refer to other files cannot be imported; import the media files themselves");
     return detected;
 }
-const AVInputFormat* identify(const QString& path) { const SourceFile probe(path); return identify(path, probe.io()); }
+const AVInputFormat* identify(const QString& path, InterruptState* interrupt = nullptr) {
+    SourceFile probe(path); probe.setInterrupt(interrupt); return identify(path, probe.io());
+}
 struct Input {
+    std::unique_ptr<InterruptState> interrupt; // Outlives file, which checks it on every read.
     std::unique_ptr<SourceFile> file; // Outlives format, which reads through it.
     AVFormatContext* format = nullptr;
     AVCodecContext* codec = nullptr;
@@ -160,26 +187,63 @@ struct Input {
     enum class Sharing { AllowReplace, Lock };
     // expected: the file as imported; the file actually opened is checked against it before anything
     // reads it, so a replacement reports as changed rather than as whatever parsing it would fail with.
-    void open(const QString& path, Sharing sharing = Sharing::AllowReplace, const std::optional<detail::FileVersion>& expected = {}) {
-        const AVInputFormat* detected = nullptr;
-        if (sharing == Sharing::AllowReplace) {
-            file = std::make_unique<SourceFile>(path);
-            // Whatever the handle can tell is compared; identity only where both sides know it.
-            if (expected) {
-                const auto now = file->opened();
-                if ((now.size && *now.size != expected->size) ||
-                    (now.identity && !detail::sameIdentity(*now.identity, expected->identity)))
-                    throw AudioSourceChanged("Audio source changed; reopen the project: " + path.toStdString());
+    // isCancelled/timeout interrupt FFmpeg's blocking open and stream probing (agent previews, imports).
+    void open(const QString& path, Sharing sharing = Sharing::AllowReplace, const std::optional<detail::FileVersion>& expected = {},
+              const std::function<bool()>& isCancelled = {}, std::chrono::milliseconds timeout = {}) {
+        if (isCancelled && isCancelled()) throw std::runtime_error("Media operation cancelled");
+        // Set up before anything reads the file, so format detection is interruptible and within the deadline too.
+        if (isCancelled || timeout.count() > 0) {
+            interrupt = std::make_unique<InterruptState>();
+            interrupt->isCancelled = isCancelled;
+            if (timeout.count() > 0) {
+                interrupt->hasDeadline = true;
+                interrupt->deadline = std::chrono::steady_clock::now() + timeout;
             }
-            detected = identify(path, file->io());
-            format = avformat_alloc_context();
+        }
+        const auto interrupted = [this](const char* doing) {
+            if (interrupt && interrupt->triggered)
+                throw std::runtime_error(interrupt->timedOut ? std::string("Timed out ") + doing : std::string("Media operation cancelled"));
+        };
+        const AVInputFormat* detected = nullptr;
+        try {
+            if (sharing == Sharing::AllowReplace) {
+                file = std::make_unique<SourceFile>(path);
+                file->setInterrupt(interrupt.get());
+                // Whatever the handle can tell is compared; identity only where both sides know it.
+                if (expected) {
+                    const auto now = file->opened();
+                    if ((now.size && *now.size != expected->size) ||
+                        (now.identity && !detail::sameIdentity(*now.identity, expected->identity)))
+                        throw AudioSourceChanged("Audio source changed; reopen the project: " + path.toStdString());
+                }
+                detected = identify(path, file->io());
+                format = avformat_alloc_context();
+                if (!format) throw std::bad_alloc();
+                format->pb = file->io();
+            } else detected = identify(path, interrupt.get());
+        } catch (const AudioSourceChanged&) { throw; }
+        catch (const std::exception&) { interrupted("identifying media"); throw; }
+        if (interrupt) {
+            if (!format) format = avformat_alloc_context();
             if (!format) throw std::bad_alloc();
-            format->pb = file->io();
-        } else detected = identify(path);
+            format->interrupt_callback.callback = &avInterruptCallback;
+            format->interrupt_callback.opaque = interrupt.get();
+        }
         AVDictionary* options = localOnly();
         const int opened = avformat_open_input(&format, path.toUtf8().constData(), detected, &options); av_dict_free(&options);
-        checked(opened, "Open media");
-        checked(avformat_find_stream_info(format, nullptr), "Read media information");
+        if (opened < 0) {
+            if (interrupt && interrupt->triggered)
+                throw std::runtime_error(interrupt->timedOut ? "Timed out opening media" : "Media operation cancelled");
+            checked(opened, "Open media");
+        }
+        const int info = avformat_find_stream_info(format, nullptr);
+        if (info < 0) {
+            if (interrupt && interrupt->triggered)
+                throw std::runtime_error(interrupt->timedOut ? "Timed out reading media information" : "Media operation cancelled");
+            checked(info, "Read media information");
+        }
+        // FFmpeg ends probing early, without an error, when interrupted: what it found is incomplete.
+        interrupted("reading media information");
     }
     void decoder(int stream) {
         const auto* decoder = avcodec_find_decoder(format->streams[stream]->codecpar->codec_id);
@@ -203,8 +267,10 @@ public:
     using SeekPoints = std::shared_ptr<const std::vector<detail::SeekPoint>>;
     // expected: the file as imported. Every open (including a restart) checks the file it actually
     // opened against it, so a replacement between a path check and the open cannot be decoded.
-    explicit AudioDecoder(QString path, SeekPoints points = {}, std::optional<detail::FileVersion> expected = {})
-        : path_(std::move(path)), points_(std::move(points)), expected_(std::move(expected)) { open(); }
+    // isCancelled (imports only) interrupts opening, probing and every read of the file.
+    explicit AudioDecoder(QString path, SeekPoints points = {}, std::optional<detail::FileVersion> expected = {},
+                          std::function<bool()> isCancelled = {})
+        : path_(std::move(path)), points_(std::move(points)), expected_(std::move(expected)), isCancelled_(std::move(isCancelled)) { open(); }
     bool mono() const noexcept { return mono_; }
     QByteArray format() const { return input_->format->iformat->name; }
     // Record seek points during the coming linear decode (the import pass).
@@ -255,6 +321,7 @@ private:
     QString path_;
     SeekPoints points_;
     std::optional<detail::FileVersion> expected_;
+    std::function<bool()> isCancelled_;
     std::vector<detail::SeekPoint> recorded_;
     std::optional<detail::SeekPoint> landing_; // The seek point a seek aims at.
     std::deque<std::pair<std::int64_t, std::int64_t>> sentAt_; // Recent packets' (timestamp, byte offset).
@@ -273,7 +340,7 @@ private:
     std::int64_t inputAt_ = 0, target_ = 0, produced_ = 0;
     std::vector<float> scratch_;
     void open() {
-        input_ = std::make_unique<Input>(); input_->open(path_, Input::Sharing::AllowReplace, expected_);
+        input_ = std::make_unique<Input>(); input_->open(path_, Input::Sharing::AllowReplace, expected_, isCancelled_);
         stream_ = av_find_best_stream(input_->format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
         if (stream_ < 0) throw std::runtime_error("File contains no audio");
         input_->decoder(stream_);
@@ -606,16 +673,33 @@ void addPeaks(std::vector<float>& peaks, Frame first, const std::vector<float>& 
         peak = std::max(peak, std::max(std::abs(samples[i * 2]), std::abs(samples[i * 2 + 1])));
     }
 }
-std::shared_ptr<const AudioData> loadAudio(const QString& path, AudioPreparation preparation) {
+std::shared_ptr<const AudioData> decodeAudio(const QString& path, AudioPreparation preparation, const std::function<bool()>& isCancelled);
+// A read the cancellation interrupted fails inside FFmpeg; report it as the cancellation it is.
+std::shared_ptr<const AudioData> loadAudio(const QString& path, AudioPreparation preparation, const std::function<bool()>& isCancelled = {}) {
+    const auto cancelled = [&] { return isCancelled && isCancelled(); };
+    std::shared_ptr<const AudioData> data;
+    try { data = decodeAudio(path, preparation, isCancelled); }
+    catch (const std::exception&) { if (cancelled()) throw std::runtime_error("Media load cancelled"); throw; }
+    // An interrupted read can also look like the end of the file: never keep a decode cut short that way.
+    if (cancelled()) throw std::runtime_error("Media load cancelled");
+    return data;
+}
+std::shared_ptr<const AudioData> decodeAudio(const QString& path, AudioPreparation preparation, const std::function<bool()>& isCancelled) {
+    const auto cancelled = [&] { if (isCancelled && isCancelled()) throw std::runtime_error("Media load cancelled"); };
+    cancelled();
     // The source is hashed before the decoder opens it: a replacement in between changes the stamp,
     // which saving the summary or publishing the cache checks, instead of filing the old decode
     // under the replacement's content key.
     const bool streaming = preparation == AudioPreparation::Stream;
-    const QByteArray format = identify(path)->name;
+    const QByteArray format = [&] {
+        InterruptState interrupt; interrupt.isCancelled = isCancelled;
+        try { return QByteArray(identify(path, isCancelled ? &interrupt : nullptr)->name); }
+        catch (const std::exception&) { cancelled(); throw; }
+    }();
     std::optional<detail::StreamSummary> summary; std::optional<detail::AudioCache> prepared;
     if (streaming) summary.emplace(path, format); else prepared.emplace(path, format);
     // The decoder opens the file as hashed (or fails as changed) and must pick the demuxer the key names.
-    AudioDecoder decoder(path, {}, streaming ? summary->version() : prepared->version());
+    AudioDecoder decoder(path, {}, streaming ? summary->version() : prepared->version(), isCancelled);
     if (decoder.format() != format) throw std::runtime_error("Audio source changed during preparation; import it again");
     auto data = std::make_shared<AudioData>(); data->mono = decoder.mono();
     Frame first = 0; std::vector<float> samples;
@@ -626,9 +710,10 @@ std::shared_ptr<const AudioData> loadAudio(const QString& path, AudioPreparation
         else {
             known = detail::AudioSummary{0, data->mono, {}, {}};
             decoder.record();
-            while (decoder.next(first, samples)) { addPeaks(known->peaks, first, samples); known->length = first + static_cast<Frame>(samples.size() / 2); }
+            while (decoder.next(first, samples)) { cancelled(); addPeaks(known->peaks, first, samples); known->length = first + static_cast<Frame>(samples.size() / 2); }
             if (known->length <= 0) throw std::runtime_error("Audio stream is empty");
             known->seekPoints = std::move(decoder).recorded();
+            cancelled(); // An interrupted read can end the pass early; such a summary must never be saved for reuse.
             summary->save(*known);
         }
         data->peaks = std::move(known->peaks);
@@ -641,6 +726,7 @@ std::shared_ptr<const AudioData> loadAudio(const QString& path, AudioPreparation
     if (!cache.open()) throw std::runtime_error("Cannot create audio cache: " + cache.errorString().toStdString());
     Frame total = 0;
     while (decoder.next(first, samples)) {
+        cancelled();
         if (first > total) {
             // A sparse zero-filled prefix preserves embedded A/V offsets
             // without allocating leading silence in RAM.
@@ -655,6 +741,7 @@ std::shared_ptr<const AudioData> loadAudio(const QString& path, AudioPreparation
         total += static_cast<Frame>(samples.size() / 2);
     }
     data->peaks.resize(static_cast<std::size_t>((total + AudioData::peakStride - 1) / AudioData::peakStride), 0.f);
+    cancelled(); // Likewise a cache cut short by cancellation is never published under the file's content key.
     data->storage = prepared->publish(cache, *data, total);
     return data;
 }
@@ -664,8 +751,9 @@ void closeIdleStreams(bool wait) { StreamStorage::closeIdle(wait); }
 void setAudioPreparation(AudioPreparation value) noexcept { preference.store(value); }
 AudioPreparation audioPreparation() noexcept { return preference.load(); }
 
-MediaAsset loadMedia(const QString& path) { return loadMedia(path, audioPreparation()); }
-MediaAsset loadMedia(const QString& path, AudioPreparation preparation) {
+MediaAsset loadMedia(const QString& path, const std::function<bool()>& isCancelled) { return loadMedia(path, audioPreparation(), isCancelled); }
+MediaAsset loadMedia(const QString& path, AudioPreparation preparation, const std::function<bool()>& isCancelled) {
+    if (isCancelled && isCancelled()) throw std::runtime_error("Media load cancelled");
     if (!QFileInfo(path).isFile()) throw std::runtime_error("Media file is missing: " + path.toStdString());
     MediaAsset asset;
     asset.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -681,11 +769,11 @@ MediaAsset loadMedia(const QString& path, AudioPreparation preparation) {
         asset.image = true; asset.width = asset.still.width(); asset.height = asset.still.height(); asset.duration = 10;
         return asset;
     }
-    if (auto pcm = detail::loadPcmWave(asset.path)) {
+    if (auto pcm = detail::loadPcmWave(asset.path, isCancelled)) {
         asset.audio = std::move(pcm); asset.duration = seconds(asset.audio->length());
         return asset;
     }
-    Input input; input.open(path);
+    Input input; input.open(path, Input::Sharing::AllowReplace, {}, isCancelled);
     if (input.format->duration != AV_NOPTS_VALUE) asset.duration = input.format->duration / static_cast<double>(AV_TIME_BASE);
     const int video = av_find_best_stream(input.format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     if (video >= 0) {
@@ -698,9 +786,10 @@ MediaAsset loadMedia(const QString& path, AudioPreparation preparation) {
     if (av_find_best_stream(input.format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0) >= 0) {
         if (asset.video && (!std::isfinite(asset.duration) || asset.duration <= 0 || asset.duration > maxSeconds))
             throw std::runtime_error("Media needs a finite, representable duration");
-        asset.audio = loadAudio(asset.path, preparation);
+        asset.audio = loadAudio(asset.path, preparation, isCancelled);
         if (!asset.video) asset.duration = seconds(asset.audio->length());
     }
+    if (isCancelled && isCancelled()) throw std::runtime_error("Media load cancelled"); // Probing may have stopped early.
     if (!asset.video && !asset.audio) throw std::runtime_error("File contains no supported audio, video, or still image");
     if (!std::isfinite(asset.duration) || asset.duration <= 0 || asset.duration > maxSeconds) throw std::runtime_error("Media needs a finite, representable duration");
     return asset;
@@ -863,6 +952,100 @@ void VideoReader::run() {
     } catch (const Stopped&) {
     } catch (const std::exception& error) {
         std::lock_guard lock(mutex_); error_ = QString::fromUtf8(error.what());
+    }
+}
+
+QImage videoFrameAt(const QString& path, double time, QSize maximum, QString* error, const std::function<bool()>& isCancelled) {
+    try {
+        if (isCancelled && isCancelled()) { if (error) *error = "Preview decode cancelled"; return {}; }
+        Input input; input.open(path, Input::Sharing::AllowReplace, {}, isCancelled, std::chrono::seconds(15));
+        const int index = av_find_best_stream(input.format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+        if (index < 0) { if (error) *error = "No video stream found"; return {}; }
+        input.decoder(index);
+        auto* stream = input.format->streams[index];
+        const double start = mediaOrigin(input.format);
+        const double firstTime = stream->start_time != AV_NOPTS_VALUE
+            ? stream->start_time * av_q2d(stream->time_base) - start
+            : 0.;
+        const double target = std::max(0., time);
+        // Match VideoReader::imageAt: before the video stream's first timestamp, the frame is transparent.
+        if (target < firstTime - .0001) {
+            QImage blank(1, 1, QImage::Format_RGBA8888); blank.fill(Qt::transparent); return blank;
+        }
+        const auto timestamp = static_cast<std::int64_t>((target + start) / av_q2d(stream->time_base));
+        if (av_seek_frame(input.format, index, timestamp, AVSEEK_FLAG_BACKWARD) < 0)
+            av_seek_frame(input.format, index, timestamp, AVSEEK_FLAG_BACKWARD | AVSEEK_FLAG_ANY);
+        avcodec_flush_buffers(input.codec);
+        const AVRational frameRate = av_guess_frame_rate(input.format, stream, nullptr);
+        const double rate = frameRate.num && frameRate.den ? av_q2d(frameRate) : 24;
+        using FramePtr = std::unique_ptr<AVFrame, void(*)(AVFrame*)>;
+        FramePtr bestFrame(av_frame_alloc(), [](AVFrame* f) { av_frame_free(&f); });
+        if (!bestFrame) { if (error) *error = "Out of memory decoding video frame"; return {}; }
+        const auto decodeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        double last = -1; bool reached = false; bool sawEligibleFrame = false; bool timedOut = false;
+        for (;;) {
+            if (isCancelled && isCancelled()) { if (error) *error = "Preview decode cancelled"; return {}; }
+            if (std::chrono::steady_clock::now() >= decodeDeadline) { timedOut = true; break; }
+            int result = avcodec_receive_frame(input.codec, input.frame);
+            if (result == AVERROR_EOF) { reached = sawEligibleFrame; break; }
+            if (result == AVERROR(EAGAIN)) {
+                while ((result = av_read_frame(input.format, input.packet)) >= 0 && input.packet->stream_index != index) {
+                    av_packet_unref(input.packet);
+                    if (isCancelled && isCancelled()) { if (error) *error = "Preview decode cancelled"; return {}; }
+                    if (std::chrono::steady_clock::now() >= decodeDeadline) { timedOut = true; break; }
+                }
+                if (timedOut) break;
+                if (result == AVERROR_EOF) { if (avcodec_send_packet(input.codec, nullptr) < 0) { reached = sawEligibleFrame; break; } }
+                else if (result < 0) break;
+                else { result = avcodec_send_packet(input.codec, input.packet); av_packet_unref(input.packet); if (result < 0) break; }
+                continue;
+            }
+            if (result < 0) break;
+            const auto pts = input.frame->best_effort_timestamp;
+            const double frameTime = pts == AV_NOPTS_VALUE ? std::max(0., last + 1. / rate) : pts * av_q2d(stream->time_base) - start;
+            last = frameTime;
+            if (frameTime > target + .0001) {
+                av_frame_unref(input.frame);
+                reached = true;
+                break;
+            }
+            sawEligibleFrame = true;
+            av_frame_unref(bestFrame.get());
+            av_frame_move_ref(bestFrame.get(), input.frame);
+            if (frameTime >= target - .0001) { reached = true; break; }
+        }
+        if (reached && !sawEligibleFrame) {
+            // Target lies before the first decoded video frame: match VideoReader's transparent output.
+            QImage blank(1, 1, QImage::Format_RGBA8888); blank.fill(Qt::transparent); return blank;
+        }
+        if (!reached || !sawEligibleFrame || bestFrame->width <= 0 || bestFrame->height <= 0) {
+            if (error) {
+                if (input.interrupt && input.interrupt->triggered)
+                    *error = input.interrupt->timedOut ? "Preview decode timed out" : "Preview decode cancelled";
+                else if (timedOut)
+                    *error = QString("Preview decode timed out reaching %1 s").arg(target, 0, 'f', 2);
+                else
+                    *error = QString("Could not decode video frame at %1 s").arg(target, 0, 'f', 2);
+            }
+            return {};
+        }
+        QSize dimensions(bestFrame->width, bestFrame->height);
+        if (dimensions.width() > maximum.width() || dimensions.height() > maximum.height()) dimensions.scale(maximum, Qt::KeepAspectRatio);
+        QImage best(dimensions, QImage::Format_RGBA8888);
+        input.scaler = sws_getCachedContext(input.scaler, bestFrame->width, bestFrame->height,
+            static_cast<AVPixelFormat>(bestFrame->format), best.width(), best.height(), AV_PIX_FMT_RGBA, SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+        unsigned char* dest[] = {best.bits()}; int strides[] = {static_cast<int>(best.bytesPerLine())};
+        if (best.isNull() || !input.scaler || sws_scale(input.scaler, bestFrame->data, bestFrame->linesize, 0, bestFrame->height, dest, strides) < 0) {
+            if (error) *error = "Failed to convert video frame";
+            return {};
+        }
+        return best;
+    } catch (const std::exception& e) {
+        if (error) *error = QString::fromUtf8(e.what());
+        return {};
+    } catch (...) {
+        if (error) *error = "Unexpected video decode failure";
+        return {};
     }
 }
 }
