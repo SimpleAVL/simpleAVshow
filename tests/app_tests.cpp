@@ -19,6 +19,7 @@
 #include <QLabel>
 #include <QAction>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QComboBox>
 #include <QSpinBox>
 #include <QDoubleSpinBox>
@@ -40,6 +41,11 @@
 #include <chrono>
 #include <filesystem>
 #include <future>
+#include <functional>
+#ifndef Q_OS_WIN
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 using namespace sav;
 namespace {
@@ -136,6 +142,42 @@ struct PaintSpy : QObject {
 // A long, empty show: the playhead can travel without holds or clips.
 Project longShow() { auto p = newProject(); p.show.clips.clear(); p.show.markers.clear(); p.show.duration = frames(600); return p; }
 // Imports a resampled source with a unique last frame and returns its new cache key.
+#ifndef Q_OS_WIN
+// How many of this process's descriptors are open on files under prefix (a canonical path: a file, or a
+// folder ending in '/'). Counting every descriptor would also count ones Qt or the system open lazily (an event loop,
+// font or audio services), which differ between machines and runs.
+int descriptorsOn(const QString& prefix) {
+    if (prefix.isEmpty()) return -1; // Would match everything.
+    int count = 0;
+    for (const auto& name : QDir("/dev/fd").entryList(QDir::AllEntries | QDir::System | QDir::NoDotAndDotDot)) {
+        bool ok = false; const int fd = name.toInt(&ok); if (!ok) continue;
+#ifdef Q_OS_MACOS
+        char target[PATH_MAX] = {};
+        if (fcntl(fd, F_GETPATH, target) == -1) continue;
+        const QString path = QFile::decodeName(target);
+#else
+        const QString path = QFile::symLinkTarget(QString("/proc/self/fd/%1").arg(fd));
+#endif
+        if (path.startsWith(prefix)) ++count;
+    }
+    return count;
+}
+#endif
+// Runs action once the named dialog is showing. Setup code can run the event loop before the dialog's
+// exec (CoreMIDI and some audio drivers do), so a zero-delay timer may fire before it is open. Gives up
+// after timeout by closing whatever modal window is open, so a test fails instead of hanging.
+void whenShown(QWidget& parent, const char* name, std::function<void(QDialog*)> action, int timeout = 10000) {
+    auto* timer = new QTimer(&parent); auto started = std::make_shared<QElapsedTimer>(); started->start();
+    QObject::connect(timer, &QTimer::timeout, &parent, [timer, started, name, action, timeout, &parent] {
+        auto* dialog = parent.findChild<QDialog*>(name);
+        const bool shown = dialog && dialog->isVisible();
+        if (!shown && !started->hasExpired(timeout)) return;
+        timer->stop(); timer->deleteLater();
+        if (shown) action(dialog);
+        else if (auto* modal = QApplication::activeModalWidget()) modal->close();
+    });
+    timer->start(5);
+}
 QString importCacheKey(const QString& path, Frame count, std::shared_ptr<const AudioData>* retained = nullptr) {
     auto bytes = waveBytes(16, 1, 2, 44100, false, count); bytes.replace(bytes.size() - 4, 4, QUuid::createUuid().toRfc4122().first(4));
     writeBytes(path, bytes);
@@ -579,8 +621,7 @@ private slots:
         QSettings().setValue("audio/channels", 128);
         QSettings().setValue("midi/port", "SimpleAVShow absent MIDI test destination");
         MainWindow window; window.show(); bool audioMissing = false, midiMissing = false;
-        QTimer::singleShot(0, &window, [&] {
-            auto* dialog = window.findChild<QDialog*>("outputSettingsDialog"); if (!dialog) return;
+        whenShown(window, "outputSettingsDialog", [&](QDialog* dialog) {
             auto* audio = dialog->findChild<QComboBox*>("audioOutputDevice");
             auto* midi = dialog->findChild<QComboBox*>("midiOutputDevice");
             auto* apply = dialog->findChild<QPushButton*>("connectAudioOutput");
@@ -598,8 +639,7 @@ private slots:
         std::shared_ptr<const AudioData> held;
         const auto unused = importCacheKey(dir.filePath("unused.wav"), 4410), inUse = importCacheKey(dir.filePath("held.wav"), 4420, &held);
         MainWindow window; window.show(); bool shown = false, cleared = false;
-        QTimer::singleShot(0, &window, [&] {
-            auto* dialog = window.findChild<QDialog*>("outputSettingsDialog"); if (!dialog) return;
+        whenShown(window, "outputSettingsDialog", [&](QDialog* dialog) {
             auto* sources = dialog->findChild<QComboBox*>("audioSourcePreparation");
             auto* late = dialog->findChild<QComboBox*>("lateAudioPolicy");
             shown = sources && late && sources->currentData().toInt() == static_cast<int>(AudioPreparation::Prepared) && sources->toolTip().contains("Streaming") &&
@@ -880,11 +920,14 @@ private slots:
         QTimer::singleShot(0, &window, [&] {
             auto* dialog = qobject_cast<QFileDialog*>(QApplication::activeModalWidget());
             if (!dialog) return;
-            selected = true; dialog->selectFile(dir.filePath("menu-export")); QMetaObject::invokeMethod(dialog, "accept", Qt::QueuedConnection);
+            // Some Qt versions apply the dialog's own initial name after selectFile; the name field is what accept reads.
+            selected = true; dialog->setDirectory(dir.path()); dialog->selectFile(dir.filePath("menu-export"));
+            if (auto* name = dialog->findChild<QLineEdit*>("fileNameEdit")) name->setText("menu-export");
+            QMetaObject::invokeMethod(dialog, "accept", Qt::QueuedConnection);
         });
         window.findChild<QAction*>("exportPackageAction")->trigger();
         QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, nativeDisabled);
-        QVERIFY(selected); QVERIFY(QFileInfo::exists(package)); QVERIFY(!c.busy); QVERIFY(c.dirty); QVERIFY(c.path.isEmpty());
+        QVERIFY(selected); QVERIFY2(QFileInfo::exists(package), qPrintable(c.status + " / " + QDir(dir.path()).entryList().join(","))); QVERIFY(!c.busy); QVERIFY(c.dirty); QVERIFY(c.path.isEmpty());
         QCOMPARE(c.status, QString("Exported menu-export.savpack"));
         for (const auto& asset : c.project.assets) QVERIFY(asset.path.isEmpty());
         const auto loaded = readProject(package); QCOMPARE(loaded.assets.size(), c.project.assets.size());
@@ -1045,9 +1088,7 @@ private slots:
         QCOMPARE(controller.transport.asyncVoices(), async ? 1 : 0);
 
         bool opened = false, locked = false, playbackPreserved = false, unlockedAfterStop = false;
-        QTimer::singleShot(0, &window, [&] {
-            auto* dialog = window.findChild<QDialog*>("outputSettingsDialog");
-            if (!dialog) return;
+        whenShown(window, "outputSettingsDialog", [&](QDialog* dialog) {
             opened = dialog->isVisible();
             auto* audio = dialog->findChild<QPushButton*>("connectAudioOutput");
             auto* midi = dialog->findChild<QPushButton*>("connectMidiOutput");
@@ -1086,8 +1127,7 @@ private slots:
         auto* outputs = window.findChild<QPushButton*>("outputSettingsButton"); QVERIFY(outputs);
         for (int attempt = 0; attempt < 2; ++attempt) {
             bool selected = false;
-            QTimer::singleShot(0, &window, [&] {
-                auto* dialog = window.findChild<QDialog*>("outputSettingsDialog"); if (!dialog) return;
+            whenShown(window, "outputSettingsDialog", [&](QDialog* dialog) {
                 auto* displays = dialog->findChild<QComboBox*>("audienceOutputDisplay");
                 auto* open = dialog->findChild<QPushButton*>("openProgramDisplay");
                 if (displays && open) {
@@ -1980,15 +2020,17 @@ private slots:
         setAudioPreparation(AudioPreparation::Stream);
         QTemporaryDir dir; const auto path = dir.filePath("short.wav"); writeBytes(path, waveBytes(16, 1, 2, 44100, false, 4410 + 97));
         const auto audio = loadMedia(path).audio;
-        const auto descriptors = [] { return QDir("/dev/fd").entryList(QDir::AllEntries | QDir::System | QDir::NoDotAndDotDot).size(); };
-        const auto before = descriptors(); float sample[2]; audio->storage->read(0, sample, 1);
-        QCOMPARE(descriptors(), before + 1);
-        closeIdleStreams(true); QCOMPARE(descriptors(), before + 1); // Just read: not idle yet.
-        QTest::qWait(3100); closeIdleStreams(true); QCOMPARE(descriptors(), before);
-        audio->storage->read(4000, sample, 1); QCOMPARE(descriptors(), before + 1); // Reopens on demand.
+        // Descriptors on the source itself; the canonical path is taken while it exists.
+        const auto canonical = QFileInfo(path).canonicalFilePath(); QVERIFY2(!canonical.isEmpty(), qPrintable(path));
+        const auto open = [&] { return descriptorsOn(canonical); };
+        QCOMPARE(open(), 0); float sample[2]; audio->storage->read(0, sample, 1);
+        QCOMPARE(open(), 1);
+        closeIdleStreams(true); QCOMPARE(open(), 1); // Just read: not idle yet.
+        QTest::qWait(3100); closeIdleStreams(true); QCOMPARE(open(), 0);
+        audio->storage->read(4000, sample, 1); QCOMPARE(open(), 1); // Reopens on demand.
         // A deleted source's decoder closes at the next sweep, idle or not, so its name can be reused at once
         // where deleting an open file only marks it (FAT/exFAT on Windows).
-        QVERIFY(QFile::remove(path)); closeIdleStreams(true); QCOMPARE(descriptors(), before);
+        QVERIFY(QFile::remove(path)); closeIdleStreams(true); QCOMPARE(open(), 0);
 #endif
     }
     void rejectedSourceSwitchKeepsThePreviousPreference() {
@@ -2003,8 +2045,7 @@ private slots:
         Clip clip; clip.id = "a"; clip.assetId = asset.id.toStdString(); clip.audio = asset.audio; clip.offset = frames(1.5); clip.duration = frames(.4); project.show.clips.push_back(clip);
         c.replace(project);
         writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 + 5));
-        QTimer::singleShot(0, &window, [&] {
-            auto* dialog = window.findChild<QDialog*>("outputSettingsDialog"); if (!dialog) return;
+        whenShown(window, "outputSettingsDialog", [&](QDialog* dialog) {
             auto* sources = dialog->findChild<QComboBox*>("audioSourcePreparation"); if (!sources) return;
             sources->setCurrentIndex(sources->findData(static_cast<int>(AudioPreparation::Prepared))); emit sources->activated(sources->currentIndex());
         });
