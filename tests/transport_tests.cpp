@@ -597,6 +597,15 @@ int main() {
             checkedRender(bt, afterBoundary.data(), fade, 2);
             near(afterBoundary[(fade - 1) * 2], PatternStorage::value(boundary + fade) + .25,
                 "boundary clip B is mixed exactly once, never duplicated");
+            // forceStopAll() with a closed device must clear release tails so reopening audio while Stopped is silent.
+            auto fp = show(false); fp->clips[0].audio = audio({.5f}); fp->clips[0].loop = true;
+            Transport ft; ft.configure(fp); play(ft);
+            std::vector<float> fout(16 * 2, 0.f);
+            checkedRender(ft, fout.data(), 16, 2);
+            ft.forceStopAll();
+            std::fill(fout.begin(), fout.end(), 1.f);
+            checkedRender(ft, fout.data(), 16, 2);
+            near(fout[0], 0.0, "forceStopAll clears release tails before stream reopen");
         }}
     };
     for (const auto& [name, test] : tests) {

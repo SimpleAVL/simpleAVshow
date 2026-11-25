@@ -662,12 +662,17 @@ private slots:
             // Starting a new session while an old prompt ignores cancellation must NOT bypass the cancel deadline.
             AcpClient stuckNewSession;
             stuckNewSession.setTimeoutsForTesting(1000, 2000, 150);
+            bool reachedReadyOnReplacement = false;
             stuckNewSession.connectToAgent(SAV_MOCK_ACP_AGENT, {"--http-mcp", "--hold-prompt", "--ignore-cancel"}, QDir::tempPath(), {});
             QTRY_COMPARE(stuckNewSession.state(), AcpState::Ready);
+            QObject::connect(&stuckNewSession, &AcpClient::stateChanged, &stuckNewSession, [&](AcpState s) {
+                if (s == AcpState::Ready) reachedReadyOnReplacement = true;
+            });
             stuckNewSession.sendPrompt("Old prompt ignoring cancel");
             QCOMPARE(stuckNewSession.state(), AcpState::Prompting);
             stuckNewSession.startNewSession(QDir::tempPath(), {});
             QTRY_COMPARE_WITH_TIMEOUT(stuckNewSession.state(), AcpState::Error, 3000);
+            QVERIFY(!reachedReadyOnReplacement);
             QVERIFY(stuckNewSession.lastError().contains("cancel"));
             stuckNewSession.disconnectFromAgent();
         }

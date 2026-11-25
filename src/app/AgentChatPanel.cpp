@@ -460,15 +460,19 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         updateControls();
     });
     connect(&c_, &Controller::changed, this, [this] {
-        const int curUndo = static_cast<int>(c_.undoCount());
-        lastUndoDelta_ = curUndo - prevUndoCount_;
-        prevUndoCount_ = curUndo;
-        if (undoingAgent_) {
-            agentUndoCount_ = std::min(std::max(0, agentUndoCount_ - 1), curUndo);
-            preChangeAgentUndoCount_ = agentUndoCount_;
-        } else {
-            preChangeAgentUndoCount_ = agentUndoCount_;
-            agentUndoCount_ = 0;
+        const quint64 curHistory = c_.historyEpoch();
+        if (curHistory != lastHistoryEpoch_) {
+            lastHistoryEpoch_ = curHistory;
+            const int curUndo = static_cast<int>(c_.undoCount());
+            lastUndoDelta_ = curUndo - prevUndoCount_;
+            prevUndoCount_ = curUndo;
+            if (undoingAgent_) {
+                agentUndoCount_ = std::min(std::max(0, agentUndoCount_ - 1), curUndo);
+                preChangeAgentUndoCount_ = agentUndoCount_;
+            } else {
+                preChangeAgentUndoCount_ = agentUndoCount_;
+                agentUndoCount_ = 0;
+            }
         }
         if (c_.showMode && permissionLayout_->count() > 0) {
             for (int i = 0; i < permissionLayout_->count(); ++i) {

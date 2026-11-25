@@ -36,6 +36,7 @@ public:
     quint64 acquireBusy();
     void releaseBusy(quint64 lease);
     quint64 projectRevision() const { return projectRevision_; }
+    quint64 historyEpoch() const { return historyEpoch_; }
     quint64 showEpoch() const { return showEpoch_; }
     bool edit(const std::function<void(Project&)>& mutation);
     void undo();
@@ -120,7 +121,7 @@ private:
     Frame lastComposed_ = -1;
     std::vector<Frame> lastClocks_;
     std::deque<Project> undo_, redo_;
-    quint64 busyLease_ = 0, nextBusyLease_ = 1, projectRevision_ = 0, showEpoch_ = 0;
+    quint64 busyLease_ = 0, nextBusyLease_ = 1, projectRevision_ = 0, historyEpoch_ = 0, showEpoch_ = 0;
     struct PendingTransportCommand {
         std::uint64_t seq = 0;
         Command command;

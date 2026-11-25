@@ -509,6 +509,7 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
 #endif
     stopping_ = false;
     cancelling_ = false;
+    awaitingOldPromptCancel_ = false;
     stdoutDrainScheduled_ = false;
     stderrDrainScheduled_ = false;
     agentName_.clear(); agentVersion_.clear(); sessionId_.clear(); lastError_.clear();
@@ -627,6 +628,7 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
             const bool hadSession = state_ == AcpState::Ready || state_ == AcpState::Prompting || state_ == AcpState::Connecting;
             pending_.clear();
             pendingPermissions_.clear();
+            awaitingOldPromptCancel_ = false;
             knownToolCalls_.clear();
             knownToolCallOrder_.clear();
             knownToolCallsBytes_ = 0;
@@ -675,6 +677,7 @@ void AcpClient::startNewSession(const QString& cwd, const AcpMcpConfig& mcp) {
     if (state_ == AcpState::Prompting) cancelPrompt();
     else cancelAllPendingPermissions();
     cancelling_ = false;
+    awaitingOldPromptCancel_ = false;
     knownToolCalls_.clear();
     knownToolCallOrder_.clear();
     knownToolCallsBytes_ = 0;
@@ -728,6 +731,7 @@ void AcpClient::disconnectFromAgent() {
     deadlineTimer_.stop();
     cancelTimer_.stop();
     cancelling_ = false;
+    awaitingOldPromptCancel_ = false;
     cancelAllPendingPermissions();
     pending_.clear();
     pendingPermissions_.clear();
@@ -874,8 +878,15 @@ void AcpClient::handleResponse(int id, const QJsonObject& msg) {
     const bool hasError = hasErrorKey;
     if (kind == PendingKind::Prompt) clearCancelTimerIfDone();
     if (kind == PendingKind::Prompt && (sessionId_.isEmpty() || req.sessionId != sessionId_)) {
-        // Ignore stale prompt completion from a superseded session.
+        // Ignore stale prompt completion from a superseded session; if a new session was waiting for
+        // this cancel to settle before becoming Ready, promote it now.
         cancelAllPendingPermissions(req.sessionId);
+        if (awaitingOldPromptCancel_ && !cancelTimer_.isActive() && !sessionId_.isEmpty()) {
+            awaitingOldPromptCancel_ = false;
+            deadlineTimer_.stop();
+            setState(AcpState::Ready);
+            emit connected(agentName_.isEmpty() ? QString("ACP agent") : agentName_, sessionId_);
+        }
         return;
     }
     if (hasError) {
@@ -941,6 +952,12 @@ void AcpClient::handleResponse(int id, const QJsonObject& msg) {
         sessionId_ = result["sessionId"].toString();
         if (sessionId_.isEmpty()) {
             failConnection("ACP agent returned an empty sessionId.");
+            return;
+        }
+        if (cancelTimer_.isActive()) {
+            // Do not declare the replacement session Ready while an old cancelled prompt is still
+            // unsettled and its cancel timer could still terminate the connection.
+            awaitingOldPromptCancel_ = true;
             return;
         }
         deadlineTimer_.stop();

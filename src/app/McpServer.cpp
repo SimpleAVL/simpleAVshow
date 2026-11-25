@@ -1416,9 +1416,9 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a, const QString&
         knownFields(cfg, {{"api", {}}, {"device", {}}, {"channels", {}}, {"buffer", {}}});
         if (cfg.isEmpty()) fail("audio must specify at least one setting");
         QSettings settings;
-        RtAudio::Api api = c_.audioConfigured()
-            ? c_.activeAudioApi()
-            : static_cast<RtAudio::Api>(settings.value("audio/api", static_cast<int>(RtAudio::UNSPECIFIED)).toInt());
+        const RtAudio::Api rememberedApi = static_cast<RtAudio::Api>(settings.value("audio/api", static_cast<int>(RtAudio::UNSPECIFIED)).toInt());
+        RtAudio::Api api = c_.audioConfigured() ? c_.activeAudioApi() : rememberedApi;
+        const RtAudio::Api initialApi = api;
         if (cfg.contains("api")) {
             if (!cfg["api"].isString()) fail("audio.api must be a string");
             const QString wantedApi = cfg["api"].toString().trimmed();
@@ -1437,11 +1437,14 @@ QJsonObject McpServer::configureOutputsTool(const QJsonObject& a, const QString&
         }
         const auto devices = c_.device.devices(api);
         std::optional<DeviceDescription> chosen;
+        const bool switchingApi = cfg.contains("api") && api != initialApi;
         const QString lookupName = !wantedDevice.isEmpty()
             ? wantedDevice
-            : (c_.audioConfigured() && api == c_.activeAudioApi() && !c_.audioName.isEmpty()
-                ? c_.audioName
-                : settings.value("audio/device").toString());
+            : switchingApi
+                ? QString()
+                : (c_.audioConfigured() && api == c_.activeAudioApi() && !c_.audioName.isEmpty()
+                    ? c_.audioName
+                    : (rememberedApi == RtAudio::UNSPECIFIED || api == rememberedApi ? settings.value("audio/device").toString() : QString()));
         if (lookupName.isEmpty()) {
             chosen = playbackDevice(devices, {});
         } else {

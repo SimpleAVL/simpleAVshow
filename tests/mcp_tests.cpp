@@ -425,6 +425,15 @@ private slots:
         const QString mediaAlias = dir.filePath("alias.savshow");
         QVERIFY(QFile::link(imgPath, mediaAlias));
         QVERIFY(call(server, "project_action", {{"action", "save_as"}, {"path", mediaAlias}, {"overwrite", true}})["isError"].toBool());
+        // Read-only destinations must be rejected, and private permissions (0600) must be preserved on save.
+        const QString roShow = dir.filePath("readonly.savshow");
+        QVERIFY(!call(server, "project_action", {{"action", "save_as"}, {"path", roShow}})["isError"].toBool());
+        QVERIFY(QFile::setPermissions(roShow, QFileDevice::ReadOwner));
+        QVERIFY(call(server, "project_action", {{"action", "save_as"}, {"path", roShow}, {"overwrite", true}})["isError"].toBool());
+        QVERIFY(QFile::setPermissions(roShow, QFileDevice::ReadOwner | QFileDevice::WriteOwner));
+        QVERIFY(!call(server, "project_action", {{"action", "save_as"}, {"path", roShow}, {"overwrite", true}})["isError"].toBool());
+        QVERIFY(!(QFileInfo(roShow).permissions() & (QFileDevice::ReadGroup | QFileDevice::ReadOther)));
+        QVERIFY(!call(server, "project_action", {{"action", "save_as"}, {"path", showPath}, {"overwrite", true}})["isError"].toBool());
 #endif
         QVERIFY(!call(server, "project_action", {{"action", "export_package"}, {"path", packPath}})["isError"].toBool());
         QVERIFY(QFileInfo::exists(packPath));

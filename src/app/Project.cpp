@@ -377,8 +377,12 @@ QJsonObject projectJson(const Project& p, const QString& directory) {
     for (const auto& a : p.assets) {
         QString assetPath = a.path;
         if (!directory.isEmpty() && !assetPath.isEmpty()) {
-            const QString canonicalAsset = QFileInfo(assetPath).canonicalFilePath();
-            if (!canonicalAsset.isEmpty()) assetPath = canonicalAsset;
+            // Canonicalize only the parent directory (e.g. /var -> /private/var or symlinked show folder),
+            // preserving media file symlinks (e.g. current.wav -> take-a.wav) verbatim in the manifest.
+            const QFileInfo assetInfo(assetPath);
+            const QString canonicalParent = assetInfo.absoluteDir().canonicalPath();
+            if (!canonicalParent.isEmpty())
+                assetPath = QDir(canonicalParent).filePath(assetInfo.fileName());
             assetPath = dir.relativeFilePath(assetPath);
         }
         assets.append(QJsonObject{{"id", a.id}, {"name", a.name}, {"path", assetPath}});
@@ -428,13 +432,20 @@ void writeProject(const Project& p, const QString& path, bool allowOverwrite) {
         throw std::runtime_error("Show manifest exceeds the 128 MB save limit");
     if (!allowOverwrite && (QFileInfo::exists(path) || QFileInfo(path).isSymLink()))
         throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
+    const QFileInfo existingTarget(resolvedPath);
+    const bool hadExistingTarget = allowOverwrite && existingTarget.exists();
+    if (hadExistingTarget && !existingTarget.isWritable())
+        throw std::runtime_error("Destination file is read-only");
     QTemporaryFile temp(QFileInfo(resolvedPath).absolutePath() + "/.simpleavshow-save-XXXXXX");
     temp.setAutoRemove(true);
     if (!temp.open()) throw std::runtime_error(temp.errorString().toStdString());
     if (temp.write(bytes) != bytes.size() || !temp.flush()) throw std::runtime_error(temp.errorString().toStdString());
     const QString tempPath = temp.fileName();
     temp.close();
-    QFile::setPermissions(tempPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadGroup | QFileDevice::ReadOther);
+    if (hadExistingTarget) {
+        // Preserve existing file permissions rather than widening private manifests (e.g. 0600 -> 0644).
+        QFile::setPermissions(tempPath, existingTarget.permissions());
+    }
     if (allowOverwrite) {
         // Atomic rename replaces the target entry directly and never follows a symlink created after pre-checks.
 #ifdef Q_OS_WIN

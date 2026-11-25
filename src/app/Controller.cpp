@@ -144,7 +144,7 @@ bool Controller::edit(const std::function<void(Project&)>& mutation) {
         Project next = project; mutation(next); bindAudio(next); validate(next);
         // The previous state moves into history rather than being copied again.
         undo_.push_back(std::move(project)); if (undo_.size() > 32) undo_.pop_front(); redo_.clear();
-        project = std::move(next); dirty = true; ++projectRevision_; arm(); emit changed(); return true;
+        project = std::move(next); dirty = true; ++projectRevision_; ++historyEpoch_; arm(); emit changed(); return true;
     } catch (const std::exception& e) { report(QString::fromUtf8(e.what())); return false; }
 }
 void Controller::replace(Project next, QString projectPath, bool markDirty) {
@@ -152,17 +152,17 @@ void Controller::replace(Project next, QString projectPath, bool markDirty) {
     // Readers hold extracted package files open; Windows cannot remove them while open.
     videos_.clear(); lastPicture_ = {};
     project = std::move(next); path = std::move(projectPath); dirty = markDirty; playbackProblem.clear();
-    undo_.clear(); redo_.clear(); ++projectRevision_; ++showEpoch_;
+    undo_.clear(); redo_.clear(); ++projectRevision_; ++historyEpoch_; ++showEpoch_;
     arm(0); report("Project ready. Space plays or pauses; Stop All stops async audio and video."); emit changed();
 }
 void Controller::undo() {
     if (!canEdit() || undo_.empty()) return;
-    redo_.push_back(std::move(project)); project = std::move(undo_.back()); undo_.pop_back(); dirty = true; ++projectRevision_;
+    redo_.push_back(std::move(project)); project = std::move(undo_.back()); undo_.pop_back(); dirty = true; ++projectRevision_; ++historyEpoch_;
     arm(); emit changed();
 }
 void Controller::redo() {
     if (!canEdit() || redo_.empty()) return;
-    undo_.push_back(std::move(project)); project = std::move(redo_.back()); redo_.pop_back(); dirty = true; ++projectRevision_;
+    undo_.push_back(std::move(project)); project = std::move(redo_.back()); redo_.pop_back(); dirty = true; ++projectRevision_; ++historyEpoch_;
     arm(); emit changed();
 }
 void Controller::arm(std::optional<Frame> position) {

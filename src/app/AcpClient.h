@@ -144,6 +144,7 @@ private:
     bool usedHttpMcp_ = false;
     bool stopping_ = false;
     bool cancelling_ = false;
+    bool awaitingOldPromptCancel_ = false;
     bool stdoutDrainScheduled_ = false;
     bool stderrDrainScheduled_ = false;
     QByteArray stdoutBuffer_;

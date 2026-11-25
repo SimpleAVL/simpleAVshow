@@ -256,6 +256,9 @@ void Transport::forceStopAll() noexcept {
     urgentStop_.store(false, std::memory_order_release);
     commands_.clear();
     applyStopAll();
+    // Stream is closed: discard release tails created by applyStopAll() so reopening audio while Stopped is silent.
+    releasing_.clear();
+    std::fill(releases_.begin(), releases_.end(), Release{});
     applied_ = 0;
     publish(0);
 }
