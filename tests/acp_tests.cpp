@@ -2,6 +2,7 @@
 #include "app/AgentChatPanel.h"
 #include "app/MainWindow.h"
 #include <QtTest>
+#include "ReportUncaught.h"
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDir>

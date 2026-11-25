@@ -5,6 +5,7 @@
 #include "media/AudioSources.h"
 #include "media/MidiOutput.h"
 #include <QtTest>
+#include "ReportUncaught.h"
 #include <QTemporaryDir>
 #include <QFile>
 #include <QJsonDocument>

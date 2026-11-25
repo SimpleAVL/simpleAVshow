@@ -1,5 +1,6 @@
 #include "app/MainWindow.h"
 #include <QtTest>
+#include "ReportUncaught.h"
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QJsonDocument>
