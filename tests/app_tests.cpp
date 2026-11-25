@@ -2616,6 +2616,64 @@ private slots:
         spy.count = 0; emit c.tick(); QTest::qWait(50); QCOMPARE(spy.count, 0);
         timeline.viewport()->removeEventFilter(&spy); c.stopAll();
     }
+    void timelineRulerDragScrubsPlayhead() {
+        Controller c; auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}}; project.show.duration = frames(60);
+        auto audio = std::make_shared<AudioData>(); audio->samples.assign(static_cast<std::size_t>(frames(20)) * 2, .5f);
+        MediaAsset asset; asset.id = "tone"; asset.name = "Tone"; asset.audio = audio; project.assets.insert(asset.id, asset);
+        Clip clip; clip.id = "a"; clip.assetId = "tone"; clip.audio = audio; clip.start = frames(5); clip.duration = frames(10);
+        project.show.clips.push_back(clip);
+        project.show.markers.push_back({"m", "Cue", frames(10), false});
+        c.replace(project); Timeline timeline(c); timeline.resize(900, 300); timeline.show(); QVERIFY(QTest::qWaitForWindowExposed(&timeline));
+        timeline.setZoom(50); timeline.horizontalScrollBar()->setValue(0); auto* view = timeline.viewport();
+        auto send = [&](QEvent::Type type, QPointF at, Qt::MouseButtons buttons) {
+            QMouseEvent e(type, at, view->mapToGlobal(at), Qt::LeftButton, buttons, Qt::NoModifier); QApplication::sendEvent(view, &e);
+        };
+        // Dragging in small steps moves the playhead continuously without sticking to itself,
+        // and snaps to clip edges and markers just like a click.
+        send(QEvent::MouseButtonPress, {290, 15}, Qt::LeftButton);
+        QCOMPARE(c.position(), frames(2));
+        for (int x = 292; x <= 340; x += 2) send(QEvent::MouseMove, {static_cast<double>(x), 15}, Qt::LeftButton);
+        QCOMPARE(c.position(), frames(3));
+        send(QEvent::MouseMove, {436, 15}, Qt::LeftButton); // 4 px left of clip start (5 s = x 440).
+        QCOMPARE(c.position(), frames(5));
+        send(QEvent::MouseMove, {693, 15}, Qt::LeftButton); // 3 px right of marker (10 s = x 690).
+        QCOMPARE(c.position(), frames(10));
+        send(QEvent::MouseButtonRelease, {693, 15}, Qt::NoButton);
+        send(QEvent::MouseMove, {340, 15}, Qt::NoButton);
+        QCOMPARE(c.position(), frames(10));
+        QCOMPARE(c.project.show.markers[0].time, frames(10)); // Scrubbing in the top ruler band does not move markers.
+        // Turning off snapping disables clip/marker snapping during scrub.
+        timeline.snapping = false;
+        send(QEvent::MouseButtonPress, {290, 15}, Qt::LeftButton);
+        send(QEvent::MouseMove, {436, 15}, Qt::LeftButton);
+        send(QEvent::MouseButtonRelease, {436, 15}, Qt::NoButton);
+        QCOMPARE(c.position(), frames((436. - 190.) / 50.));
+        timeline.snapping = true;
+        // Scrubbing while playing follows live without stopping playback and keeps the de-click fade.
+        c.seek(frames(6)); QVERIFY(c.transport.command({Action::Play}));
+        std::vector<float> out(static_cast<std::size_t>(Transport::fadeFrames) * 2);
+        c.transport.render(out.data(), Transport::fadeFrames, 2);
+        QCOMPARE(c.transport.state(), State::Playing);
+        send(QEvent::MouseButtonPress, {540, 15}, Qt::LeftButton); // 7 s.
+        QCOMPARE(c.transport.state(), State::Playing); QCOMPARE(c.position(), frames(7));
+        c.transport.render(out.data(), Transport::fadeFrames, 2);
+        QCOMPARE(c.transport.state(), State::Playing);
+        send(QEvent::MouseMove, {640, 15}, Qt::LeftButton); // 9 s.
+        QCOMPARE(c.transport.state(), State::Playing); QCOMPARE(c.position(), frames(9));
+        c.transport.render(out.data(), Transport::fadeFrames, 2);
+        QVERIFY(std::abs(out[(Transport::fadeFrames - 1) * 2] - .5f) < 1e-4f);
+        send(QEvent::MouseButtonRelease, {640, 15}, Qt::NoButton);
+        c.stopAll();
+        // Show mode blocks ruler scrubbing.
+        c.setShowMode(true);
+        const Frame locked = c.position();
+        send(QEvent::MouseButtonPress, {290, 15}, Qt::LeftButton);
+        send(QEvent::MouseMove, {390, 15}, Qt::LeftButton);
+        send(QEvent::MouseButtonRelease, {390, 15}, Qt::NoButton);
+        QCOMPARE(c.position(), locked);
+        c.setShowMode(false);
+    }
 };
 QTEST_MAIN(AppTests)
 #include "app_tests.moc"
