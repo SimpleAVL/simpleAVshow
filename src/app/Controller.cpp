@@ -596,6 +596,7 @@ QImage Controller::compose() {
     for (auto it = videoProblems_.begin(); it != videoProblems_.end();) {
         if (needed.contains(it->first)) { ++it; continue; }
         if (playbackProblem == it->second) { playbackProblem.clear(); cleared = true; }
+        if (status == it->second) report(QString()); // Not left in the status bar either.
         it = videoProblems_.erase(it);
     }
     if (cleared) promoteVideoWarning();
@@ -620,7 +621,9 @@ QImage Controller::compose() {
     const Frame frame = static_cast<Frame>(std::floor(seconds(position) * project.fps));
     // A reopened video that is drawn is polled until it has a picture, even while show time stands still (a hold).
     // recoveringDrawn_: the last pass polled a recovering clip's reader (it is visible, not skipped).
-    if (frame == lastComposed_ && clocks == lastClocks_ && !lastPicture_.isNull() && !recoveringDrawn_) return lastPicture_;
+    // A reader that failed since the last pass (decoding ahead during a hold) is reported, not hidden by the cache.
+    const bool newError = std::any_of(videos_.begin(), videos_.end(), [&](const auto& entry) { return !videoErrors_.contains(entry.first) && !entry.second->error().isEmpty(); });
+    if (frame == lastComposed_ && clocks == lastClocks_ && !lastPicture_.isNull() && !recoveringDrawn_ && !newError) return lastPicture_;
     recoveringDrawn_ = false;
     QImage picture(project.width, project.height, QImage::Format_RGB32); picture.fill(Qt::black);
     QPainter painter(&picture); painter.setRenderHint(QPainter::SmoothPixmapTransform); painter.setRenderHint(QPainter::TextAntialiasing);
@@ -699,6 +702,16 @@ QImage Controller::compose() {
         }
     }
     painter.end();
+    // Readers not drawn this pass (upcoming, or a layer at zero opacity) report their failures too, once.
+    for (const auto& [clip, reader] : videos_) {
+        if (videoErrors_.contains(clip)) continue;
+        const QString error = reader->error(); if (error.isEmpty()) continue;
+        const auto found = std::find_if(project.show.clips.begin(), project.show.clips.end(), [&](const Clip& c) { return c.id == clip; });
+        const auto asset = found == project.show.clips.end() ? project.assets.cend() : project.assets.constFind(QString::fromStdString(found->assetId));
+        videoErrors_.insert(clip); recovering_.erase(clip);
+        report("Video error in " + (asset == project.assets.cend() ? QString("a video") : asset->name) + ": " + error + " The picture holds its last frame; audio continues.");
+        playbackProblem = videoProblems_[clip] = status;
+    }
     if (waiting) {
         ++lateFrames; lastComposed_ = -1; // An unfinished picture is never reused for this frame.
         if (!lastPicture_.isNull()) return lastPicture_;
