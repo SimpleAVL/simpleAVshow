@@ -121,6 +121,14 @@ private:
         Frame prevPos = 0;
         State prevState = State::Stopped;
         int prevHeldMarker = -1;
+        std::size_t prevNextStart = 0;
+        std::size_t prevNextMarker = 0;
+        bool prevWasHeld = false;
+        std::size_t prevResumeBegin = 0, prevResumeEnd = 0;
+        CommandSource prevResumeSource = CommandSource::Operator;
+        std::uint64_t prevResumeEpoch = 0;
+        State prevResumePrevState = State::Stopped;
+        int prevResumePrevHeldMarker = -1;
         bool afterPlay = false;
         State savedPlayPrevState = State::Stopped;
         int savedPlayPrevHeld = -1;
@@ -147,6 +155,8 @@ private:
         int seekRollbackCount = 0;
     };
     PendingPlayStart pendingStart_;
+    std::vector<Voice> savedSeekVoices_[2];
+    std::vector<std::size_t> savedSeekActive_[2];
     bool rollbackRevokedSeeks(PendingPlayStart& pendingStart, bool onlyAfterPlay) noexcept;
     void apply(Command command, PendingPlayStart& pendingStart) noexcept;
     void applyStopAll() noexcept;

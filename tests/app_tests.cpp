@@ -878,47 +878,51 @@ private slots:
         }
         if (oldTmpDir.isEmpty()) qunsetenv("TMPDIR"); else qputenv("TMPDIR", oldTmpDir);
 
-        // Opening a legacy symlinked show (where media lived next to the symlink alias rather than
-        // the canonical target) falls back to the alias directory when missing under the target dir,
-        // while canonical shows still resolve media next to the target manifest.
+        // Opening a legacy symlinked show (no pathBase) preserves origin/main alias-directory resolution
+        // even when a colliding file exists in targetDir, while falling back to targetDir when missing.
+        // Canonical shows written by writeProject() (pathBase == "canonical") always resolve against targetDir.
         const QString aliasDir = dir.filePath("alias-dir");
         const QString targetDir = dir.filePath("target-dir");
         QVERIFY(QDir().mkpath(aliasDir));
         QVERIFY(QDir().mkpath(targetDir));
-        QImage img(16, 16, QImage::Format_RGB32);
-        img.fill(Qt::green);
-        QVERIFY(img.save(aliasDir + "/legacy.png"));
-        QVERIFY(img.save(targetDir + "/canonical.png"));
+        QImage green(16, 16, QImage::Format_RGB32); green.fill(Qt::green);
+        QImage blue(16, 16, QImage::Format_RGB32); blue.fill(Qt::blue);
+        QVERIFY(green.save(aliasDir + "/cue.png"));
+        QVERIFY(blue.save(targetDir + "/cue.png"));
+        QVERIFY(blue.save(targetDir + "/canonical-only.png"));
         Project legacyProj = newProject();
-        MediaAsset legacyAsset = loadMedia(aliasDir + "/legacy.png");
-        MediaAsset canonicalAsset = loadMedia(targetDir + "/canonical.png");
-        legacyProj.assets.insert(legacyAsset.id, legacyAsset);
-        legacyProj.assets.insert(canonicalAsset.id, canonicalAsset);
-        // Simulate a manifest stored in targetDir whose relative path "legacy.png" was computed from aliasDir.
-        QJsonObject root = projectJson(legacyProj, targetDir);
-        QJsonArray assets = root["assets"].toArray();
-        for (int i = 0; i < assets.size(); ++i) {
-            QJsonObject obj = assets[i].toObject();
-            if (obj["id"].toString() == legacyAsset.id) {
-                obj["path"] = "legacy.png";
-                assets[i] = obj;
-            }
-        }
-        root["assets"] = assets;
+        MediaAsset cueAsset = loadMedia(targetDir + "/cue.png");
+        MediaAsset canonicalOnlyAsset = loadMedia(targetDir + "/canonical-only.png");
+        legacyProj.assets.insert(cueAsset.id, cueAsset);
+        legacyProj.assets.insert(canonicalOnlyAsset.id, canonicalOnlyAsset);
+        // Also verify projectJson() produces clean relative paths even when passed a symlinked base directory.
+        const QString symlinkedBase = dir.filePath("link-target-dir");
+        QVERIFY(QFile::link(targetDir, symlinkedBase));
+        const QJsonObject relCheck = projectJson(legacyProj, symlinkedBase);
+        for (const auto& v : relCheck["assets"].toArray())
+            QVERIFY(!v.toObject()["path"].toString().contains(".."));
+        // Simulate a legacy origin/main manifest (no pathBase) in targetDir referencing "cue.png" and "canonical-only.png".
+        QJsonObject legacyRoot = projectJson(legacyProj, targetDir);
         const QString targetShow = targetDir + "/show.savshow";
         QFile mf(targetShow);
         QVERIFY(mf.open(QIODevice::WriteOnly));
-        mf.write(QJsonDocument(root).toJson());
+        mf.write(QJsonDocument(legacyRoot).toJson());
         mf.close();
         const QString aliasShow = aliasDir + "/show.savshow";
         QVERIFY(QFile::link(targetShow, aliasShow));
-        const Project loaded = readProject(aliasShow);
-        QVERIFY(!loaded.assets[legacyAsset.id].offline);
-        QCOMPARE(QFileInfo(loaded.assets[legacyAsset.id].path).canonicalFilePath(),
-                 QFileInfo(aliasDir + "/legacy.png").canonicalFilePath());
-        QVERIFY(!loaded.assets[canonicalAsset.id].offline);
-        QCOMPARE(QFileInfo(loaded.assets[canonicalAsset.id].path).canonicalFilePath(),
-                 QFileInfo(targetDir + "/canonical.png").canonicalFilePath());
+        const Project loadedLegacy = readProject(aliasShow);
+        QVERIFY(!loadedLegacy.assets[cueAsset.id].offline);
+        QCOMPARE(QFileInfo(loadedLegacy.assets[cueAsset.id].path).canonicalFilePath(),
+                 QFileInfo(aliasDir + "/cue.png").canonicalFilePath());
+        QVERIFY(!loadedLegacy.assets[canonicalOnlyAsset.id].offline);
+        QCOMPARE(QFileInfo(loadedLegacy.assets[canonicalOnlyAsset.id].path).canonicalFilePath(),
+                 QFileInfo(targetDir + "/canonical-only.png").canonicalFilePath());
+        // Now save with writeProject() (sets pathBase == "canonical"): reopening via aliasShow must resolve targetDir/cue.png.
+        writeProject(legacyProj, targetShow);
+        const Project loadedCanonical = readProject(aliasShow);
+        QVERIFY(!loadedCanonical.assets[cueAsset.id].offline);
+        QCOMPARE(QFileInfo(loadedCanonical.assets[cueAsset.id].path).canonicalFilePath(),
+                 QFileInfo(targetDir + "/cue.png").canonicalFilePath());
 #endif
     }
     void zip64AndCompressedPackagesCanBeOpened() {

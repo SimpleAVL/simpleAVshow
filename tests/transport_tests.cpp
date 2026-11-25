@@ -664,6 +664,95 @@ int main() {
             }
             expect(domt.state() == State::Playing && domt.position() > extTarget && domt.position() < farPos,
                 "revoking Chat seek restores earlier still-authorized ExternalAgent seek");
+
+            // High #1: Seeking while Playing to a hold marker deep inside an uncached disk-backed async clip
+            // must start the async voice and play audio once the disk block arrives (never stay silent).
+            auto holdAsyncStorage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto hap = show(true);
+            hap->duration = holdAsyncStorage->length();
+            hap->clips[0].start = frames(1);
+            hap->clips[0].duration = hap->duration - frames(1);
+            hap->clips[0].audio = diskAudio(holdAsyncStorage);
+            const Frame deepHold = farPos;
+            hap->markers.push_back({"deep-hold", "Deep hold", deepHold, true, MidiTiming::Arrival, {0x90, 62, 100}});
+            Transport hat; hat.configure(hap);
+            play(hat);
+            checkedRender(hat, dout.data(), 8, 2); // Playing at frame 0..8, before the async clip starts.
+            holdAsyncStorage->fail.store(true);
+            hat.command({Action::Seek, deepHold, CommandSource::Operator, 0});
+            checkedRender(hat, dout.data(), 64, 2); // Cache miss at deepHold inside uncached async clip.
+            holdAsyncStorage->fail.store(false);
+            for (int i = 0; i < 200 && hat.state() != State::Held; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                checkedRender(hat, dout.data(), 16, 2);
+            }
+            expect(hat.state() == State::Held && hat.asyncVoices() == 1,
+                "async clip starts and plays through hold after initial cache miss");
+            std::vector<float> holdAud(64 * 2, 0.f);
+            checkedRender(hat, holdAud.data(), 64, 2);
+            float holdPeak = 0.f;
+            for (float s : holdAud) holdPeak = std::max(holdPeak, std::abs(s));
+            expect(holdPeak > 0.01f, "async audio is audible during hold after cache miss recovery");
+
+            // High #2: Operator Continue + stalled ChatAgent Seek in one callback, with Chat revoked during disk wait:
+            // playback must continue past the hold, emit the resume cue once, NOT replay arrival cue, and NOT rewind async clip.
+            auto rcStorage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto rcp = show(true);
+            rcp->duration = rcStorage->length();
+            rcp->tracks.push_back({"t1", "Normal", false, false, false, 1, 0, 0, 1});
+            rcp->clips[0].start = 0;
+            rcp->clips[0].duration = frames(5); // Ends well before farPos so Seek(farPos) cuts/resets it.
+            rcp->clips[0].audio = diskAudio(rcStorage);
+            Clip farClip = rcp->clips[0];
+            farClip.id = "far";
+            farClip.track = 1;
+            farClip.start = 0;
+            farClip.duration = rcp->duration;
+            farClip.audio = diskAudio(rcStorage);
+            rcp->clips.push_back(farClip);
+            const Frame rcHoldPos = frames(1);
+            rcp->markers.push_back({"arr", "Arrival", rcHoldPos, false, MidiTiming::Arrival, {0x90, 64, 100}});
+            rcp->markers.push_back({"res", "HoldResume", rcHoldPos, true, MidiTiming::Resume, {0x90, 65, 100}});
+            Transport rct; rct.configure(rcp);
+            rct.command({Action::Seek, rcHoldPos - 4, CommandSource::Operator, 0});
+            play(rct);
+            for (int i = 0; i < 200 && rct.state() != State::Held; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                checkedRender(rct, dout.data(), 16, 2);
+            }
+            expect(rct.state() == State::Held && rct.position() == rcHoldPos && rct.asyncVoices() == 1,
+                "reached hold with running async clip");
+            // Advance async clip well past rcHoldPos while held, and drain arrival MIDI.
+            std::vector<float> rcOut(256 * 2, 0.f);
+            checkedRender(rct, rcOut.data(), 256, 2);
+            MidiEvent rcEv;
+            int preArrivals = 0;
+            while (rct.takeMidi(rcEv)) if (rcEv.marker == 0) ++preArrivals;
+            expect(preArrivals == 1, "initial arrival cue fired once before continue");
+            // Queue Operator Continue + Chat Seek to uncached farPos in the same callback.
+            rcStorage->fail.store(true);
+            rct.command({Action::Play, 0, CommandSource::Operator, 0});
+            rct.command({Action::Seek, farPos, CommandSource::ChatAgent, rct.chatAgentEpoch()});
+            checkedRender(rct, dout.data(), 64, 2); // Stalls on disk miss at farPos.
+            expect(rct.position() == farPos, "stalled on disk miss at farPos");
+            rct.invalidateChatAgentCommands();
+            rcStorage->fail.store(false);
+            checkedRender(rct, dout.data(), 16, 2); // Triggers rollback from farPos back to rcHoldPos.
+            for (int i = 0; i < 200 && rct.position() <= rcHoldPos; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                checkedRender(rct, dout.data(), 16, 2);
+            }
+            int postArrivals = 0, postResumes = 0;
+            while (rct.takeMidi(rcEv)) {
+                if (rcEv.marker == 0) ++postArrivals;
+                if (rcEv.marker == 1) ++postResumes;
+            }
+            expect(rct.state() == State::Playing && rct.position() > rcHoldPos && rct.position() < farPos,
+                "revoked chat seek preserves Operator Continue past the hold");
+            expect(postArrivals == 0 && postResumes == 1,
+                "revoked chat seek emits Operator resume cue without replaying arrival cue");
+            expect(rct.asyncVoices() == 1,
+                "running async voice remains active after revoked chat seek rollback");
         }}
     };
     for (const auto& [name, test] : tests) {

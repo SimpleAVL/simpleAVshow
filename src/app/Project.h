@@ -24,8 +24,8 @@ Project demoProject();
 void validate(const Project& project);
 void bindAudio(Project& project);
 // Type-checks a manifest without touching media; asset paths resolve against directory.
-// Optional fallbackDirectory resolves relative paths missing under directory (e.g. legacy alias-saved shows).
-Project parseProject(const QByteArray& json, const QString& directory, const QString& fallbackDirectory = {});
+// Optional aliasDirectory preserves legacy origin/main symlink resolution for manifests without pathBase.
+Project parseProject(const QByteArray& json, const QString& directory, const QString& aliasDirectory = {});
 // Loads each asset source, then binds and validates the complete project.
 void loadProjectMedia(Project& project, const std::function<bool()>& isCancelled = {});
 Project readProject(const QString& path, const std::function<bool()>& isCancelled = {});

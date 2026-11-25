@@ -93,6 +93,8 @@ void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
     voices_.assign(show_->clips.size(), {}); releases_.assign(show_->clips.size(), {});
     releasing_.clear(); releasing_.reserve(show_->clips.size());
     starts_.clear(); pictures_.clear(); active_.clear(); active_.reserve(show_->clips.size());
+    for (auto& v : savedSeekVoices_) v.assign(show_->clips.size(), {});
+    for (auto& a : savedSeekActive_) { a.clear(); a.reserve(show_->clips.size()); }
     publishedSources_ = std::make_unique<std::atomic<Frame>[]>(show_->clips.size()); publishedSourceCount_ = show_->clips.size();
     for (std::size_t i = 0; i < publishedSourceCount_; ++i) publishedSources_[i].store(dormantSource);
     buffers_.clear(); buffers_.resize(show_->clips.size());
@@ -157,6 +159,15 @@ bool Transport::rollbackRevokedSeeks(PendingPlayStart& pendingStart, bool onlyAf
             newer.prevPos = older.prevPos;
             newer.prevState = older.prevState;
             newer.prevHeldMarker = older.prevHeldMarker;
+            newer.prevNextStart = older.prevNextStart;
+            newer.prevNextMarker = older.prevNextMarker;
+            newer.prevWasHeld = older.prevWasHeld;
+            newer.prevResumeBegin = older.prevResumeBegin;
+            newer.prevResumeEnd = older.prevResumeEnd;
+            newer.prevResumeSource = older.prevResumeSource;
+            newer.prevResumeEpoch = older.prevResumeEpoch;
+            newer.prevResumePrevState = older.prevResumePrevState;
+            newer.prevResumePrevHeldMarker = older.prevResumePrevHeldMarker;
             newer.prevSeekCueActive = older.prevSeekCueActive;
             newer.prevSeekCueSource = older.prevSeekCueSource;
             newer.prevSeekCueEpoch = older.prevSeekCueEpoch;
@@ -168,6 +179,7 @@ bool Transport::rollbackRevokedSeeks(PendingPlayStart& pendingStart, bool onlyAf
                 newer.savedPlayPrevState = older.prevState;
                 newer.savedPlayPrevHeld = older.prevHeldMarker;
             }
+            // savedSeekVoices_[0] and savedSeekActive_[0] already hold older's snapshot.
             pendingStart.seekRollbacks[0] = newer;
             pendingStart.seekRollbackCount = 1;
         }
@@ -177,9 +189,20 @@ bool Transport::rollbackRevokedSeeks(PendingPlayStart& pendingStart, bool onlyAf
         auto& top = pendingStart.seekRollbacks[pendingStart.seekRollbackCount - 1];
         if (isSourceValid(top.source, top.sourceEpoch)) break;
         if (onlyAfterPlay && !top.afterPlay) break;
-        const SeekRollback entry = top;
-        --pendingStart.seekRollbackCount;
+        const int slot = --pendingStart.seekRollbackCount;
+        const SeekRollback entry = pendingStart.seekRollbacks[slot];
         position_ = entry.prevPos;
+        nextStart_ = entry.prevNextStart;
+        nextMarker_ = entry.prevNextMarker;
+        active_ = savedSeekActive_[slot];
+        for (std::size_t i = 0; i < voices_.size(); ++i) {
+            const bool wasCut = !voices_[i].audible && savedSeekVoices_[slot][i].audible;
+            voices_[i] = savedSeekVoices_[slot][i];
+            if (wasCut) {
+                voices_[i].audible = false;
+                voices_[i].attack = fadeFrames;
+            }
+        }
         if (entry.afterPlay) {
             state_ = entry.prevState;
             heldMarker_ = entry.prevHeldMarker;
@@ -194,10 +217,19 @@ bool Transport::rollbackRevokedSeeks(PendingPlayStart& pendingStart, bool onlyAf
             pendingStart.prevState = entry.prevState;
             pendingStart.prevHeldMarker = entry.prevHeldMarker;
         }
+        if (entry.prevWasHeld) {
+            pendingStart.wasHeld = true;
+            pendingStart.begin = entry.prevResumeBegin;
+            pendingStart.end = entry.prevResumeEnd;
+            pendingStart.resumeSource = entry.prevResumeSource;
+            pendingStart.resumeEpoch = entry.prevResumeEpoch;
+            pendingStart.resumePrevState = entry.prevResumePrevState;
+            pendingStart.resumePrevHeldMarker = entry.prevResumePrevHeldMarker;
+        }
         pendingStart.seekCueActive = entry.prevSeekCueActive;
         pendingStart.seekCueSource = entry.prevSeekCueSource;
         pendingStart.seekCueEpoch = entry.prevSeekCueEpoch;
-        locate(position_);
+        prime();
         rolledBack = true;
         compactBuriedInvalid();
     }
@@ -279,7 +311,6 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
         // Seeking cancels any pending hold-resume MIDI, but MUST preserve pendingStart.active
         // and its initiating source/epoch when Play preceded Seek in the same batch so a queued
         // Seek cannot bypass the first-sample Play authorization check.
-        pendingStart.wasHeld = false;
         if (command.source != CommandSource::Operator) {
             // Keep at most one rollback slot per revocable domain (ExternalAgent vs ChatAgent)
             // in LIFO order so revoking Chat preserves an earlier still-authorized External seek.
@@ -291,6 +322,15 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
                 newer.prevPos = older.prevPos;
                 newer.prevState = older.prevState;
                 newer.prevHeldMarker = older.prevHeldMarker;
+                newer.prevNextStart = older.prevNextStart;
+                newer.prevNextMarker = older.prevNextMarker;
+                newer.prevWasHeld = older.prevWasHeld;
+                newer.prevResumeBegin = older.prevResumeBegin;
+                newer.prevResumeEnd = older.prevResumeEnd;
+                newer.prevResumeSource = older.prevResumeSource;
+                newer.prevResumeEpoch = older.prevResumeEpoch;
+                newer.prevResumePrevState = older.prevResumePrevState;
+                newer.prevResumePrevHeldMarker = older.prevResumePrevHeldMarker;
                 newer.prevSeekCueActive = older.prevSeekCueActive;
                 newer.prevSeekCueSource = older.prevSeekCueSource;
                 newer.prevSeekCueEpoch = older.prevSeekCueEpoch;
@@ -309,23 +349,36 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
                 pendingStart.seekRollbacks[pendingStart.seekRollbackCount - 1].source == command.source &&
                 pendingStart.seekRollbacks[pendingStart.seekRollbackCount - 1].sourceEpoch == command.sourceEpoch;
             if (!sameAsTop && pendingStart.seekRollbackCount < 2) {
+                const int slot = pendingStart.seekRollbackCount++;
                 SeekRollback entry;
                 entry.source = command.source;
                 entry.sourceEpoch = command.sourceEpoch;
                 entry.prevPos = position_;
                 entry.prevState = state_;
                 entry.prevHeldMarker = heldMarker_;
+                entry.prevNextStart = nextStart_;
+                entry.prevNextMarker = nextMarker_;
+                entry.prevWasHeld = pendingStart.wasHeld;
+                entry.prevResumeBegin = pendingStart.begin;
+                entry.prevResumeEnd = pendingStart.end;
+                entry.prevResumeSource = pendingStart.resumeSource;
+                entry.prevResumeEpoch = pendingStart.resumeEpoch;
+                entry.prevResumePrevState = pendingStart.resumePrevState;
+                entry.prevResumePrevHeldMarker = pendingStart.resumePrevHeldMarker;
                 entry.afterPlay = pendingStart.active;
                 entry.savedPlayPrevState = pendingStart.prevState;
                 entry.savedPlayPrevHeld = pendingStart.prevHeldMarker;
                 entry.prevSeekCueActive = pendingStart.seekCueActive;
                 entry.prevSeekCueSource = pendingStart.seekCueSource;
                 entry.prevSeekCueEpoch = pendingStart.seekCueEpoch;
-                pendingStart.seekRollbacks[pendingStart.seekRollbackCount++] = entry;
+                pendingStart.seekRollbacks[slot] = entry;
+                savedSeekVoices_[slot] = voices_;
+                savedSeekActive_[slot] = active_;
             }
         } else {
             pendingStart.seekRollbackCount = 0;
         }
+        pendingStart.wasHeld = false;
         if (pendingStart.active) {
             pendingStart.prevState = State::Paused;
             pendingStart.prevHeldMarker = -1;
@@ -590,11 +643,10 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 }
                 rollbackRevokedSeeks(pendingStart, false);
             }
-            bool advancingAtBoundary = state_ == State::Playing;
-            // On sample 0 of a newly initiated Play, defer consuming markers/MIDI and starting dormant
-            // async voices until disk readiness and live authorization both succeed so a disk stall
-            // followed by Disconnect leaves markers unconsumed and async voices Dormant.
-            const bool deferStartCommit = f == 0 && pendingStart.active && state_ == State::Playing;
+            const bool advancingAtBoundary = state_ == State::Playing;
+            // Defer consuming markers/MIDI, starting dormant async voices, and removing expired clips
+            // until disk readiness and live authorization both succeed so a cache miss (including on
+            // a seek into an async clip at a hold) never leaves holds consumed while voices stay Dormant.
             const std::size_t savedNextStart = nextStart_;
             const std::size_t savedNextMarker = nextMarker_;
             const std::size_t savedActiveSize = active_.size();
@@ -605,7 +657,8 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             CommandSource cueSource2 = CommandSource::Operator;
             std::uint64_t cueEpoch2 = 0;
             bool suppressSeekCue = false;
-            if (state_ == State::Playing) {
+            bool willEnd = false;
+            if (advancingAtBoundary) {
                 if (f == 0) {
                     if (pendingStart.active && pendingStart.source != CommandSource::Operator) {
                         cueSource = pendingStart.source;
@@ -627,44 +680,30 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                     const auto i = starts_[nextStart_++];
                     if (show_->clips[i].contains(position_)) active_.push_back(i);
                 }
-                if (deferStartCommit) {
-                    // Only preview whether a hold marker exists at position_ so normal clips respect the hold
-                    // during readiness checking without consuming nextMarker_ or emitting MIDI yet.
-                    for (std::size_t m = nextMarker_; m < markers_.size() && show_->markers[markers_[m]].time == position_; ++m) {
-                        const auto i = markers_[m];
-                        if (show_->markers[i].hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); }
-                    }
-                } else {
-                    while (nextMarker_ < markers_.size() && show_->markers[markers_[nextMarker_]].time == position_) {
-                        const auto i = markers_[nextMarker_++]; const auto& marker = show_->markers[i];
-                        if (marker.timing == MidiTiming::Arrival && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
-                        if (marker.hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); }
-                        else if (marker.timing == MidiTiming::Resume && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
-                    }
+                // Preview whether a hold marker exists at position_ so normal clips respect the hold
+                // during readiness checking without consuming nextMarker_ or emitting MIDI yet.
+                bool holdAtPos = false;
+                for (std::size_t m = nextMarker_; m < markers_.size() && show_->markers[markers_[m]].time == position_; ++m) {
+                    const auto i = markers_[m];
+                    if (show_->markers[i].hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); holdAtPos = true; }
                 }
-                if (state_ == State::Playing && position_ >= show_->duration) {
-                    state_ = State::Ended; for (std::size_t i = 0; i < voices_.size(); ++i) cut(i);
-                    std::fill(voices_.begin(), voices_.end(), Voice{}); active_.clear();
-                }
+                willEnd = !holdAtPos && position_ >= show_->duration;
             }
             bool ready = true;
+            bool hasExpired = false;
             // Resolve all sources before mixing: a cache miss freezes the whole
             // sample clock, so tracks remain aligned and no source frames are lost.
-            // Do NOT mutate Dormant async voices to Running until !waiting && !rolledBackOnReady.
-            for (std::size_t cursor = 0; cursor < active_.size();) {
+            // Do NOT mutate Dormant async voices to Running or Finished until !waiting && !rolledBackOnReady.
+            if (!willEnd) for (std::size_t cursor = 0; cursor < active_.size(); ++cursor) {
                 const auto i = active_[cursor]; const auto& clip = show_->clips[i]; const auto& track = show_->tracks[clip.track]; auto& voice = voices_[i];
                 voice.ready = false;
                 if (!clip.contains(position_) && state_ == State::Playing) {
-                    // When deferStartCommit is true, do not swap-remove expired clips from active_
-                    // before readiness succeeds, or rollback via active_.resize(savedActiveSize) could
-                    // leave a newly appended clip in an earlier slot and duplicate it on retry.
-                    if (deferStartCommit) { ++cursor; continue; }
-                    cut(i); voice = {}; active_[cursor] = active_.back(); active_.pop_back(); continue;
+                    hasExpired = true;
+                    continue;
                 }
-                ++cursor;
                 Frame source;
                 if (track.async) {
-                    const bool startingAsync = voice.state == VoiceState::Dormant && clip.contains(position_) && advancingAtBoundary && state_ != State::Ended;
+                    const bool startingAsync = voice.state == VoiceState::Dormant && clip.contains(position_) && advancingAtBoundary;
                     if (!startingAsync && voice.state != VoiceState::Running) continue;
                     source = startingAsync ? (clip.offset + position_ - clip.start) : voice.source;
                 } else {
@@ -675,7 +714,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 if (length <= 0) continue;
                 if (source >= length) {
                     if (clip.loop) source = clip.offset + (source - clip.offset) % std::max(Frame{1}, length - clip.offset);
-                    else { if (track.async && voice.state == VoiceState::Running) voice.state = VoiceState::Finished; continue; }
+                    else continue;
                 }
                 if (source < 0 || source >= length) continue;
                 if (track.async && voice.state == VoiceState::Running) voice.source = source; // Keep loops' cursors bounded, including long holds.
@@ -720,7 +759,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                     pendingStart.wasHeld = false;
                 }
             }
-            if (deferStartCommit) {
+            if (advancingAtBoundary) {
                 if (waiting || rolledBackOnReady) {
                     if (!seekRolledBackOnReady) {
                         nextStart_ = savedNextStart;
@@ -732,14 +771,14 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                         heldMarker_ = savedBoundaryHeld;
                     }
                 } else {
-                    // Disk is ready and start authorization is valid: now consume boundary markers and emit MIDI.
+                    // Disk is ready and authorization is valid: now consume boundary markers and emit MIDI.
                     while (nextMarker_ < markers_.size() && show_->markers[markers_[nextMarker_]].time == position_) {
                         const auto i = markers_[nextMarker_++]; const auto& marker = show_->markers[i];
                         if (marker.timing == MidiTiming::Arrival && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
                         if (marker.hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); }
                         else if (marker.timing == MidiTiming::Resume && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
                     }
-                    if (pendingStart.active && pendingStart.source != CommandSource::Operator &&
+                    if (f == 0 && pendingStart.active && pendingStart.source != CommandSource::Operator &&
                         !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
                         state_ = pendingStart.prevState;
                         heldMarker_ = pendingStart.prevHeldMarker;
@@ -752,17 +791,18 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                             active_.resize(savedActiveSize);
                         }
                         rolledBackOnReady = true;
+                    } else if (willEnd && state_ == State::Playing) {
+                        state_ = State::Ended; for (std::size_t i = 0; i < voices_.size(); ++i) cut(i);
+                        std::fill(voices_.begin(), voices_.end(), Voice{}); active_.clear();
+                    } else if (hasExpired && state_ == State::Playing) {
+                        for (std::size_t cursor = 0; cursor < active_.size();) {
+                            const auto i = active_[cursor];
+                            if (!show_->clips[i].contains(position_)) {
+                                cut(i); voices_[i] = {}; active_[cursor] = active_.back(); active_.pop_back(); continue;
+                            }
+                            ++cursor;
+                        }
                     }
-                }
-            }
-            if (deferStartCommit && !waiting && !rolledBackOnReady && state_ == State::Playing) {
-                // Now that readiness and authorization succeeded, remove clips that ended at position_.
-                for (std::size_t cursor = 0; cursor < active_.size();) {
-                    const auto i = active_[cursor];
-                    if (!show_->clips[i].contains(position_)) {
-                        cut(i); voices_[i] = {}; active_[cursor] = active_.back(); active_.pop_back(); continue;
-                    }
-                    ++cursor;
                 }
             }
             // Voices that stop sounding fade out. A miss fades every voice; normal voices fade back in once ready.
@@ -781,7 +821,14 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                         voice.source = startSource;
                     }
                 }
-                if (track.async && voice.state == VoiceState::Running) ++voice.source;
+                if (track.async && voice.state == VoiceState::Running) {
+                    const Frame length = sourceLength(clip);
+                    if (length > 0 && voice.source >= length && !clip.loop) {
+                        voice.state = VoiceState::Finished;
+                        continue;
+                    }
+                    ++voice.source;
+                }
                 if (!voice.ready) continue;
                 voice.audible = true; voice.next = voice.at + 1;
                 const Frame local = position_ - clip.start;

@@ -1853,9 +1853,6 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
         const bool showFile = path.endsWith(".savshow", Qt::CaseInsensitive);
         if (!pkg && !autosave && !showFile)
             fail("Project path must be a .savshow, .savshow.autosave, or .savpack file");
-        constexpr qint64 maxProjectFileBytes = 128 * 1024 * 1024;
-        if (!pkg && openInfo.size() > maxProjectFileBytes)
-            fail("Project file exceeds the 128 MB .savshow manifest size limit");
         QString targetPath;
         if (!pkg) {
             if (autosave) {
