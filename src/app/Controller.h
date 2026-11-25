@@ -108,7 +108,6 @@ private:
     QStringList missingNow_; // What the last media check during a show found missing.
     QString missingWarning_; // Its warning, kept with it.
     QStringList lastMissingMedia(const QStringList& offline, const QStringList& needed) const;
-    struct MediaCheck;
     // Reads the latest result and, unless one is running, starts the next check, under one lock.
     QStringList lastMissingMediaAndCheck(const QStringList& offline, const QStringList& needed);
     static void startMediaCheck(const std::shared_ptr<MediaCheck>& check, const QStringList& needed, bool wait);
@@ -116,6 +115,9 @@ private:
     bool recoveringDrawn_ = false; // The last composed picture polled a recovering clip.
     QSet<QString> missingSeen_; // Files seen missing since the open video readers started; kept through Stop All.
     void promoteVideoWarning();
+    // Closes a video reader on a thread of its own: its worker may be blocked reading a share.
+    static void closeVideo(std::unique_ptr<VideoReader> reader);
+    bool wasLive_ = false; // A live show was running at the last tick.
     std::map<std::string, QImage> clipFrames_; // Each video clip's last picture.
     std::map<std::string, QString> videoProblems_; // The warning each failed video clip reported.
     // Forgets what earlier checks found (another show, an edit, a stop) and any check still running.

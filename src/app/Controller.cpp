@@ -22,6 +22,14 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
         // A stream that stops calling back without reporting an error has stalled just the same.
         if (device.callbacks() != heartbeat_ || !device.running()) { heartbeat_ = device.callbacks(); stall_.restart(); }
         if (transport.state() != State::Held) wasHeld_ = false; // Each hold, however short the gap, is a new one.
+        {
+            // Leaving a live show (a seek, the end, Stop All) drops what its checks found: a stale list would
+            // keep fresh readers of restored files from holding the picture while they open.
+            const State now = transport.state();
+            const bool live = now == State::Playing || now == State::Held || transport.asyncVoices() || (now == State::Paused && pausedLive_);
+            if (wasLive_ && !live) resetMediaState();
+            wasLive_ = live;
+        }
         const bool stalled = configured_ && device.running() && stall_.hasExpired(750);
         if (configured_ && (!device.running() || stalled)) {
             const QString reason = stalled ? QString("stopped responding") : device.lastError().isEmpty() ? QString("stopped") : "failed: " + device.lastError();
@@ -156,6 +164,11 @@ void Controller::armOrThrow(Frame position) {
     // The callback must be stopped before configure; a healthy stream only pauses.
     const bool keep = configured_ && device.running();
     if (keep) device.pause(); else device.close();
+    // A video warning about readers being replaced goes with them.
+    for (const auto& [clip, problem] : videoProblems_) {
+        if (playbackProblem == problem) playbackProblem.clear();
+        if (status == problem) report(QString());
+    }
     videos_.clear(); videoErrors_.clear(); missingSeen_.clear(); clipFrames_.clear(); recovering_.clear(); videoProblems_.clear(); lastPicture_ = {}; lastComposed_ = -1; lateFrames = 0;
     auto armed = std::make_shared<Show>(project.show);
     for (auto& clip : armed->clips) {
@@ -425,14 +438,19 @@ void Controller::resetMediaState() {
 }
 void Controller::promoteVideoWarning() {
     // Another picture still frozen keeps the banner's warning once the one shown is resolved.
-    if (playbackProblem.isEmpty() && !videoProblems_.empty()) playbackProblem = videoProblems_.begin()->second;
+    if (!playbackProblem.isEmpty()) return;
+    for (const auto& [clip, problem] : videoProblems_) if (!recovering_.contains(clip)) { playbackProblem = problem; return; } // Not one reopening.
+}
+void Controller::closeVideo(std::unique_ptr<VideoReader> reader) {
+    if (!reader) return;
+    auto holder = std::make_shared<std::unique_ptr<VideoReader>>(std::move(reader));
+    try { std::thread([holder] { holder->reset(); }).detach(); } catch (...) {} // Otherwise it closes here.
 }
 void Controller::retireVideo(const std::string& clip) {
     videoErrors_.erase(clip); recovering_.insert(clip); // Its last frame stands in until the new reader has one.
     const auto it = videos_.find(clip); if (it == videos_.end()) return;
     // Its worker may still be blocked reading a share; joining it here would freeze the controls.
-    auto holder = std::make_shared<std::unique_ptr<VideoReader>>(std::move(it->second)); videos_.erase(it);
-    try { std::thread([holder] { holder->reset(); }).detach(); } catch (...) {} // Otherwise it closes here.
+    closeVideo(std::move(it->second)); videos_.erase(it);
 }
 QStringList Controller::lastMissingMedia() const { QStringList offline, needed; mediaToCheck(offline, needed); return lastMissingMedia(offline, needed); }
 QStringList Controller::lastMissingMedia(const QStringList& offline, const QStringList& needed) const {
@@ -568,16 +586,17 @@ QImage Controller::compose() {
         if (upcoming) needed.insert(upcoming->id);
     }
     for (auto it = videos_.begin(); it != videos_.end();) {
-        if (!needed.contains(it->first)) { videoErrors_.erase(it->first); it = videos_.erase(it); }
+        if (!needed.contains(it->first)) { videoErrors_.erase(it->first); closeVideo(std::move(it->second)); it = videos_.erase(it); }
         else ++it;
     }
     // A clip leaving the picture takes its video warning with it, unless a newer problem replaced it.
+    bool cleared = false;
     for (auto it = videoProblems_.begin(); it != videoProblems_.end();) {
         if (needed.contains(it->first)) { ++it; continue; }
-        if (playbackProblem == it->second) playbackProblem.clear();
+        if (playbackProblem == it->second) { playbackProblem.clear(); cleared = true; }
         it = videoProblems_.erase(it);
     }
-    promoteVideoWarning();
+    if (cleared) promoteVideoWarning();
     std::erase_if(clipFrames_, [&](const auto& entry) { return !needed.contains(entry.first); });
     std::erase_if(recovering_, [&](const std::string& clip) { return !needed.contains(clip); });
     for (const auto& clip : project.show.clips) {
@@ -655,7 +674,7 @@ QImage Controller::compose() {
                             if (problem != videoProblems_.end()) {
                                 if (playbackProblem == problem->second) playbackProblem.clear();
                                 if (status == problem->second) report("Picture restored: " + a.name + ".");
-                                videoProblems_.erase(problem); promoteVideoWarning();
+                                const bool shown = playbackProblem.isEmpty(); videoProblems_.erase(problem); if (shown) promoteVideoWarning();
                             }
                         }
                     } else if (recovering_.contains(c.id) || (it != videos_.end() && !it->second->error().isEmpty()) || missingNow_.contains(a.path)) {
