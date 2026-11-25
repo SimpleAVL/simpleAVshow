@@ -115,6 +115,19 @@ private:
         if (command.source == CommandSource::ExternalAgent) return command.sourceEpoch == validExt;
         return command.sourceEpoch == validChat;
     }
+    struct SeekRollback {
+        CommandSource source = CommandSource::Operator;
+        std::uint64_t sourceEpoch = 0;
+        Frame prevPos = 0;
+        State prevState = State::Stopped;
+        int prevHeldMarker = -1;
+        bool afterPlay = false;
+        State savedPlayPrevState = State::Stopped;
+        int savedPlayPrevHeld = -1;
+        bool prevSeekCueActive = false;
+        CommandSource prevSeekCueSource = CommandSource::Operator;
+        std::uint64_t prevSeekCueEpoch = 0;
+    };
     struct PendingPlayStart {
         bool active = false;
         CommandSource source = CommandSource::Operator;
@@ -130,16 +143,11 @@ private:
         bool seekCueActive = false;
         CommandSource seekCueSource = CommandSource::Operator;
         std::uint64_t seekCueEpoch = 0;
-        bool seekRollbackActive = false;
-        CommandSource seekRollbackSource = CommandSource::Operator;
-        std::uint64_t seekRollbackEpoch = 0;
-        Frame seekPrevPos = 0;
-        State seekPrevState = State::Stopped;
-        int seekPrevHeldMarker = -1;
-        State seekSavedPlayPrevState = State::Stopped;
-        int seekSavedPlayPrevHeld = -1;
+        SeekRollback seekRollbacks[2]{};
+        int seekRollbackCount = 0;
     };
     PendingPlayStart pendingStart_;
+    bool rollbackRevokedSeeks(PendingPlayStart& pendingStart, bool onlyAfterPlay) noexcept;
     void apply(Command command, PendingPlayStart& pendingStart) noexcept;
     void applyStopAll() noexcept;
     void dispatch(int marker, CommandSource source = CommandSource::Operator, std::uint64_t sourceEpoch = 0,

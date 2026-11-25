@@ -854,6 +854,73 @@ private slots:
         for (const auto& asset : c.project.assets) QVERIFY(asset.path.isEmpty());
         const auto loaded = readProject(package); QCOMPARE(loaded.assets.size(), c.project.assets.size());
     }
+    void packageExportWorksWithSymlinkedTempDirAndLegacySymlinkShowOpens() {
+#ifndef Q_OS_WIN
+        // Exporting a package when TMPDIR points to a symlink (e.g. /tmp -> /private/tmp on macOS)
+        // must produce relative media/ paths that readProjectPackage accepts on reopen.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString realTmp = dir.filePath("real-tmp");
+        const QString linkTmp = dir.filePath("link-tmp");
+        QVERIFY(QDir().mkpath(realTmp));
+        QVERIFY(QFile::link(realTmp, linkTmp));
+        const QByteArray oldTmpDir = qgetenv("TMPDIR");
+        qputenv("TMPDIR", linkTmp.toUtf8());
+        const QString package = dir.filePath("symlink-tmp.savpack");
+        try {
+            writeProjectPackage(demoProject(), package);
+            const auto reopened = readProject(package);
+            QCOMPARE(reopened.assets.size(), demoProject().assets.size());
+            for (const auto& a : reopened.assets) QVERIFY(!a.offline);
+        } catch (...) {
+            if (oldTmpDir.isEmpty()) qunsetenv("TMPDIR"); else qputenv("TMPDIR", oldTmpDir);
+            throw;
+        }
+        if (oldTmpDir.isEmpty()) qunsetenv("TMPDIR"); else qputenv("TMPDIR", oldTmpDir);
+
+        // Opening a legacy symlinked show (where media lived next to the symlink alias rather than
+        // the canonical target) falls back to the alias directory when missing under the target dir,
+        // while canonical shows still resolve media next to the target manifest.
+        const QString aliasDir = dir.filePath("alias-dir");
+        const QString targetDir = dir.filePath("target-dir");
+        QVERIFY(QDir().mkpath(aliasDir));
+        QVERIFY(QDir().mkpath(targetDir));
+        QImage img(16, 16, QImage::Format_RGB32);
+        img.fill(Qt::green);
+        QVERIFY(img.save(aliasDir + "/legacy.png"));
+        QVERIFY(img.save(targetDir + "/canonical.png"));
+        Project legacyProj = newProject();
+        MediaAsset legacyAsset = loadMedia(aliasDir + "/legacy.png");
+        MediaAsset canonicalAsset = loadMedia(targetDir + "/canonical.png");
+        legacyProj.assets.insert(legacyAsset.id, legacyAsset);
+        legacyProj.assets.insert(canonicalAsset.id, canonicalAsset);
+        // Simulate a manifest stored in targetDir whose relative path "legacy.png" was computed from aliasDir.
+        QJsonObject root = projectJson(legacyProj, targetDir);
+        QJsonArray assets = root["assets"].toArray();
+        for (int i = 0; i < assets.size(); ++i) {
+            QJsonObject obj = assets[i].toObject();
+            if (obj["id"].toString() == legacyAsset.id) {
+                obj["path"] = "legacy.png";
+                assets[i] = obj;
+            }
+        }
+        root["assets"] = assets;
+        const QString targetShow = targetDir + "/show.savshow";
+        QFile mf(targetShow);
+        QVERIFY(mf.open(QIODevice::WriteOnly));
+        mf.write(QJsonDocument(root).toJson());
+        mf.close();
+        const QString aliasShow = aliasDir + "/show.savshow";
+        QVERIFY(QFile::link(targetShow, aliasShow));
+        const Project loaded = readProject(aliasShow);
+        QVERIFY(!loaded.assets[legacyAsset.id].offline);
+        QCOMPARE(QFileInfo(loaded.assets[legacyAsset.id].path).canonicalFilePath(),
+                 QFileInfo(aliasDir + "/legacy.png").canonicalFilePath());
+        QVERIFY(!loaded.assets[canonicalAsset.id].offline);
+        QCOMPARE(QFileInfo(loaded.assets[canonicalAsset.id].path).canonicalFilePath(),
+                 QFileInfo(targetDir + "/canonical.png").canonicalFilePath());
+#endif
+    }
     void zip64AndCompressedPackagesCanBeOpened() {
         QTemporaryDir dir;
         writeProject(newProject(), dir.filePath("empty.savshow"));

@@ -12,6 +12,7 @@ class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
+class QScrollArea;
 class QTextBrowser;
 class QToolButton;
 class QVBoxLayout;
@@ -81,6 +82,7 @@ private:
     QPlainTextEdit* logsView_ = nullptr;
     QWidget* quickPromptsBox_ = nullptr;
     QTextBrowser* transcript_ = nullptr;
+    QScrollArea* permissionScroll_ = nullptr;
     QWidget* permissionBox_ = nullptr;
     QVBoxLayout* permissionLayout_ = nullptr;
     QPlainTextEdit* promptInput_ = nullptr;

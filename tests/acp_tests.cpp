@@ -13,6 +13,7 @@
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTcpServer>
@@ -1064,6 +1065,22 @@ private slots:
         QVERIFY(diffReq.detail.contains("new cue"));
         QTRY_COMPARE(diffStop, QString("end_turn"));
         diffClient.disconnectFromAgent();
+
+        // An ACP agent that exits with code 0 before completing handshake must report an Error diagnostic.
+        AcpClient zeroExitClient;
+        zeroExitClient.connectToAgent(QString::fromUtf8(SAV_MOCK_ACP_AGENT), {"--exit-zero-on-start"},
+            QDir::tempPath(), {});
+        QTRY_COMPARE(zeroExitClient.state(), AcpState::Error);
+        QVERIFY(zeroExitClient.lastError().contains("handshake"));
+        QVERIFY(zeroExitClient.lastError().contains("0"));
+
+        // Permission cards live in a height-bounded QScrollArea so concurrent prompts cannot push composer offscreen.
+        MainWindow permWindow;
+        auto* chatPanel = permWindow.findChild<AgentChatPanel*>("agentChatPanel");
+        QVERIFY(chatPanel);
+        auto* permScroll = chatPanel->findChild<QScrollArea*>("agentPermissionScroll");
+        QVERIFY(permScroll);
+        QVERIFY(permScroll->maximumHeight() > 0 && permScroll->maximumHeight() <= 240);
     }
 };
 

@@ -147,6 +147,63 @@ void Transport::dispatch(int marker, CommandSource source, std::uint64_t sourceE
         !midi_.push({marker, position_, epoch_.load(), source, sourceEpoch, secondarySource, secondaryEpoch}))
         overflow_.store(true);
 }
+bool Transport::rollbackRevokedSeeks(PendingPlayStart& pendingStart, bool onlyAfterPlay) noexcept {
+    bool rolledBack = false;
+    auto compactBuriedInvalid = [&]() noexcept {
+        if (pendingStart.seekRollbackCount == 2 &&
+            !isSourceValid(pendingStart.seekRollbacks[0].source, pendingStart.seekRollbacks[0].sourceEpoch)) {
+            auto& older = pendingStart.seekRollbacks[0];
+            auto& newer = pendingStart.seekRollbacks[1];
+            newer.prevPos = older.prevPos;
+            newer.prevState = older.prevState;
+            newer.prevHeldMarker = older.prevHeldMarker;
+            newer.prevSeekCueActive = older.prevSeekCueActive;
+            newer.prevSeekCueSource = older.prevSeekCueSource;
+            newer.prevSeekCueEpoch = older.prevSeekCueEpoch;
+            if (older.afterPlay) {
+                newer.afterPlay = true;
+                newer.savedPlayPrevState = older.savedPlayPrevState;
+                newer.savedPlayPrevHeld = older.savedPlayPrevHeld;
+            } else if (newer.afterPlay) {
+                newer.savedPlayPrevState = older.prevState;
+                newer.savedPlayPrevHeld = older.prevHeldMarker;
+            }
+            pendingStart.seekRollbacks[0] = newer;
+            pendingStart.seekRollbackCount = 1;
+        }
+    };
+    compactBuriedInvalid();
+    while (pendingStart.seekRollbackCount > 0) {
+        auto& top = pendingStart.seekRollbacks[pendingStart.seekRollbackCount - 1];
+        if (isSourceValid(top.source, top.sourceEpoch)) break;
+        if (onlyAfterPlay && !top.afterPlay) break;
+        const SeekRollback entry = top;
+        --pendingStart.seekRollbackCount;
+        position_ = entry.prevPos;
+        if (entry.afterPlay) {
+            state_ = entry.prevState;
+            heldMarker_ = entry.prevHeldMarker;
+            if (pendingStart.active) {
+                pendingStart.prevState = entry.savedPlayPrevState;
+                pendingStart.prevHeldMarker = entry.savedPlayPrevHeld;
+            }
+        } else if (state_ != State::Playing) {
+            state_ = entry.prevState;
+            heldMarker_ = entry.prevHeldMarker;
+        } else if (pendingStart.active) {
+            pendingStart.prevState = entry.prevState;
+            pendingStart.prevHeldMarker = entry.prevHeldMarker;
+        }
+        pendingStart.seekCueActive = entry.prevSeekCueActive;
+        pendingStart.seekCueSource = entry.prevSeekCueSource;
+        pendingStart.seekCueEpoch = entry.prevSeekCueEpoch;
+        locate(position_);
+        rolledBack = true;
+        compactBuriedInvalid();
+    }
+    return rolledBack;
+}
+
 void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept {
     if (!isSourceValid(command.source, command.sourceEpoch)) {
         ++applied_;
@@ -207,6 +264,12 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
     }
     case Action::Pause:
         if (state_ == State::Playing) state_ = State::Paused;
+        // A valid Pause supersedes any pending seek rollback's pre-seek Playing state so revoking
+        // an agent seek later can never resume playback past an explicit Pause.
+        for (int s = 0; s < pendingStart.seekRollbackCount; ++s) {
+            if (pendingStart.seekRollbacks[s].prevState == State::Playing)
+                pendingStart.seekRollbacks[s].prevState = State::Paused;
+        }
         break;
     case Action::Seek: {
         // Re-verify agent authorization immediately before cutting voices or moving the playhead
@@ -218,18 +281,50 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
         // Seek cannot bypass the first-sample Play authorization check.
         pendingStart.wasHeld = false;
         if (command.source != CommandSource::Operator) {
-            if (!pendingStart.seekRollbackActive) {
-                pendingStart.seekPrevPos = position_;
-                pendingStart.seekPrevState = state_;
-                pendingStart.seekPrevHeldMarker = heldMarker_;
-                pendingStart.seekSavedPlayPrevState = pendingStart.prevState;
-                pendingStart.seekSavedPlayPrevHeld = pendingStart.prevHeldMarker;
+            // Keep at most one rollback slot per revocable domain (ExternalAgent vs ChatAgent)
+            // in LIFO order so revoking Chat preserves an earlier still-authorized External seek.
+            if (pendingStart.seekRollbackCount == 2 &&
+                pendingStart.seekRollbacks[0].source == command.source &&
+                pendingStart.seekRollbacks[0].sourceEpoch == command.sourceEpoch) {
+                auto& older = pendingStart.seekRollbacks[0];
+                auto& newer = pendingStart.seekRollbacks[1];
+                newer.prevPos = older.prevPos;
+                newer.prevState = older.prevState;
+                newer.prevHeldMarker = older.prevHeldMarker;
+                newer.prevSeekCueActive = older.prevSeekCueActive;
+                newer.prevSeekCueSource = older.prevSeekCueSource;
+                newer.prevSeekCueEpoch = older.prevSeekCueEpoch;
+                if (older.afterPlay) {
+                    newer.afterPlay = true;
+                    newer.savedPlayPrevState = older.savedPlayPrevState;
+                    newer.savedPlayPrevHeld = older.savedPlayPrevHeld;
+                } else if (newer.afterPlay) {
+                    newer.savedPlayPrevState = older.prevState;
+                    newer.savedPlayPrevHeld = older.prevHeldMarker;
+                }
+                pendingStart.seekRollbacks[0] = newer;
+                pendingStart.seekRollbackCount = 1;
             }
-            pendingStart.seekRollbackActive = true;
-            pendingStart.seekRollbackSource = command.source;
-            pendingStart.seekRollbackEpoch = command.sourceEpoch;
+            const bool sameAsTop = pendingStart.seekRollbackCount > 0 &&
+                pendingStart.seekRollbacks[pendingStart.seekRollbackCount - 1].source == command.source &&
+                pendingStart.seekRollbacks[pendingStart.seekRollbackCount - 1].sourceEpoch == command.sourceEpoch;
+            if (!sameAsTop && pendingStart.seekRollbackCount < 2) {
+                SeekRollback entry;
+                entry.source = command.source;
+                entry.sourceEpoch = command.sourceEpoch;
+                entry.prevPos = position_;
+                entry.prevState = state_;
+                entry.prevHeldMarker = heldMarker_;
+                entry.afterPlay = pendingStart.active;
+                entry.savedPlayPrevState = pendingStart.prevState;
+                entry.savedPlayPrevHeld = pendingStart.prevHeldMarker;
+                entry.prevSeekCueActive = pendingStart.seekCueActive;
+                entry.prevSeekCueSource = pendingStart.seekCueSource;
+                entry.prevSeekCueEpoch = pendingStart.seekCueEpoch;
+                pendingStart.seekRollbacks[pendingStart.seekRollbackCount++] = entry;
+            }
         } else {
-            pendingStart.seekRollbackActive = false;
+            pendingStart.seekRollbackCount = 0;
         }
         if (pendingStart.active) {
             pendingStart.prevState = State::Paused;
@@ -252,18 +347,8 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
         position_ = next; heldMarker_ = -1; locate(next);
         if (state_ != State::Playing) state_ = State::Paused;
         epoch_.fetch_add(1);
-        if (pendingStart.seekRollbackActive && !isSourceValid(pendingStart.seekRollbackSource, pendingStart.seekRollbackEpoch)) {
-            position_ = pendingStart.seekPrevPos;
-            state_ = pendingStart.seekPrevState;
-            heldMarker_ = pendingStart.seekPrevHeldMarker;
-            if (pendingStart.active) {
-                pendingStart.prevState = pendingStart.seekSavedPlayPrevState;
-                pendingStart.prevHeldMarker = pendingStart.seekSavedPlayPrevHeld;
-            }
-            locate(position_);
-            pendingStart.seekRollbackActive = false;
-            pendingStart.seekCueActive = false;
-        }
+        if (pendingStart.seekRollbackCount > 0 && !isSourceValid(command.source, command.sourceEpoch))
+            rollbackRevokedSeeks(pendingStart, false);
         break;
     }
     case Action::StopAll:
@@ -342,6 +427,24 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
     if (urgent) {
         applyUrgentStop(0);
     } else {
+        // Roll back any already-revoked stalled agent Seek/Play from a previous callback BEFORE
+        // applying this callback's commands (e.g. an Operator Pause or Seek queued after revocation).
+        rollbackRevokedSeeks(pendingStart, true);
+        if (pendingStart.active && pendingStart.source != CommandSource::Operator &&
+            !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
+            state_ = pendingStart.prevState;
+            heldMarker_ = pendingStart.prevHeldMarker;
+            pendingStart.active = false;
+        }
+        if (pendingStart.wasHeld && pendingStart.resumeSource != CommandSource::Operator &&
+            !isSourceValid(pendingStart.resumeSource, pendingStart.resumeEpoch)) {
+            state_ = pendingStart.resumePrevState;
+            heldMarker_ = pendingStart.resumePrevHeldMarker;
+            pendingStart.wasHeld = false;
+            pendingStart.active = false;
+        }
+        rollbackRevokedSeeks(pendingStart, false);
+
         int lastOpStop = -1;
         int lastExtStop = -1;
         int lastChatStop = -1;
@@ -405,33 +508,14 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             apply(c, pendingStart);
         }
     }
-    // Roll back any revoked agent Seek FIRST (LIFO order relative to a preceding Play in the same
-    // batch) so Seek's pre-seek Playing snapshot can never overwrite a subsequent Play rollback.
-    if (pendingStart.seekRollbackActive) {
-        if (urgentStop_.load(std::memory_order_acquire)) {
-            applyUrgentStop(countQueued);
-            pendingStart = {};
-        } else if (!isSourceValid(pendingStart.seekRollbackSource, pendingStart.seekRollbackEpoch)) {
-            position_ = pendingStart.seekPrevPos;
-            state_ = pendingStart.seekPrevState;
-            heldMarker_ = pendingStart.seekPrevHeldMarker;
-            if (pendingStart.active) {
-                pendingStart.prevState = pendingStart.seekSavedPlayPrevState;
-                pendingStart.prevHeldMarker = pendingStart.seekSavedPlayPrevHeld;
-            }
-            locate(position_);
-            pendingStart.seekRollbackActive = false;
-            pendingStart.seekCueActive = false;
-        }
-    }
-    // Verify the initiating Play/resume source right at the first-sample rendering boundary (and on
-    // zero-frame renders) so callback preemption before sample 0 cannot start audio or fire
-    // arrival/resume cues after Disconnect, New, or Show-mode entry.
-    if (pendingStart.active || pendingStart.wasHeld) {
+    // Roll back any revoked agent Seek/Play in LIFO order: Seeks that followed Play roll back
+    // before Play, and Seeks that preceded Play roll back after Play.
+    if (pendingStart.seekRollbackCount > 0 || pendingStart.active || pendingStart.wasHeld) {
         if (urgentStop_.load(std::memory_order_acquire)) {
             applyUrgentStop(countQueued);
             pendingStart = {};
         } else {
+            rollbackRevokedSeeks(pendingStart, true);
             // Do not bump the global MIDI epoch_ on revoked agent rollback: any MIDI emitted by the
             // revoked agent already carries its own source/sourceEpoch and is rejected by the MIDI worker,
             // while unrelated earlier Operator cues in midi_ must remain valid.
@@ -468,50 +552,43 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             } else if (pendingStart.wasHeld) {
                 pendingStart.wasHeld = false;
             }
+            rollbackRevokedSeeks(pendingStart, false);
         }
     }
     if (state_ != State::Playing) {
         pendingStart.active = false;
         pendingStart.wasHeld = false;
         pendingStart.seekCueActive = false;
-        pendingStart.seekRollbackActive = false;
+        pendingStart.seekRollbackCount = 0;
     } else if (count == 0) {
-        pendingStart.seekRollbackActive = false;
+        pendingStart.seekRollbackCount = 0;
     }
     float peak = 0; bool waiting = false;
     for (unsigned f = 0; f < count; ++f) {
         if (waiting && releasing_.empty()) break; // Remaining device samples stay silent; retry at the same show/source time.
         float* const frame = output ? output + static_cast<std::size_t>(f) * channels : nullptr;
+        bool rolledBackOnReady = false;
         if (!waiting) {
-            if (f == 0 && pendingStart.seekRollbackActive &&
-                !isSourceValid(pendingStart.seekRollbackSource, pendingStart.seekRollbackEpoch)) {
-                position_ = pendingStart.seekPrevPos;
-                state_ = pendingStart.seekPrevState;
-                heldMarker_ = pendingStart.seekPrevHeldMarker;
-                if (pendingStart.active) {
-                    pendingStart.prevState = pendingStart.seekSavedPlayPrevState;
-                    pendingStart.prevHeldMarker = pendingStart.seekSavedPlayPrevHeld;
+            if (f == 0 && (pendingStart.seekRollbackCount > 0 || pendingStart.active || pendingStart.wasHeld)) {
+                rollbackRevokedSeeks(pendingStart, true);
+                if (state_ == State::Playing) {
+                    if (pendingStart.active && pendingStart.source != CommandSource::Operator &&
+                        !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
+                        state_ = pendingStart.prevState;
+                        heldMarker_ = pendingStart.prevHeldMarker;
+                        pendingStart.active = false;
+                        pendingStart.wasHeld = false;
+                        pendingStart.seekCueActive = false;
+                    } else if (pendingStart.wasHeld && pendingStart.resumeSource != CommandSource::Operator &&
+                               !isSourceValid(pendingStart.resumeSource, pendingStart.resumeEpoch)) {
+                        state_ = pendingStart.resumePrevState;
+                        heldMarker_ = pendingStart.resumePrevHeldMarker;
+                        pendingStart.active = false;
+                        pendingStart.wasHeld = false;
+                        pendingStart.seekCueActive = false;
+                    }
                 }
-                locate(position_);
-                pendingStart.seekRollbackActive = false;
-                pendingStart.seekCueActive = false;
-            }
-            if (f == 0 && state_ == State::Playing) {
-                if (pendingStart.active && pendingStart.source != CommandSource::Operator &&
-                    !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
-                    state_ = pendingStart.prevState;
-                    heldMarker_ = pendingStart.prevHeldMarker;
-                    pendingStart.active = false;
-                    pendingStart.wasHeld = false;
-                    pendingStart.seekCueActive = false;
-                } else if (pendingStart.wasHeld && pendingStart.resumeSource != CommandSource::Operator &&
-                           !isSourceValid(pendingStart.resumeSource, pendingStart.resumeEpoch)) {
-                    state_ = pendingStart.resumePrevState;
-                    heldMarker_ = pendingStart.resumePrevHeldMarker;
-                    pendingStart.active = false;
-                    pendingStart.wasHeld = false;
-                    pendingStart.seekCueActive = false;
-                }
+                rollbackRevokedSeeks(pendingStart, false);
             }
             bool advancingAtBoundary = state_ == State::Playing;
             // On sample 0 of a newly initiated Play, defer consuming markers/MIDI and starting dormant
@@ -612,8 +689,9 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 voice.at = source; voice.ready = true;
             }
             if (!ready) { bufferWaits_.fetch_add(1, std::memory_order_relaxed); waiting = true; }
-            bool rolledBackOnReady = false;
-            if (!waiting && f == 0 && (pendingStart.active || pendingStart.wasHeld)) {
+            bool seekRolledBackOnReady = false;
+            if (!waiting && f == 0 && (pendingStart.seekRollbackCount > 0 || pendingStart.active || pendingStart.wasHeld)) {
+                if (rollbackRevokedSeeks(pendingStart, true)) { rolledBackOnReady = true; seekRolledBackOnReady = true; }
                 if (pendingStart.active && pendingStart.source != CommandSource::Operator &&
                     !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
                     state_ = pendingStart.prevState;
@@ -630,7 +708,9 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                     pendingStart.wasHeld = false;
                     pendingStart.seekCueActive = false;
                     rolledBackOnReady = true;
-                } else if (pendingStart.wasHeld) {
+                }
+                if (rollbackRevokedSeeks(pendingStart, false)) { rolledBackOnReady = true; seekRolledBackOnReady = true; }
+                if (!rolledBackOnReady && pendingStart.wasHeld) {
                     // Disk is ready and the initiating resume is still valid: emit hold-resume MIDI once.
                     for (auto m = pendingStart.begin; m < pendingStart.end; ++m) {
                         const auto i = markers_[m]; const auto& marker = show_->markers[i];
@@ -642,9 +722,11 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             }
             if (deferStartCommit) {
                 if (waiting || rolledBackOnReady) {
-                    nextStart_ = savedNextStart;
-                    nextMarker_ = savedNextMarker;
-                    active_.resize(savedActiveSize);
+                    if (!seekRolledBackOnReady) {
+                        nextStart_ = savedNextStart;
+                        nextMarker_ = savedNextMarker;
+                        active_.resize(savedActiveSize);
+                    }
                     if (waiting) {
                         state_ = savedBoundaryState;
                         heldMarker_ = savedBoundaryHeld;
@@ -659,14 +741,16 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                     }
                     if (pendingStart.active && pendingStart.source != CommandSource::Operator &&
                         !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
-                        nextStart_ = savedNextStart;
-                        nextMarker_ = savedNextMarker;
-                        active_.resize(savedActiveSize);
                         state_ = pendingStart.prevState;
                         heldMarker_ = pendingStart.prevHeldMarker;
                         pendingStart.active = false;
                         pendingStart.wasHeld = false;
                         pendingStart.seekCueActive = false;
+                        if (!rollbackRevokedSeeks(pendingStart, false)) {
+                            nextStart_ = savedNextStart;
+                            nextMarker_ = savedNextMarker;
+                            active_.resize(savedActiveSize);
+                        }
                         rolledBackOnReady = true;
                     }
                 }
@@ -737,12 +821,12 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             if (std::abs(sample) > 1.f) clipped_.store(true, std::memory_order_relaxed);
             sample = std::clamp(sample, -1.f, 1.f);
         }
-        if (!waiting) {
+        if (!waiting && !rolledBackOnReady) {
             if (f == 0) {
                 pendingStart.active = false;
                 pendingStart.wasHeld = false;
                 pendingStart.seekCueActive = false;
-                pendingStart.seekRollbackActive = false;
+                pendingStart.seekRollbackCount = 0;
             }
             if (state_ == State::Playing) ++position_;
         }

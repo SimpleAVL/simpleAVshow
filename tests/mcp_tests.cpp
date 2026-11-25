@@ -828,6 +828,31 @@ private slots:
             window.controller().preflightLock = false;
         }
 
+        // 23. Uncommitted numeric spinbox edit in the inspector must commit before MCP seek_and_select switches selection.
+        {
+            window.controller().replace(demoProject());
+            window.show();
+            QApplication::processEvents();
+            QVERIFY(window.controller().project.show.clips.size() >= 2);
+            // clips[1] is the title clip (start=2s, duration=36s in 70s show), so moving start to 7.5s fits cleanly.
+            const QString clipA = QString::fromStdString(window.controller().project.show.clips[1].id);
+            const QString clipB = QString::fromStdString(window.controller().project.show.clips[0].id);
+            QVERIFY(!call(server, "seek_and_select", {{"clip_id", clipA}})["isError"].toBool());
+            auto* startSpin = window.findChild<QDoubleSpinBox*>("clipStart");
+            QVERIFY(startSpin && startSpin->isVisible());
+            auto* lineEdit = startSpin->findChild<QLineEdit*>();
+            QVERIFY(lineEdit);
+            startSpin->setFocus();
+            lineEdit->selectAll();
+            QTest::keyClicks(lineEdit, "7.5"); // keyboardTracking(false): valueChanged has NOT fired yet.
+            QVERIFY(!call(server, "seek_and_select", {{"clip_id", clipB}})["isError"].toBool());
+            const auto itA = std::find_if(window.controller().project.show.clips.begin(),
+                window.controller().project.show.clips.end(),
+                [&](const Clip& c) { return c.id == clipA.toStdString(); });
+            QVERIFY(itA != window.controller().project.show.clips.end());
+            QCOMPARE(itA->start, frames(7.5));
+        }
+
         window.controller().dirty = false;
         server.stop();
     }

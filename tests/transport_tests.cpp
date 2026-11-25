@@ -626,6 +626,44 @@ int main() {
             MidiEvent psEv;
             expect(pst.state() == State::Stopped && pst.position() == 0 && !pst.takeMidi(psEv),
                 "revoked chat play+seek during disk stall rolls back to Stopped at 0 with no MIDI");
+
+            // Revoking a stalled chat seek alongside an Operator Pause must keep Pause (never restore Playing).
+            auto opStorage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto opp = show(false); opp->duration = opStorage->length(); opp->clips[0].duration = opp->duration; opp->clips[0].audio = diskAudio(opStorage);
+            Transport opt; opt.configure(opp);
+            play(opt);
+            checkedRender(opt, dout.data(), 16, 2);
+            const Frame preSeekPos = opt.position();
+            opStorage->fail.store(true);
+            opt.command({Action::Seek, farPos, CommandSource::ChatAgent, opt.chatAgentEpoch()});
+            checkedRender(opt, dout.data(), 64, 2); // Stalls on disk miss at farPos.
+            opt.invalidateChatAgentCommands();
+            opt.command({Action::Pause, 0, CommandSource::Operator, 0});
+            opStorage->fail.store(false);
+            checkedRender(opt, dout.data(), 16, 2);
+            expect(opt.state() == State::Paused && opt.position() == preSeekPos,
+                "revoked stalled chat seek respects Operator Pause and restores pre-seek position");
+
+            // ExternalAgent Seek followed by stalled ChatAgent Seek: revoking only Chat preserves ExternalAgent Seek.
+            auto domStorage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto domp = show(false); domp->duration = domStorage->length(); domp->clips[0].duration = domp->duration; domp->clips[0].audio = diskAudio(domStorage);
+            Transport domt; domt.configure(domp);
+            play(domt);
+            checkedRender(domt, dout.data(), 16, 2);
+            const Frame extTarget = frames(2);
+            domStorage->fail.store(true);
+            domt.command({Action::Seek, extTarget, CommandSource::ExternalAgent, domt.externalAgentEpoch()});
+            domt.command({Action::Seek, farPos, CommandSource::ChatAgent, domt.chatAgentEpoch()});
+            checkedRender(domt, dout.data(), 64, 2); // Stalls at farPos.
+            domt.invalidateChatAgentCommands();
+            domStorage->fail.store(false);
+            checkedRender(domt, dout.data(), 8, 2); // Triggers rollback from farPos back to extTarget.
+            for (int i = 0; i < 200 && domt.position() == extTarget; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                checkedRender(domt, dout.data(), 8, 2);
+            }
+            expect(domt.state() == State::Playing && domt.position() > extTarget && domt.position() < farPos,
+                "revoking Chat seek restores earlier still-authorized ExternalAgent seek");
         }}
     };
     for (const auto& [name, test] : tests) {

@@ -378,12 +378,25 @@ QJsonObject projectJson(const Project& p, const QString& directory) {
     for (const auto& a : p.assets) {
         QString assetPath = a.path;
         if (!directory.isEmpty() && !assetPath.isEmpty()) {
-            // Canonicalize only the parent directory (e.g. /var -> /private/var or symlinked show folder),
-            // preserving media file symlinks (e.g. current.wav -> take-a.wav) verbatim in the manifest.
+            // Canonicalize the nearest existing ancestor directory (e.g. /tmp -> /private/tmp or
+            // symlinked show folders, even when a synthetic/missing subdirectory does not exist),
+            // while preserving media file symlinks (e.g. current.wav -> take-a.wav) verbatim.
             const QFileInfo assetInfo(assetPath);
-            const QString canonicalParent = assetInfo.absoluteDir().canonicalPath();
-            if (!canonicalParent.isEmpty())
-                assetPath = QDir(canonicalParent).filePath(assetInfo.fileName());
+            QDir parent = assetInfo.absoluteDir();
+            QStringList trailing;
+            QString canonicalAncestor = parent.canonicalPath();
+            while (canonicalAncestor.isEmpty()) {
+                const QString current = parent.absolutePath();
+                const QString leaf = parent.dirName();
+                if (leaf.isEmpty() || !parent.cdUp() || parent.absolutePath() == current) break;
+                trailing.prepend(leaf);
+                canonicalAncestor = parent.canonicalPath();
+            }
+            if (!canonicalAncestor.isEmpty()) {
+                QDir rebuilt(canonicalAncestor);
+                for (const QString& segment : trailing) rebuilt.setPath(rebuilt.filePath(segment));
+                assetPath = rebuilt.filePath(assetInfo.fileName());
+            }
             assetPath = dir.relativeFilePath(assetPath);
         }
         assets.append(QJsonObject{{"id", a.id}, {"name", a.name}, {"path", assetPath}});
@@ -516,7 +529,7 @@ void writeProject(const Project& p, const QString& path, bool allowOverwrite) {
     throw std::runtime_error(std::string("Cannot save project file: ") + std::strerror(errno));
 #endif
 }
-Project parseProject(const QByteArray& json, const QString& directory) {
+Project parseProject(const QByteArray& json, const QString& directory, const QString& fallbackDirectory) {
     QJsonParseError parseError; const auto doc = QJsonDocument::fromJson(json, &parseError);
     if (parseError.error != QJsonParseError::NoError || !doc.isObject()) throw std::runtime_error("Invalid project JSON");
     const auto root = doc.object();
@@ -525,11 +538,17 @@ Project parseProject(const QByteArray& json, const QString& directory) {
     Project p; p.title = readString(root, "title"); p.width = readInt(root, "width", 0); p.height = readInt(root, "height", 0); p.fps = readNumber(root, "fps", 0);
     p.show.duration = readFrame(root, "duration");
     const QDir dir(directory);
+    const QDir fallbackDir(fallbackDirectory);
     for (auto value : root["assets"].toArray()) {
         const auto o = readObject(value); MediaAsset a; a.id = readString(o, "id"); a.name = readString(o, "name");
         if (a.id.isEmpty() || p.assets.contains(a.id)) throw std::runtime_error("Duplicate or missing asset ID");
         const auto source = readString(o, "path"); if (source.isEmpty()) invalidField("path");
-        a.path = dir.absoluteFilePath(source); p.assets.insert(a.id, std::move(a));
+        QString resolved = dir.absoluteFilePath(source);
+        if (!fallbackDirectory.isEmpty() && !QDir::isAbsolutePath(source) && !QFileInfo::exists(resolved)) {
+            const QString legacy = fallbackDir.absoluteFilePath(source);
+            if (QFileInfo::exists(legacy)) resolved = legacy;
+        }
+        a.path = resolved; p.assets.insert(a.id, std::move(a));
     }
     for (auto value : root["tracks"].toArray()) {
         const auto o = readObject(value);
@@ -611,7 +630,13 @@ Project readProject(const QString& path, const std::function<bool()>& isCancelle
     const QByteArray bytes = file.read(maxProjectFileBytes + 1);
     if (bytes.size() > maxProjectFileBytes)
         throw std::runtime_error("Project file is too large to be a valid .savshow manifest");
-    Project p = parseProject(bytes, canonicalManifestDirectory(path));
+    const QString canonicalDir = canonicalManifestDirectory(path);
+    const QFileInfo openInfo(path);
+    const QString aliasDir = openInfo.absolutePath();
+    const QString fallbackDir = (openInfo.isSymLink() && !aliasDir.isEmpty() && aliasDir != canonicalDir)
+        ? aliasDir
+        : QString();
+    Project p = parseProject(bytes, canonicalDir, fallbackDir);
     loadProjectMedia(p, isCancelled); return p;
 }
 namespace {

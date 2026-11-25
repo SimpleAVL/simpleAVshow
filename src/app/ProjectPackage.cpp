@@ -145,10 +145,12 @@ void writeProjectPackage(const Project& project, const QString& path,
     validate(project);
     QTemporaryDir staging(QDir::tempPath() + "/simpleavshow-export-XXXXXX");
     if (!staging.isValid()) throw std::runtime_error("Cannot create package staging directory");
+    const QString canonicalStaging = QFileInfo(staging.path()).canonicalFilePath();
+    const QDir stagingDir(canonicalStaging.isEmpty() ? staging.path() : canonicalStaging);
     Project candidate = project;
     // Existing sources stream directly into the archive; only generated media needs staging.
     candidate.packageDirectory.reset();
-    materializeProjectMedia(candidate, staging.filePath("generated"), isCancelled);
+    materializeProjectMedia(candidate, stagingDir.filePath("generated"), isCancelled);
     QMap<QString, QString> names;
     QMap<QString, QString> sources;
     const auto target = QFileInfo(path).absoluteFilePath();
@@ -171,9 +173,9 @@ void writeProjectPackage(const Project& project, const QString& path,
             const auto name = "media/" + newId() + "." + extension;
             names.insert(canonical, name); sources.insert(name, asset.path);
         }
-        asset.path = staging.filePath(names.value(canonical));
+        asset.path = stagingDir.filePath(names.value(canonical));
     }
-    const auto manifest = staging.filePath("project.savshow");
+    const auto manifest = stagingDir.filePath("project.savshow");
     writeProject(candidate, manifest);
     if (isCancelled && isCancelled()) throw std::runtime_error("Package export cancelled");
     QSaveFile output(path);

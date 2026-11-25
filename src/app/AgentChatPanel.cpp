@@ -13,6 +13,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -38,6 +39,17 @@ protected:
             return;
         }
         QPlainTextEdit::keyPressEvent(event);
+    }
+};
+
+class PermissionScrollArea : public QScrollArea {
+public:
+    explicit PermissionScrollArea(QWidget* parent = nullptr) : QScrollArea(parent) {}
+    QSize sizeHint() const override {
+        const QSize base = QScrollArea::sizeHint();
+        if (!widget()) return base;
+        const int contentHeight = widget()->sizeHint().height() + 2 * frameWidth();
+        return {base.width(), std::min(maximumHeight(), std::max(0, contentHeight))};
     }
 };
 
@@ -261,14 +273,25 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
     chips->addStretch();
     root->addWidget(quickPromptsBox_);
 
-    // Pending permission request area
+    // Pending permission request area (bounded scrollable viewport so concurrent cards never push controls offscreen)
+    permissionScroll_ = new PermissionScrollArea;
+    permissionScroll_->setObjectName("agentPermissionScroll");
+    permissionScroll_->setWidgetResizable(true);
+    permissionScroll_->setFrameShape(QFrame::NoFrame);
+    permissionScroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    permissionScroll_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+    permissionScroll_->setMinimumHeight(0);
+    permissionScroll_->setMaximumHeight(220);
+    permissionScroll_->setStyleSheet("QScrollArea { background: transparent; border: none; }");
     permissionBox_ = new QWidget;
     permissionBox_->setObjectName("agentPermissionBox");
     permissionLayout_ = new QVBoxLayout(permissionBox_);
     permissionLayout_->setContentsMargins(0, 0, 0, 0);
     permissionLayout_->setSpacing(6);
+    permissionScroll_->setWidget(permissionBox_);
     permissionBox_->hide();
-    root->addWidget(permissionBox_);
+    permissionScroll_->hide();
+    root->addWidget(permissionScroll_);
 
     // Composer
     auto* composer = new QHBoxLayout;
@@ -945,9 +968,10 @@ void AgentChatPanel::addPermissionCard(const AcpPermissionRequest& request) {
             expand->setText("Expand full request");
             expand->setCheckable(true);
             expand->setStyleSheet("padding: 2px 6px; font-size: 11px; color: #f2d38b; background: #332a1d; border: 1px solid #6b532c;");
-            connect(expand, &QToolButton::toggled, detailView, [detailView, expand](bool expanded) {
+            connect(expand, &QToolButton::toggled, detailView, [this, detailView, expand](bool expanded) {
                 detailView->setFixedHeight(expanded ? 180 : 64);
                 expand->setText(expanded ? "Collapse request" : "Expand full request");
+                if (permissionScroll_) permissionScroll_->updateGeometry();
             });
             layout->addWidget(expand, 0, Qt::AlignLeft);
         }
@@ -958,7 +982,12 @@ void AgentChatPanel::addPermissionCard(const AcpPermissionRequest& request) {
         permissionLayout_->removeWidget(card);
         card->deleteLater();
         appendEntry({ChatEntry::Kind::System, {}, {}, {}, QString("Permission for “%1”: %2.").arg(title, label), {}, {}});
-        if (permissionLayout_->count() == 0) permissionBox_->hide();
+        if (permissionLayout_->count() == 0) {
+            permissionBox_->hide();
+            if (permissionScroll_) permissionScroll_->hide();
+        } else if (permissionScroll_) {
+            permissionScroll_->updateGeometry();
+        }
     };
     bool stackOptions = request.options.size() > 2;
     for (const auto& opt : request.options) if (opt.name.size() > 18) stackOptions = true;
@@ -1001,6 +1030,10 @@ void AgentChatPanel::addPermissionCard(const AcpPermissionRequest& request) {
 
     permissionLayout_->addWidget(card);
     permissionBox_->show();
+    if (permissionScroll_) {
+        permissionScroll_->show();
+        permissionScroll_->updateGeometry();
+    }
 }
 
 void AgentChatPanel::clearPermissionCards() {
@@ -1009,6 +1042,10 @@ void AgentChatPanel::clearPermissionCards() {
         delete item;
     }
     permissionBox_->hide();
+    if (permissionScroll_) {
+        permissionScroll_->hide();
+        permissionScroll_->updateGeometry();
+    }
 }
 
 }

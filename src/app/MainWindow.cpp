@@ -4,6 +4,7 @@
 #include <limits>
 #include <QApplication>
 #include <QAbstractItemView>
+#include <QAbstractSpinBox>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -764,8 +765,21 @@ void MainWindow::applyMarker(bool requireMidi) {
     c_.edit([=](Project& p) { for (auto& m : p.show.markers) if (m.id == edited.id) m = edited; });
 }
 void MainWindow::commitInspector() {
-    if (!inspectorDirty_ || refreshing_) return;
+    if (refreshing_) return;
     if (!c_.canEdit(false)) { inspectorDirty_ = false; return; }
+    // Spin boxes disable keyboard tracking, so typing without Enter or focus-out leaves
+    // inspectorDirty_ false until interpretText() parses the pending line-edit text.
+    if (inspector_) {
+        QWidget* focused = QApplication::focusWidget();
+        if (!focused) focused = focusWidget();
+        for (QWidget* w = focused; w && inspector_->isAncestorOf(w); w = w->parentWidget()) {
+            if (auto* spin = qobject_cast<QAbstractSpinBox*>(w)) {
+                spin->interpretText();
+                break;
+            }
+        }
+    }
+    if (!inspectorDirty_) return;
     automatic_ = true;
     if (!inspectedClip_.empty()) applyClip(); else if (!inspectedMarker_.empty()) applyMarker(false); else applyTrack();
     automatic_ = false; touched_.clear();

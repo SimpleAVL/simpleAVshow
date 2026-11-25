@@ -33,6 +33,7 @@ int main(int argc, char** argv) {
     const bool summaryOnlyPermission = args.contains("--summary-only-permission");
     const bool diffPermission = args.contains("--diff-permission");
     const bool burstAndExit = args.contains("--burst-and-exit");
+    if (args.contains("--exit-zero-on-start")) return 0;
 
     int sessionCounter = 0;
     QString sessionId = "mock-session-1";
