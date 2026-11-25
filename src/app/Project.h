@@ -71,6 +71,10 @@ Envelope* envelope(Clip& clip, int property);
 void retime(Clip& clip, Frame start, Frame duration, Frame offset);
 // Retimes a clip and applies the same start/duration/offset change to clips linked with it.
 void retimeLinked(Project& project, const std::string& id, Frame start, Frame duration, Frame offset);
+// The latest clip end or cue time; zero for an empty show.
+Frame contentEnd(const Show& show);
+// Lengthens the show so every clip and cue fits (a cue past the end gets one sample after it); never shortens it.
+void fitDuration(Project& project);
 // The clip followed by its linked partners.
 std::vector<std::string> linkedClips(const Project& project, const std::string& id);
 // Splits a clip and any linked partner at timeline frame time, preserving automation across the cut.

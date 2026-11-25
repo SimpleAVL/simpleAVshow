@@ -55,7 +55,7 @@ Shortcuts below use Windows and Linux naming. On macOS, **Ctrl** in menu shortcu
 | --- | --- |
 | **Project width × height** | `320–7680` × `240–4320` pixels. |
 | **Project frame rate** | `1–120` fps (default `24`). |
-| **Project duration** | Positive seconds in Project settings (no fixed 24-hour cap; must contain all clips and cues). |
+| **Project duration** | Positive seconds in Project settings (no fixed 24-hour cap; extends automatically to contain all clips and cues). |
 | **Clip & cue time fields** | Display `HH:MM:SS:FF`; accept seconds (`12.5`), `MM:SS`, or `MM:SS:FF`. |
 | **Automation time** | Nonnegative seconds relative to clip **Start**; no duplicate times. |
 | **Automation shape & bend** | `Linear`, `Hold`, `Curve`, or `S-curve` per segment; bend `−1…+1` (`0` = straight). |
@@ -120,7 +120,7 @@ The bottom-right readout summarizes engine status and turns **orange** whenever 
 | **Outputs / Audience display button is greyed out** | Leave **Show mode** or wait for preparation. During edit-mode playback, Outputs opens read-only with a **Stop All to change connections** button inside. |
 | **Space types a space or triggers a control** | Focus is inside a text box, number field, dropdown, or table cell. Click the timeline, preview, or a transport button first. |
 | **Escape didn't stop playback in Show mode** | Show mode requires **Escape twice within 600 ms** (or one click on **Stop All**). |
-| **Copy / Paste / Duplicate won't place a clip** | Make sure a clip and a compatible destination track are selected, picture layers have room without overlapping, and there is space inside project duration. *(Copies are always unlinked.)* |
+| **Copy / Paste / Duplicate won't place a clip** | Make sure a clip and a compatible destination track are selected, and picture layers have room without overlapping. *(Copies are always unlinked.)* |
 | **Split is rejected** | Put the playhead strictly *inside* the clip. Looping clips (and clips linked to a looping partner) cannot be split. |
 | **Can't overlap two picture clips** | Picture clips can't overlap on the same track. Add another picture layer and animate the upper layer's opacity to crossfade. |
 | **After hold does nothing** | The selected clip must contain a hold cue at or after the current playhead position. |

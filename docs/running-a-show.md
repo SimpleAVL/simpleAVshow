@@ -13,7 +13,7 @@ Before locking down Show mode, run at least one full technical rehearsal on the 
 1. Open your project or package. If you opened a `.savpack`, resolve any offline files and **Save** a permanent `.savshow` copy first.
 2. Open **Outputs** and verify your audio interface, MIDI destination, and audience display on this computer.
 3. Send audio to **Main**, **Ambience**, **Guide**, and **Click** and confirm each one arrives at the right physical output.
-4. Move the playhead to the start (or any cue you're rehearsing). Remember: seeking never sends MIDI, though pressing **Play** directly on a cue fires its arrival message.
+4. Move the playhead to the start (or any cue you're rehearsing). Remember: seeking while stopped or paused never sends MIDI, though pressing **Play** directly on a cue fires its arrival message (except a cue exactly at the end of the show, where Play is refused). A seek during playback keeps playing, so it fires a cue it lands on; clicking past the end while playing jumps to the end.
 5. Play straight through every hold, pause, **Continue**, fade, and scene transition using your final media files.
 6. Keep an eye on the health indicators at the bottom right—note any clipping, underruns, audio waits/gaps, video waits, or disk retries.
 7. Run the full physical checks in the [Show-machine validation checklist](hardware-validation.md) before your first audience.

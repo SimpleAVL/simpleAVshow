@@ -144,6 +144,28 @@ int main() {
             expect(t.state() == State::Ended && t.position() == 4, "show end boundary"); near(out[8], .5 * (fade - 1) / fade, "async fades out at project end");
             expect(t.asyncVoices() == 0, "project end clears voices"); render(t, fade, out); near(out[(fade - 8) * 2], 0, "async silent after the fade");
         }},
+        {"playhead parks past the end without playing", [] {
+            auto p = show(); p->duration = 4; p->clips[0].duration = 4;
+            Transport t; t.configure(p, 9); expect(t.position() == 9, "arming keeps a playhead past the end");
+            t.command({Action::Seek, 12}); std::vector<float> out; render(t, 2, out);
+            expect(t.position() == 12 && t.state() == State::Paused, "seek parks past the end");
+            play(t); render(t, 2, out); expect(t.position() == 12 && t.state() != State::Playing, "play refuses past the end");
+            // Seeking back and playing in one queue runs from the new position.
+            t.command({Action::Seek, 1}); play(t); render(t, 1, out); expect(t.state() == State::Playing && t.position() == 2, "queued seek then play");
+        }},
+        {"seek past the end while playing still fires the final cue", [] {
+            auto p = show(); p->duration = 4; p->clips[0].duration = 4; p->markers.push_back({"final", "Final", 4, true, MidiTiming::Arrival, {0xfc}});
+            Transport t; t.configure(p); play(t); std::vector<float> out; render(t, 1, out);
+            t.command({Action::Seek, 50}); render(t, 1, out);
+            expect(t.state() == State::Held && t.position() == 4, "final hold reached after seeking past the end");
+            MidiEvent e; expect(t.takeMidi(e), "final cue MIDI delivered");
+        }},
+        {"a non-hold cue one sample before the end fires, also from Play on it", [] {
+            auto p = show(); p->duration = 5; p->clips[0].duration = 4; p->markers.push_back({"last", "Last", 4, false, MidiTiming::Arrival, {0xfc}});
+            Transport t; t.configure(p); play(t); std::vector<float> out; render(t, 8, out); MidiEvent e;
+            expect(t.takeMidi(e) && t.state() == State::Ended && t.position() == 5, "played through: the cue fires, then the show ends");
+            t.configure(p, 4); play(t); render(t, 2, out); expect(t.takeMidi(e) && t.state() == State::Ended, "play on the cue fires it");
+        }},
         {"mixing clamps overload and reports clipping", [] {
             auto p = show(false); p->clips[0].gain = 4;
             Transport t; t.configure(p); play(t); std::vector<float> out; render(t, 5, out);
@@ -327,6 +349,10 @@ int main() {
             expect(t.stopAllPending() && !t.command({Action::Play, 0, CommandSource::Operator, 0}), "only Stop All is queued while one is pending");
             checkedRender(t, out.data(), 16, 2);
             expect(!t.stopAllPending() && t.state() == State::Stopped && t.position() == 900, "emergency stop lands at the last seek");
+            // A seek past the end queued while playing still stops at the end (the controller predicts the same).
+            play(t); checkedRender(t, out.data(), 16, 2);
+            t.command({Action::Seek, 5000, CommandSource::Operator, 0}); t.requestStopAll(); checkedRender(t, out.data(), 16, 2);
+            expect(t.state() == State::Stopped && t.position() == 2000, "a playing seek past the end lands at the end");
         }},
         {"arming: a rejected show keeps the armed one, nothing plays unarmed", [] {
             Transport t; expect(!t.armed(), "a new transport is not armed");

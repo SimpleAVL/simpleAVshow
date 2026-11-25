@@ -83,6 +83,20 @@ void retimeLinked(Project& p, const std::string& id, Frame start, Frame duration
     retime(*it, start, duration, offset);
     if (!link.empty()) for (auto& c : p.show.clips) if (c.link == link && c.id != id) retime(c, c.start + dStart, c.duration + dDuration, c.offset + dOffset);
 }
+Frame contentEnd(const Show& show) {
+    Frame end = 0;
+    for (const auto& c : show.clips) end = std::max(end, c.end());
+    for (const auto& m : show.markers) end = std::max(end, m.time);
+    return end;
+}
+void fitDuration(Project& p) {
+    Frame end = p.show.duration;
+    for (const auto& c : p.show.clips) end = std::max(end, c.end());
+    // A cue that grows the show ends it one sample later: the transport ends the show before it would fire a
+    // cue sitting exactly on the end. Cues already inside the show (even exactly on its end) leave it alone.
+    for (const auto& m : p.show.markers) if (m.time > p.show.duration) end = std::max(end, m.time + std::min<Frame>(1, maxFrame - m.time));
+    p.show.duration = end;
+}
 std::vector<std::string> linkedClips(const Project& p, const std::string& id) {
     std::vector<std::string> ids{id}; std::string link;
     for (const auto& c : p.show.clips) if (c.id == id) link = c.link;

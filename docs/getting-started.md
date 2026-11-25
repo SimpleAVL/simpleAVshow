@@ -76,7 +76,7 @@ Set your **Title**, **Width**, **Height**, **Frames / second**, and **Duration (
 
 - **Pick resolution and frame rate early**, before doing frame-accurate timing.
 - **Duration is entered in seconds** here, even though the transport and clip/cue inspectors display `HH:MM:SS:FF` timecode.
-- You cannot shorten project duration below an existing clip or cue—trim or remove items near the end first.
+- **You don't have to get the duration right up front.** The show grows on its own when you place, move, or trim a clip or cue past the end. Setting a duration shorter than your last clip or cue keeps it at that clip or cue; trim or move items near the end first to shorten the show.
 - Audio always runs at **48 kHz**, regardless of your picture frame rate.
 
 ### 2. Arrange a simple scene
@@ -92,6 +92,6 @@ Every new show starts with six tracks ready to use: **Background** and **Overlay
 7. Save your work with **File → Save** to create a `.savshow` file.
 8. Click the start of the ruler, press **Space**, and practice releasing the hold with **Continue**.
 
-> **Note:** Placing a clip near the end of your show can automatically extend the project duration to leave five seconds of breathing room after the new clip. Double-check **Project settings…** before rehearsing your ending.
+> **Note:** Dropping media or adding text that ends within five seconds of the end—or past it—extends the show to five seconds after the new clip. Moving, trimming, or nudging past the end extends it exactly to the item. Playback stops at the shaded end of the timeline, so check **Project settings…** before rehearsing your ending.
 
 Ready to go deeper? Continue to [Chapter 2: Editing a show](editing-a-show.md) for precision trimming, linked video/audio, and automation curves.

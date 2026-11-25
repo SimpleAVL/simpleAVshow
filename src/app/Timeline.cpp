@@ -42,7 +42,7 @@ void Timeline::zoomAround(double value, double x) {
     zoom_ = value; refresh(); setOffset(time * zoom_ - (x - header)); manual_.start();
 }
 void Timeline::zoomToFit() {
-    zoomAround(std::max(1., viewport()->width() - header - 80.) / std::max(.001, seconds(c_.project.show.duration)), header);
+    zoomAround(std::max(1., viewport()->width() - header - tail()) / std::max(.001, seconds(c_.project.show.duration)), header);
     setOffset(0); emit zoomChanged(zoom_);
 }
 void Timeline::wheelEvent(QWheelEvent* event) {
@@ -50,13 +50,19 @@ void Timeline::wheelEvent(QWheelEvent* event) {
     zoomAround(zoom_ * std::pow(1.0015, event->angleDelta().y()), std::max<double>(header, event->position().x()));
     emit zoomChanged(zoom_); event->accept();
 }
+// Open space past the end gives clips somewhere to land; placing one there lengthens the show.
+double Timeline::tail() const { return std::max(80., (viewport()->width() - header) * .15); }
 double Timeline::offset() const { return horizontalScrollBar()->value() * scrollScale_; }
 void Timeline::setOffset(double pixels) {
     const bool was = std::exchange(autoScroll_, true);
     horizontalScrollBar()->setValue(static_cast<int>(std::lround(std::clamp(pixels / scrollScale_, 0., static_cast<double>(horizontalScrollBar()->maximum())))));
     autoScroll_ = was;
 }
-QRect Timeline::strip(Frame time) const { return QRect(static_cast<int>(std::floor(xAt(time))) - 7, 0, 15, viewport()->height()); }
+// Clamped before the int conversion: a playhead parked far past the end can sit billions of pixels away.
+QRect Timeline::strip(Frame time) const {
+    const double x = std::clamp(std::floor(xAt(time)), -16., viewport()->width() + 16.);
+    return QRect(static_cast<int>(x) - 7, 0, 15, viewport()->height());
+}
 // Playhead-only ticks repaint two narrow strips; follow pages while playing unless the user just scrolled.
 void Timeline::onTick() {
     const Frame now = c_.position(); const State state = c_.transport.state();
@@ -66,6 +72,8 @@ void Timeline::onTick() {
         if (horizontalScrollBar()->value() != before) { playhead_ = now; drawnState_ = state; return; }
     }
     if (now == playhead_ && state == drawnState_) return;
+    // The scroll range follows a playhead parked past the end, out and back.
+    if ((now > c_.project.show.duration || playhead_ > c_.project.show.duration) && now != playhead_) { refresh(); return; }
     viewport()->update(strip(playhead_)); viewport()->update(strip(now)); playhead_ = now; drawnState_ = state;
 }
 Frame Timeline::sourceLength(const Clip& clip) const {
@@ -90,7 +98,8 @@ void Timeline::refresh() {
     // Any external model change (including MCP edits) invalidates in-progress index-based drags.
     cancelDrag();
     const bool was = std::exchange(autoScroll_, true);
-    const double width = std::max(0., seconds(c_.project.show.duration) * zoom_ - viewport()->width() + header + 80);
+        // A playhead parked past the end stays reachable.
+    const double width = std::max(0., seconds(std::max(c_.project.show.duration, c_.position())) * zoom_ + tail() - (viewport()->width() - header));
     const double oldOffset = offset();
     scrollScale_ = std::max(1., width / (std::numeric_limits<int>::max() - 1.));
     horizontalScrollBar()->setRange(0, static_cast<int>(width / scrollScale_));
@@ -170,7 +179,7 @@ void Timeline::commitCurve(const std::string& id, int property, const Envelope& 
 }
 void Timeline::resizeEvent(QResizeEvent* event) { QAbstractScrollArea::resizeEvent(event); refresh(); }
 double Timeline::xAt(Frame t) const { return header + seconds(t) * zoom_ - horizontalScrollBar()->value() * scrollScale_; }
-Frame Timeline::timeAt(double x) const { return std::clamp(frames((x - header + horizontalScrollBar()->value() * scrollScale_) / zoom_), Frame{0}, c_.project.show.duration); }
+Frame Timeline::timeAt(double x) const { return std::clamp(frames((x - header + horizontalScrollBar()->value() * scrollScale_) / zoom_), Frame{0}, maxFrame); }
 int Timeline::trackAt(double y) const { return static_cast<int>(std::floor((y - ruler + verticalScrollBar()->value()) / row)); }
 QRectF Timeline::clipRect(const Clip& clip) const {
     return QRectF(xAt(clip.start), ruler + clip.track * row - verticalScrollBar()->value() + 5, seconds(clip.duration) * zoom_, row - 10);
@@ -180,10 +189,10 @@ Frame Timeline::snap(Frame time, const std::string& ignore) const {
     Frame snapped = frames(std::round(seconds(time) * c_.project.fps) / c_.project.fps);
     Frame distance = frames(8 / zoom_);
     auto consider = [&](Frame t) { const Frame d = std::abs(t - time); if (d < distance) { distance = d; snapped = t; } };
-    consider(c_.position()); consider(0);
+    consider(c_.position()); consider(0); consider(c_.project.show.duration);
     for (const auto& m : c_.project.show.markers) if (m.id != ignore) consider(m.time);
     for (const auto& clip : c_.project.show.clips) if (clip.id != ignore) { consider(clip.start); consider(clip.end()); }
-    return std::clamp(snapped, Frame{0}, c_.project.show.duration);
+    return std::clamp(snapped, Frame{0}, maxFrame);
 }
 QString Timeline::describe() const {
     // Screen readers announce the selection; the painted timeline has no child widgets to inspect.
@@ -267,6 +276,11 @@ void Timeline::paintEvent(QPaintEvent* event) {
         const int y = ruler + static_cast<int>(i) * row - verticalScrollBar()->value();
         p.fillRect(header, y, viewport()->width() - header, row, QColor(i % 2 ? "#131a24" : "#151d28"));
         p.setPen(QColor("#263140")); p.drawLine(header, y + row - 1, viewport()->width(), y + row - 1);
+    }
+    // Past the end of the show: still editable, shaded so the operator sees where playback stops.
+    if (const double end = xAt(show.duration); end < viewport()->width()) {
+        p.fillRect(QRectF(end, ruler, viewport()->width() - end, viewport()->height() - ruler), QColor(0, 0, 0, 70));
+        p.setPen(QColor("#4a5668")); p.drawLine(QPointF(end, ruler), QPointF(end, viewport()->height()));
     }
     for (double t = first; xAt(frames(t)) < viewport()->width(); t += interval) {
         p.setPen(QColor("#212a37")); p.drawLine(QPointF(xAt(frames(t)), ruler), QPointF(xAt(frames(t)), viewport()->height()));
@@ -486,7 +500,7 @@ void Timeline::mouseMoveEvent(QMouseEvent* event) {
             c_.project.show.markers[dragMarker_].id != dragMarkerId_) { cancelDrag(); viewport()->update(); return; }
         if ((event->position().toPoint() - press_).manhattanLength() < 4 && !dragging_) return;
         dragging_ = true; const auto& marker = c_.project.show.markers[dragMarker_];
-        dragStart_ = std::clamp(snap(marker.time + timeAt(event->position().x()) - dragTime_, marker.id), Frame{0}, c_.project.show.duration);
+        dragStart_ = std::clamp(snap(marker.time + timeAt(event->position().x()) - dragTime_, marker.id), Frame{0}, maxFrame);
         viewport()->update(); return;
     }
     if (!(event->buttons() & Qt::LeftButton) || dragClip_ < 0 || !c_.canEdit(false)) return;
@@ -501,11 +515,11 @@ void Timeline::mouseMoveEvent(QMouseEvent* event) {
         dragDuration_ = original.end() - dragStart_; dragOffset_ = original.offset + dragStart_ - original.start;
     } else if (dragMode_ == 2) {
         // Non-looping media cannot run past its source end.
-        const Frame limit = std::min(c_.project.show.duration - original.start, sourceLength(original) - original.offset);
+        const Frame limit = std::min(maxFrame - original.start, sourceLength(original) - original.offset);
         dragDuration_ = std::clamp(snap(original.end() + delta, original.id) - original.start, minimum, std::max(minimum, limit));
     }
     else {
-        dragStart_ = std::clamp(snap(original.start + delta, original.id), Frame{0}, c_.project.show.duration - original.duration);
+        dragStart_ = std::clamp(snap(original.start + delta, original.id), Frame{0}, maxFrame - original.duration);
         const int nextTrack = trackAt(event->position().y());
         if (nextTrack >= 0 && static_cast<std::size_t>(nextTrack) < c_.project.show.tracks.size() &&
             c_.project.show.tracks[nextTrack].visual == c_.project.show.tracks[original.track].visual) dragTrack_ = nextTrack;

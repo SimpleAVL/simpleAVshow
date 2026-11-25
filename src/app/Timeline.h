@@ -72,6 +72,7 @@ private:
     void reveal(Frame time);
     void zoomAround(double pixelsPerSecond, double x);
     double offset() const;
+    double tail() const;
     void setOffset(double pixels);
     QRect strip(Frame time) const;
     Frame sourceLength(const Clip& clip) const;
