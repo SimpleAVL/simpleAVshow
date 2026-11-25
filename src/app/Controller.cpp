@@ -220,7 +220,14 @@ void Controller::toggle() {
         // cue. It warns with what the background check last found. Paused after Stop All or a seek is a
         // fresh start and checks.
         const bool live = state == State::Held || transport.asyncVoices() || (state == State::Paused && pausedLive_);
-        const auto missing = live ? lastMissingMedia() : missingMedia();
+        auto missing = live ? lastMissingMedia() : missingMedia();
+        if (!live && !missingSeen_.isEmpty()) {
+            // A file confirmed missing earlier counts as back only when a lookup confirms it; an inconclusive
+            // one (a share still dropping out) keeps it missing.
+            QStringList offline, needed; mediaToCheck(offline, needed);
+            for (const auto& path : needed)
+                if (missingSeen_.contains(path) && !missing.contains(path) && detail::presentIfKnown(path) != std::optional<bool>(true)) missing << path;
+        }
         // A fresh start's own check is the latest: background checks continue from it.
         if (!live) {
             resetMediaState(); { const std::lock_guard lock(mediaCheck_->mutex); mediaCheck_->missing = missing; }
