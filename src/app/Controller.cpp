@@ -223,6 +223,7 @@ void Controller::toggle() {
         // A fresh start's own check is the latest: background checks continue from it.
         if (!live) {
             resetMediaState(); { const std::lock_guard lock(mediaCheck_->mutex); mediaCheck_->missing = missing; }
+            for (const auto& path : missing) missingSeen_.insert(path); // Kept even if this start stops.
             // Pictures that failed while a file was gone open again now that it is back.
             if (missing.isEmpty()) {
                 // Also readers of files seen missing since they opened (Stop All forgets the check, not this):
@@ -405,6 +406,8 @@ QString Controller::mediaWarning(const QStringList& missing) {
 }
 QString Controller::missingMediaWarning() const { return missingWarning_; }
 void Controller::resetMediaState() {
+    // A finished check's absences are kept for the open readers before its result is dropped.
+    { const std::lock_guard lock(mediaCheck_->mutex); for (const auto& path : mediaCheck_->missing) missingSeen_.insert(path); }
     mediaCheck_ = std::make_shared<MediaCheck>(); // A check still running finishes into the old state, unread.
     if (!reportedProblem_.isEmpty() && playbackProblem == reportedProblem_) playbackProblem.clear();
     if (!reportedProblem_.isEmpty() && status == reportedProblem_) report(QString()); // Not left on screen either.
