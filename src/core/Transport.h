@@ -19,59 +19,7 @@ enum class Action { Play, Pause, Seek, StopAll };
 enum class LateAudio { Freeze, Gap };
 enum class CommandSource : std::uint8_t { Operator = 0, ExternalAgent = 1, ChatAgent = 2 };
 struct Command { Action action; Frame position = 0; CommandSource source = CommandSource::Operator; std::uint64_t sourceEpoch = 0; };
-struct MidiEvent {
-    int marker = -1;
-    Frame time = 0;
-    std::uint64_t epoch = 0;
-    CommandSource source = CommandSource::Operator;
-    std::uint64_t sourceEpoch = 0;
-    CommandSource secondarySource = CommandSource::Operator;
-    std::uint64_t secondaryEpoch = 0;
-};
-
-// Snapshots of the transport before a revocable agent Seek/Play, restored if that agent is revoked.
-namespace transport_detail {
-struct SeekRollback {
-    CommandSource source = CommandSource::Operator;
-    std::uint64_t sourceEpoch = 0;
-    Frame prevPos = 0;
-    State prevState = State::Stopped;
-    int prevHeldMarker = -1;
-    std::size_t prevNextStart = 0;
-    std::size_t prevNextMarker = 0;
-    bool prevWasHeld = false;
-    std::size_t prevResumeBegin = 0, prevResumeEnd = 0;
-    CommandSource prevResumeSource = CommandSource::Operator;
-    std::uint64_t prevResumeEpoch = 0;
-    State prevResumePrevState = State::Stopped;
-    int prevResumePrevHeldMarker = -1;
-    bool afterPlay = false;
-    State savedPlayPrevState = State::Stopped;
-    int savedPlayPrevHeld = -1;
-    bool prevSeekCueActive = false;
-    CommandSource prevSeekCueSource = CommandSource::Operator;
-    std::uint64_t prevSeekCueEpoch = 0;
-    Frame prevSinceSeek = 0; // Seek-grace accounting before the seek, for health counters.
-};
-struct PendingPlayStart {
-    bool active = false;
-    CommandSource source = CommandSource::Operator;
-    std::uint64_t sourceEpoch = 0;
-    State prevState = State::Stopped;
-    int prevHeldMarker = -1;
-    bool wasHeld = false;
-    std::size_t begin = 0, end = 0;
-    CommandSource resumeSource = CommandSource::Operator;
-    std::uint64_t resumeEpoch = 0;
-    State resumePrevState = State::Stopped;
-    int resumePrevHeldMarker = -1;
-    bool seekCueActive = false;
-    CommandSource seekCueSource = CommandSource::Operator;
-    std::uint64_t seekCueEpoch = 0;
-    SeekRollback seekRollbacks[2]; // Each element uses its member initializers.
-    int seekRollbackCount = 0;
-};
-}
+struct MidiEvent { int marker = -1; Frame time = 0; std::uint64_t epoch = 0; };
 
 class Transport {
 public:
@@ -84,8 +32,10 @@ public:
         if (command.action != Action::StopAll && urgentStop_.load(std::memory_order_acquire)) return false;
         return commands_.push(command);
     }
-    // Independent monotonic epochs for external MCP vs embedded chat transport commands so
-    // revoking chat never cancels an external client's accepted Stop All.
+    // Agent commands carry their session's epoch; revoking a session (disconnect, New, Show mode, an
+    // operator Stop All) bumps it, and the audio thread drops that session's commands it has not applied
+    // yet. Nothing already applied is undone: playback an agent started keeps going until stopped.
+    // External MCP clients and the embedded chat have separate epochs.
     std::uint64_t externalAgentEpoch() const noexcept { return externalAgentEpoch_.load(std::memory_order_acquire); }
     std::uint64_t chatAgentEpoch() const noexcept { return chatAgentEpoch_.load(std::memory_order_acquire); }
     void invalidateChatAgentCommands() noexcept { chatAgentEpoch_.fetch_add(1, std::memory_order_acq_rel); }
@@ -171,22 +121,9 @@ private:
     std::atomic<std::uint64_t> epoch_{0}, externalAgentEpoch_{1}, chatAgentEpoch_{1};
     std::uint64_t applied_ = 0;
     std::atomic<std::uint64_t> commandsApplied_{0};
-    static bool isCommandValid(const Command& command, std::uint64_t validExt, std::uint64_t validChat) noexcept {
-        if (command.source == CommandSource::Operator) return true;
-        if (command.source == CommandSource::ExternalAgent) return command.sourceEpoch == validExt;
-        return command.sourceEpoch == validChat;
-    }
-    // Reset with `= PendingPlayStart()`, not `= {}`: GCC 13.3 rejects the braced form for this aggregate.
-    using SeekRollback = transport_detail::SeekRollback;
-    using PendingPlayStart = transport_detail::PendingPlayStart;
-    PendingPlayStart pendingStart_;
-    std::vector<Voice> savedSeekVoices_[2];
-    std::vector<std::size_t> savedSeekActive_[2];
-    bool rollbackRevokedSeeks(PendingPlayStart& pendingStart, bool onlyAfterPlay) noexcept;
-    void apply(Command command, PendingPlayStart& pendingStart) noexcept;
+    void apply(Command command) noexcept;
     void applyStopAll() noexcept;
-    void dispatch(int marker, CommandSource source = CommandSource::Operator, std::uint64_t sourceEpoch = 0,
-                  CommandSource secondarySource = CommandSource::Operator, std::uint64_t secondaryEpoch = 0) noexcept;
+    void dispatch(int marker) noexcept;
     void publish(float peak) noexcept;
     void stopAudioWorker();
     void load(std::shared_ptr<const Show> show, Frame position);

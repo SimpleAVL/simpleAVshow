@@ -311,14 +311,9 @@ void Controller::startMidiThread() {
             MidiEvent event;
             while (!midiStop_.load(std::memory_order_acquire) && transport.takeMidi(event)) {
                 if (event.epoch != transport.epoch() || event.marker < 0 || static_cast<std::size_t>(event.marker) >= snapshot->markers.size()) continue;
-                if (!transport.isSourceValid(event.source, event.sourceEpoch) ||
-                    !transport.isSourceValid(event.secondarySource, event.secondaryEpoch)) continue;
                 const auto& marker = snapshot->markers[event.marker]; QString error;
                 auto allowCueSubmit = [&]() -> bool {
-                    return !midiStop_.load(std::memory_order_acquire) &&
-                        event.epoch == transport.epoch() &&
-                        transport.isSourceValid(event.source, event.sourceEpoch) &&
-                        transport.isSourceValid(event.secondarySource, event.secondaryEpoch);
+                    return !midiStop_.load(std::memory_order_acquire) && event.epoch == transport.epoch();
                 };
                 if (!midi.send(marker.message, error, allowCueSubmit) && !midiStop_.load(std::memory_order_acquire)) {
                     QMetaObject::invokeMethod(this, [this, error] { report(error); }, Qt::QueuedConnection);
@@ -508,6 +503,9 @@ bool Controller::stopAll(CommandSource source) {
     // Nothing is armed after a failed arm, so nothing plays; the transport could not take the command.
     if (armFailed_) { cancelPendingTestMidi(); return true; }
     pausedLive_ = false; resetMediaState();
+    // The operator's Stop All also drops agent commands still queued (an agent's Play must not undo it);
+    // agents' later commands carry the new epoch and work as usual.
+    if (source == CommandSource::Operator) transport.invalidateAllAgentCommands();
     // Post Stop All to the transport FIRST so operator Stop All is never delayed by MIDI work.
     const std::uint64_t ep = source == CommandSource::ExternalAgent ? transport.externalAgentEpoch()
         : source == CommandSource::ChatAgent ? transport.chatAgentEpoch() : 0;
