@@ -501,11 +501,11 @@ void MainWindow::updatePlayback() {
     health_->setToolTip(c_.device.running() ? "Audio: " + c_.audioName + "\nMIDI: " + (c_.midi.connected() ? c_.midi.name() : c_.needsMidi() ? "Choose a destination in Outputs" : "Not needed for this show") : "Play connects your remembered audio interface, or your default speakers on first use.");
     outputsButton_->setText(c_.needsMidi() && !c_.midi.connected() && c_.midiDestination().isEmpty() ? "Outputs · MIDI needed" : "Outputs");
     if (state == State::Held) {
-        const int index = c_.transport.heldMarker();
+        const int index = c_.transport.heldMarker(); const QString media = c_.missingMediaWarning();
         hint_->setText("HOLD — " + (index >= 0 && static_cast<std::size_t>(index) < c_.project.show.markers.size() ? QString::fromStdString(c_.project.show.markers[index].name) : "") + "  ·  Press Space to continue" + async +
             // A hold must not hide a problem: missing media keeps its own line next to any other.
-            (c_.missingMediaWarning().isEmpty() ? QString() : "  ·  ⚠  " + c_.missingMediaWarning()) +
-            (c_.playbackProblem.isEmpty() || c_.playbackProblem == c_.missingMediaWarning() ? QString() : "  ·  ⚠  " + c_.playbackProblem));
+            (media.isEmpty() ? QString() : "  ·  ⚠  " + media) +
+            (c_.playbackProblem.isEmpty() || c_.playbackProblem == media ? QString() : "  ·  ⚠  " + c_.playbackProblem));
     } else if (!c_.playbackProblem.isEmpty()) hint_->setText("⚠  " + c_.playbackProblem + (c_.showMode ? " Leave Show mode to change Outputs." : ""));
     else if (c_.project.show.clips.empty() && c_.project.show.markers.empty()) hint_->setText("Start with + Import media or + Text. Press Play to use your speakers automatically.");
     else hint_->setText(c_.showMode ? "SHOW MODE  ·  Space: play / pause  ·  Escape twice: Stop All" : "Space: play / pause  ·  Escape: Stop All  ·  Ruler: seek  ·  Edges: trim");

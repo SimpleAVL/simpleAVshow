@@ -105,11 +105,16 @@ private:
     struct MediaCheck { std::mutex mutex; QStringList missing; std::atomic<bool> running{false}; };
     std::shared_ptr<MediaCheck> mediaCheck_ = std::make_shared<MediaCheck>();
     QStringList missingNow_; // What the last media check during a show found missing.
+    QString missingWarning_; // Its warning, kept with it.
+    QStringList lastMissingMedia(const QStringList& offline, const QStringList& needed) const;
+    void checkMediaInBackground(const QStringList& needed, bool wait = false);
+    // Forgets what earlier checks found (another show, an edit, a stop) and any check still running.
+    void resetMediaState();
     QString reportedProblem_; // The missing-media warning last shown, cleared once the files are back.
     static QString mediaWarning(const QStringList& missing);
     // Drops a clip's video reader; it closes on a thread of its own.
     void retireVideo(const std::string& clip);
-    bool wasHeld_ = false; // The transport was held at the last media check.
+    bool wasHeld_ = false; // Held since the last media check, without leaving the hold.
     QString armProblem_;
     Frame pendingPosition_ = 0;
     std::map<std::string, std::unique_ptr<VideoReader>> videos_;
