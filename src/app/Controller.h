@@ -47,6 +47,8 @@ public:
     QStringList missingMedia() const;
     // The missing files the last background check found, among those the show still uses; no disk access.
     QStringList lastMissingMedia() const;
+    // The warning for what the last check during a show found missing; empty when nothing is.
+    QString missingMediaWarning() const;
     // Starts a background check of the show's media unless one is running; wait finishes it (tests).
     void checkMediaInBackground(bool wait = false);
     // Whether an asset needs relinking: offline since opening, or its file is gone though playback
@@ -102,8 +104,11 @@ private:
     // Shared with the checking thread, which may outlive the controller.
     struct MediaCheck { std::mutex mutex; QStringList missing; std::atomic<bool> running{false}; };
     std::shared_ptr<MediaCheck> mediaCheck_ = std::make_shared<MediaCheck>();
-    QStringList reportedMissing_; // What the last hold warning named, so it is said once.
-    QString reportedProblem_; // That warning's text, cleared once the files are back.
+    QStringList missingNow_; // What the last media check during a show found missing.
+    QString reportedProblem_; // The missing-media warning last shown, cleared once the files are back.
+    static QString mediaWarning(const QStringList& missing);
+    // Drops a clip's video reader; it closes on a thread of its own.
+    void retireVideo(const std::string& clip);
     bool wasHeld_ = false; // The transport was held at the last media check.
     QString armProblem_;
     Frame pendingPosition_ = 0;

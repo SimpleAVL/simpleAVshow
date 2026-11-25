@@ -43,23 +43,26 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
                 checkMediaInBackground();
                 const bool held = transport.state() == State::Held;
                 const auto missing = lastMissingMedia();
-                if (held && !missing.isEmpty() && (missing != reportedMissing_ || !wasHeld_ || playbackProblem.isEmpty())) {
-                    // Each hold says it again, and so does a change while held or another problem clearing
-                    // (a MIDI reconnect) while these files are still missing.
-                    report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
-                    playbackProblem = reportedProblem_ = status; reportedMissing_ = missing;
-                } else if (missing.isEmpty() && !reportedMissing_.isEmpty()) {
-                    // A completed check found the files again, held or not; the warning goes if it is still on screen.
-                    // Pictures that failed to open while their file was gone open again on the next frame.
+                // Each file found again reopens its pictures (a reader that failed while it was gone stays
+                // failed), whatever else is still missing.
+                QStringList back;
+                for (const auto& path : missingNow_) if (!missing.contains(path)) back << path;
+                if (!back.isEmpty()) {
                     for (const auto& clip : project.show.clips) {
                         const auto asset = project.assets.constFind(QString::fromStdString(clip.assetId));
-                        if (asset != project.assets.cend() && reportedMissing_.contains(asset->path)) { videos_.erase(clip.id); videoErrors_.erase(clip.id); }
+                        if (asset != project.assets.cend() && back.contains(asset->path)) retireVideo(clip.id);
                     }
                     lastComposed_ = -1;
-                    if (playbackProblem == reportedProblem_) { playbackProblem.clear(); report("Missing media is back online."); }
-                    reportedMissing_.clear(); reportedProblem_.clear();
                 }
-                wasHeld_ = held;
+                if (held && !missing.isEmpty() && (missing != missingNow_ || !wasHeld_)) {
+                    // Each hold says it again, and so does a change while held.
+                    report(mediaWarning(missing)); playbackProblem = reportedProblem_ = status;
+                } else if (missing.isEmpty() && !reportedProblem_.isEmpty()) {
+                    // The warning goes once a completed check finds every file, if it is still on screen.
+                    if (playbackProblem == reportedProblem_) { playbackProblem.clear(); report("Missing media is back online."); }
+                    reportedProblem_.clear();
+                }
+                missingNow_ = missing; wasHeld_ = held;
             }
         }
         emit tick();
@@ -109,6 +112,7 @@ void Controller::replace(Project next, QString projectPath) {
     videos_.clear(); lastPicture_ = {};
     auto retired = std::move(project); auto retiredUndo = std::move(undo_), retiredRedo = std::move(redo_);
     project = std::move(next); path = std::move(projectPath); dirty = false; playbackProblem.clear();
+    missingNow_.clear(); reportedProblem_.clear(); // Another show's media.
     undo_.clear(); redo_.clear();
     if (arm(0)) report("Project ready. Space plays or pauses; Stop All stops async audio and video.");
     emit changed();
@@ -210,10 +214,10 @@ void Controller::toggle() {
         // fresh start and checks.
         const bool live = state == State::Held || transport.asyncVoices() || (state == State::Paused && pausedLive_);
         if (const auto missing = live ? lastMissingMedia() : missingMedia(); !missing.isEmpty()) {
-            report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
+            report(mediaWarning(missing));
             playbackProblem = warning = status;
             if (!live) return; // Only a live show continues past missing media (it warned above).
-            reportedMissing_ = missing; reportedProblem_ = status; // Cleared once a background check finds them.
+            reportedProblem_ = status; // Cleared once a background check finds them.
         }
         if (needsMidi() && !prepareMidi()) { playbackProblem = midiProblem_ = status; if (!resuming) return; if (warning.isEmpty()) warning = status; }
         if (!prepareAudio()) { playbackProblem = status; return; }
@@ -368,6 +372,17 @@ QStringList Controller::missingMedia() const {
     QStringList missing, needed; mediaToCheck(missing, needed); // Each file is looked up once, however many clips use it.
     for (const auto& path : needed) if (!detail::present(path)) missing << path;
     return missing;
+}
+QString Controller::mediaWarning(const QStringList& missing) {
+    return QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", "));
+}
+QString Controller::missingMediaWarning() const { return missingNow_.isEmpty() ? QString() : mediaWarning(missingNow_); }
+void Controller::retireVideo(const std::string& clip) {
+    videoErrors_.erase(clip);
+    const auto it = videos_.find(clip); if (it == videos_.end()) return;
+    // Its worker may still be blocked reading a share; joining it here would freeze the controls.
+    auto holder = std::make_shared<std::unique_ptr<VideoReader>>(std::move(it->second)); videos_.erase(it);
+    try { std::thread([holder] { holder->reset(); }).detach(); } catch (...) {} // Otherwise it closes here.
 }
 QStringList Controller::lastMissingMedia() const {
     QStringList offline, needed; mediaToCheck(offline, needed);

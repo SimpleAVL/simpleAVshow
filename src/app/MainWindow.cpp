@@ -503,7 +503,9 @@ void MainWindow::updatePlayback() {
     if (state == State::Held) {
         const int index = c_.transport.heldMarker();
         hint_->setText("HOLD — " + (index >= 0 && static_cast<std::size_t>(index) < c_.project.show.markers.size() ? QString::fromStdString(c_.project.show.markers[index].name) : "") + "  ·  Press Space to continue" + async +
-            (c_.playbackProblem.isEmpty() ? QString() : "  ·  ⚠  " + c_.playbackProblem)); // A hold must not hide a problem.
+            // A hold must not hide a problem: missing media keeps its own line next to any other.
+            (c_.missingMediaWarning().isEmpty() ? QString() : "  ·  ⚠  " + c_.missingMediaWarning()) +
+            (c_.playbackProblem.isEmpty() || c_.playbackProblem == c_.missingMediaWarning() ? QString() : "  ·  ⚠  " + c_.playbackProblem));
     } else if (!c_.playbackProblem.isEmpty()) hint_->setText("⚠  " + c_.playbackProblem + (c_.showMode ? " Leave Show mode to change Outputs." : ""));
     else if (c_.project.show.clips.empty() && c_.project.show.markers.empty()) hint_->setText("Start with + Import media or + Text. Press Play to use your speakers automatically.");
     else hint_->setText(c_.showMode ? "SHOW MODE  ·  Space: play / pause  ·  Escape twice: Stop All" : "Space: play / pause  ·  Escape: Stop All  ·  Ruler: seek  ·  Edges: trim");
