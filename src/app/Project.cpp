@@ -432,6 +432,11 @@ QJsonObject projectJson(const Project& p, const QString& directory) {
                 }
                 auto checkPrefix = [&](qsizetype endPos) -> int {
                     const QString sub = absDir.left(endPos);
+                    // Only follow root-level OS directory aliases (e.g. /var -> /private/var,
+                    // /tmp -> /private/tmp); never dereference user-created directory symlinks
+                    // (e.g. sibling media -> vol-a) into their current target.
+                    const bool isRootChild = sub.lastIndexOf('/') == 0 && sub.size() > 1;
+                    if (QFileInfo(sub).isSymLink() && !isRootChild) return 0;
                     const QString can = QDir(sub).canonicalPath();
                     if (!isCanonicalAncestor(can, canonicalBase)) return 0;
                     matchedCanonical = can;

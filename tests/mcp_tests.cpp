@@ -878,6 +878,25 @@ private slots:
             QVERIFY(window.controller().project.show.clips.empty());
         }
 
+        // 25. Reopening the currently recovered alias autosave via MCP open_project with discard_unsaved: true
+        //     must NOT delete that autosave file.
+        {
+            QTemporaryDir dir;
+            QVERIFY(dir.isValid());
+            const QString targetShow = dir.filePath("target.savshow");
+            const QString aliasAuto = dir.filePath("alias.savshow.autosave");
+            writeProject(newProject(), targetShow);
+            writeProject(newProject(), aliasAuto);
+            window.controller().replace(newProject(), targetShow, true);
+            window.controller().setRecoveredAutosavePath(aliasAuto);
+            const auto reopen = call(server, "project_action", {
+                {"action", "open_project"}, {"path", aliasAuto},
+                {"discard_unsaved", true}, {"expected_revision", revision(server)}
+            });
+            QVERIFY(!reopen["isError"].toBool());
+            QVERIFY(QFileInfo::exists(aliasAuto));
+        }
+
         window.controller().dirty = false;
         server.stop();
     }

@@ -1002,6 +1002,35 @@ private slots:
         const Project saveAsRepointed = readProject(saveAsPath);
         QVERIFY(!saveAsRepointed.assets[saveAsAsset.id].offline);
         QCOMPARE(saveAsRepointed.assets[saveAsAsset.id].still.pixelColor(0, 0), QColor(Qt::blue));
+
+        // Sibling media symlink pointing directly at the manifest directory (media -> vol-a,
+        // asset media/title.png, saved as vol-a/show.savshow) must store "../media/title.png"
+        // rather than pinning to "title.png".
+        const QString sibRoot = dir.filePath("sib-sym-root");
+        const QString sibVolA = sibRoot + "/vol-a";
+        const QString sibVolB = sibRoot + "/vol-b";
+        QVERIFY(QDir().mkpath(sibVolA));
+        QVERIFY(QDir().mkpath(sibVolB));
+        QVERIFY(green.save(sibVolA + "/title.png"));
+        QVERIFY(blue.save(sibVolB + "/title.png"));
+        const QString sibMediaLink = sibRoot + "/media";
+        QVERIFY(QFile::link(sibVolA, sibMediaLink));
+        Project sibProj = newProject();
+        MediaAsset sibAsset = loadMedia(sibMediaLink + "/title.png");
+        sibProj.assets.insert(sibAsset.id, sibAsset);
+        const QString sibShowPath = sibVolA + "/show.savshow";
+        writeProject(sibProj, sibShowPath);
+        {
+            QFile checkFile(sibShowPath);
+            QVERIFY(checkFile.open(QIODevice::ReadOnly));
+            const auto doc = QJsonDocument::fromJson(checkFile.readAll()).object();
+            QCOMPARE(doc["assets"].toArray()[0].toObject()["path"].toString(), QString("../media/title.png"));
+        }
+        QVERIFY(QFile::remove(sibMediaLink));
+        QVERIFY(QFile::link(sibVolB, sibMediaLink));
+        const Project sibRepointed = readProject(sibShowPath);
+        QVERIFY(!sibRepointed.assets[sibAsset.id].offline);
+        QCOMPARE(sibRepointed.assets[sibAsset.id].still.pixelColor(0, 0), QColor(Qt::blue));
 #endif
     }
     void zip64AndCompressedPackagesCanBeOpened() {

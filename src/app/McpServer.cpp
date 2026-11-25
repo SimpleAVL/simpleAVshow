@@ -1902,14 +1902,21 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
                         {"revision", static_cast<double>(revision_)}}, true));
                     return;
                 }
+                const auto sameFile = [](const QString& a, const QString& b) {
+                    if (a.isEmpty() || b.isEmpty()) return false;
+                    const QFileInfo ia(a), ib(b);
+                    if (ia.exists() && ib.exists() && ia.canonicalFilePath() == ib.canonicalFilePath()) return true;
+                    return QDir::cleanPath(ia.absoluteFilePath()) == QDir::cleanPath(ib.absoluteFilePath());
+                };
                 if (c_.dirty && discard) {
                     const QString currentAuto = c_.autosavePath();
-                    const QString openedCanon = QFileInfo(path).canonicalFilePath();
-                    const QString autoCanon = QFileInfo(currentAuto).canonicalFilePath();
-                    if (path != currentAuto && (openedCanon.isEmpty() || openedCanon != autoCanon))
-                        c_.discardAutosave();
+                    const QString currentRecovered = c_.recoveredAutosavePath();
+                    if (!sameFile(path, currentAuto)) QFile::remove(currentAuto);
+                    if (!currentRecovered.isEmpty() && !sameFile(path, currentRecovered)) QFile::remove(currentRecovered);
                 }
                 c_.replace(std::move(loaded.project), targetPath, pkg || autosave);
+                if (autosave && !sameFile(path, c_.autosavePath()))
+                    c_.setRecoveredAutosavePath(path);
                 emit showModified("Agent opened " + QFileInfo(path).fileName() + ".");
                 auto result = snapshot(); result.insert("action", action); result.insert("target_path", targetPath);
                 finish(toolResult(result));

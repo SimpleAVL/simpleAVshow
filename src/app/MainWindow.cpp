@@ -1052,7 +1052,13 @@ void MainWindow::outputSettings() {
     connect(api, &QComboBox::currentIndexChanged, &dialog, refreshDevices);
     connect(devices, &QComboBox::currentIndexChanged, &dialog, [&] { channels->setMaximum(std::max(1, devices->currentData(Qt::UserRole + 1).toInt())); }); refreshDevices();
     channels->setValue(preferences.value("audio/channels", 2).toInt());
-    const int savedBuffer = buffer->findData(preferences.value("audio/buffer", 512).toInt()); if (savedBuffer >= 0) buffer->setCurrentIndex(savedBuffer);
+    const int savedBufferVal = preferences.value("audio/buffer", 512).toInt();
+    int savedBuffer = buffer->findData(savedBufferVal);
+    if (savedBuffer < 0 && savedBufferVal >= 32 && savedBufferVal <= 8192) {
+        buffer->addItem(QString::number(savedBufferVal) + " samples", savedBufferVal);
+        savedBuffer = buffer->count() - 1;
+    }
+    if (savedBuffer >= 0) buffer->setCurrentIndex(savedBuffer);
     devices->setObjectName("audioOutputDevice"); channels->setObjectName("audioOutputChannels");
     form->addRow("Play sound through", devices); form->addRow("Outputs to use", channels);
     auto* advanced = new QGroupBox("Advanced audio settings"); auto* advancedForm = new QFormLayout(advanced);
