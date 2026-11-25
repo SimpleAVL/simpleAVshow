@@ -67,7 +67,7 @@ To remove a track, select it (or any clip on it) and choose **Project → Delete
 - **Trim the end:** Drag the clip's right edge to change **Length**. Non-looping audio and video stop at the end of their source file; enable **Loop source** to extend further.
 - **Move a cue:** Drag its flag along the ruler, or nudge it with the keyboard.
 - **Nudge selection:** Press **Alt+Left / Right** (Option+Left / Right on macOS) to nudge a selected clip or cue by one project frame, or **Alt+Shift+Left / Right** for one full second. Nudges stop cleanly at project boundaries.
-- **Seek the playhead:** Click the ruler, click empty space in a track (which also selects that track), or double-click a clip in edit mode.
+- **Seek the playhead:** Click or drag in the ruler, click empty space in a track (which also selects that track), or double-click a clip in edit mode.
 
 Timeline navigation tools on the toolbar:
 - **Snap** *(on by default)* aligns drags to project frames, nearby clip edges, cue flags, the playhead, and `00:00:00:00`. Turn it off for freehand placement.

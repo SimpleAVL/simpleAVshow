@@ -84,7 +84,7 @@ Frame Timeline::sourceLength(const Clip& clip) const {
     return length > 0 ? length : std::numeric_limits<Frame>::max();
 }
 void Timeline::cancelDrag() {
-    dragging_ = false;
+    dragging_ = false; scrubbing_ = false; scrubTarget_ = -1;
     dragClip_ = -1;
     dragMarker_ = -1;
     dragClipId_.clear();
@@ -109,6 +109,7 @@ void Timeline::refresh() {
     verticalScrollBar()->setRange(0, static_cast<int>(std::clamp(height, std::int64_t{0}, static_cast<std::int64_t>(std::numeric_limits<int>::max()))));
     verticalScrollBar()->setPageStep(std::max(1, viewport()->height() - ruler)); autoScroll_ = was;
     playhead_ = c_.position(); drawnState_ = c_.transport.state();
+    if (scrubbing_ && (c_.showMode || c_.busy)) { scrubbing_ = false; dragging_ = false; }
     if (curveClip_ >= 0 && static_cast<std::size_t>(curveClip_) >= c_.project.show.clips.size()) { curveDrag_ = CurveDrag::None; curveClip_ = -1; dragging_ = false; }
     if (selectedTrack == lastTrackedIndex_ && !selectedTrackId_.empty()) {
         for (std::size_t i = 0; i < c_.project.show.tracks.size(); ++i) {
@@ -184,12 +185,13 @@ int Timeline::trackAt(double y) const { return static_cast<int>(std::floor((y - 
 QRectF Timeline::clipRect(const Clip& clip) const {
     return QRectF(xAt(clip.start), ruler + clip.track * row - verticalScrollBar()->value() + 5, seconds(clip.duration) * zoom_, row - 10);
 }
-Frame Timeline::snap(Frame time, const std::string& ignore) const {
+Frame Timeline::snap(Frame time, const std::string& ignore, bool snapToPlayhead) const {
     if (!snapping) return time;
     Frame snapped = frames(std::round(seconds(time) * c_.project.fps) / c_.project.fps);
     Frame distance = frames(8 / zoom_);
     auto consider = [&](Frame t) { const Frame d = std::abs(t - time); if (d < distance) { distance = d; snapped = t; } };
-    consider(c_.position()); consider(0); consider(c_.project.show.duration);
+    if (snapToPlayhead) consider(c_.position());
+    consider(0); consider(c_.project.show.duration);
     for (const auto& m : c_.project.show.markers) if (m.id != ignore) consider(m.time);
     for (const auto& clip : c_.project.show.clips) if (clip.id != ignore) { consider(clip.start); consider(clip.end()); }
     return std::clamp(snapped, Frame{0}, maxFrame);
@@ -408,7 +410,7 @@ void Timeline::paintEvent(QPaintEvent* event) {
 }
 void Timeline::mousePressEvent(QMouseEvent* event) {
     if (event->button() != Qt::LeftButton) return;
-    press_ = event->position().toPoint(); dragTime_ = timeAt(press_.x()); dragging_ = false; dragClip_ = -1; dragMarker_ = -1;
+    press_ = event->position().toPoint(); dragTime_ = timeAt(press_.x()); dragging_ = false; scrubbing_ = false; dragClip_ = -1; dragMarker_ = -1;
     if (press_.x() < header) {
         const int track = trackAt(press_.y());
         if (track >= 0 && static_cast<std::size_t>(track) < c_.project.show.tracks.size()) {
@@ -425,7 +427,12 @@ void Timeline::mousePressEvent(QMouseEvent* event) {
             return;
         }
     }
-    if (press_.y() < ruler) { c_.seek(snap(dragTime_)); return; }
+    if (press_.y() < ruler) {
+        const Frame target = snap(dragTime_, {}, false);
+        c_.seek(target);
+        if (!c_.showMode && !c_.busy) { scrubbing_ = true; dragging_ = true; scrubTarget_ = target; onTick(); }
+        return;
+    }
     // Keyframes: grab a point on any clip; on the selected clip, click its line to add one or Alt-drag a segment to bend it.
     if (const int index = clipAt(press_); index >= 0 && c_.canEdit(false)) {
         const auto hit = curveHit(c_.project.show.clips[index], press_);
@@ -460,10 +467,16 @@ void Timeline::mousePressEvent(QMouseEvent* event) {
     }
     const int track = trackAt(press_.y());
     if (track >= 0 && static_cast<std::size_t>(track) < c_.project.show.tracks.size()) { selectedTrack = track; lastTrackedIndex_ = track; selectedTrackId_ = c_.project.show.tracks[track].id; }
-    selectedClip.clear(); selectedMarker.clear(); emit selectionChanged(); c_.seek(snap(dragTime_));
+    selectedClip.clear(); selectedMarker.clear(); emit selectionChanged(); c_.seek(snap(dragTime_, {}, false));
 }
 void Timeline::mouseMoveEvent(QMouseEvent* event) {
     const QPointF pos = event->position();
+    if (scrubbing_) {
+        if (!(event->buttons() & Qt::LeftButton) || c_.showMode || c_.busy) { scrubbing_ = false; dragging_ = false; return; }
+        const Frame target = snap(timeAt(pos.x()), {}, false);
+        if (target != scrubTarget_) { scrubTarget_ = target; c_.seek(target); onTick(); }
+        return;
+    }
     if (curveDrag_ != CurveDrag::None && (event->buttons() & Qt::LeftButton)) {
         if ((pos.toPoint() - press_).manhattanLength() < 3 && !dragging_) return;
         if (!c_.canEdit(false) || static_cast<std::size_t>(curveClip_) >= c_.project.show.clips.size()) return;
@@ -527,6 +540,7 @@ void Timeline::mouseMoveEvent(QMouseEvent* event) {
     viewport()->update();
 }
 void Timeline::mouseReleaseEvent(QMouseEvent*) {
+    if (scrubbing_) { scrubbing_ = false; dragging_ = false; return; }
     if (curveDrag_ != CurveDrag::None) {
         const bool valid = curveClip_ >= 0 && static_cast<std::size_t>(curveClip_) < c_.project.show.clips.size() &&
             c_.project.show.clips[curveClip_].id == curveClipId_;
@@ -574,7 +588,7 @@ void Timeline::mouseDoubleClickEvent(QMouseEvent* event) {
             return;
         }
     }
-    if (event->position().x() >= header && !c_.showMode) c_.seek(snap(timeAt(event->position().x())));
+    if (event->position().x() >= header && !c_.showMode) c_.seek(snap(timeAt(event->position().x()), {}, false));
 }
 void Timeline::contextMenuEvent(QContextMenuEvent* event) {
     const int index = clipAt(event->pos()); if (index < 0 || !c_.canEdit(false)) return;

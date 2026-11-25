@@ -53,9 +53,9 @@ private:
     std::string dragClipId_, dragMarkerId_, curveClipId_, selectedTrackId_;
     Frame dragStart_ = 0, dragDuration_ = 0, dragOffset_ = 0, dragTime_ = 0;
     QPoint press_;
-    bool dragging_ = false, autoScroll_ = false;
+    bool dragging_ = false, scrubbing_ = false, autoScroll_ = false;
     void cancelDrag();
-    Frame playhead_ = 0;
+    Frame playhead_ = 0, scrubTarget_ = -1;
     // Keyframe editing: the clip and property being edited, its working copy, and the frozen value scale.
     enum class CurveDrag { None, Point, Bend };
     CurveDrag curveDrag_ = CurveDrag::None;
@@ -80,7 +80,7 @@ private:
     Frame timeAt(double x) const;
     int trackAt(double y) const;
     QRectF clipRect(const Clip& clip) const;
-    Frame snap(Frame time, const std::string& ignore = {}) const;
+    Frame snap(Frame time, const std::string& ignore = {}, bool snapToPlayhead = true) const;
     int curvePropertyFor(const Clip& clip) const;
     std::pair<double, double> curveRange(const Clip& clip, int property) const;
     static QRectF curveBand(const QRectF& rect) { return rect.adjusted(0, 18, 0, -4); }
