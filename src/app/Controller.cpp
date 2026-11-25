@@ -51,6 +51,7 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
             const State state = transport.state();
             const bool live = state == State::Playing || state == State::Held || transport.asyncVoices() || (state == State::Paused && pausedLive_);
             if (!busy && live) {
+                wasLive_ = true; // This check's results belong to a live show.
                 QStringList offline, needed; mediaToCheck(offline, needed);
                 // The finished check is read and the next one reserved under one lock, so no result goes unseen.
                 const auto missing = lastMissingMediaAndCheck(offline, needed);
@@ -434,7 +435,8 @@ void Controller::resetMediaState() {
     mediaCheck_ = std::make_shared<MediaCheck>(); // A check still running finishes into the old state, unread.
     if (!reportedProblem_.isEmpty() && playbackProblem == reportedProblem_) playbackProblem.clear();
     if (!reportedProblem_.isEmpty() && status == reportedProblem_) report(QString()); // Not left on screen either.
-    missingNow_.clear(); missingWarning_.clear(); reportedProblem_.clear(); wasHeld_ = false;
+    if (!missingNow_.isEmpty()) lastComposed_ = -1; // A picture composed around missing files is not reused.
+    missingNow_.clear(); missingWarning_.clear(); reportedProblem_.clear(); wasHeld_ = false; wasLive_ = false;
 }
 void Controller::promoteVideoWarning() {
     // Another picture still frozen keeps the banner's warning once the one shown is resolved.
@@ -672,9 +674,11 @@ QImage Controller::compose() {
                         if (recovering_.erase(c.id) && it != videos_.end() && it->second->error().isEmpty()) {
                             const auto problem = videoProblems_.find(c.id);
                             if (problem != videoProblems_.end()) {
-                                if (playbackProblem == problem->second) playbackProblem.clear();
+                                const bool shown = playbackProblem == problem->second;
+                                if (shown) playbackProblem.clear();
                                 if (status == problem->second) report("Picture restored: " + a.name + ".");
-                                const bool shown = playbackProblem.isEmpty(); videoProblems_.erase(problem); if (shown) promoteVideoWarning();
+                                videoProblems_.erase(problem);
+                                if (shown) promoteVideoWarning();
                             }
                         }
                     } else if (recovering_.contains(c.id) || (it != videos_.end() && !it->second->error().isEmpty()) || missingNow_.contains(a.path)) {
