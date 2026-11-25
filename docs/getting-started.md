@@ -18,7 +18,7 @@ Download the package for your platform from the [Downloads section of the README
 
 > **Note:** Prerelease packages are unsigned (macOS builds use ad-hoc signing without notarization), so Windows or macOS may show a standard downloaded-app prompt on first launch. Check the `README.txt` included in your package if needed. To build from source instead, see [CONTRIBUTING.md](https://github.com/SimpleAVL/simpleAVshow/blob/main/CONTRIBUTING.md).
 
-When SimpleAVShow opens, it starts with a fresh, empty project. If an untitled autosave was left behind from an earlier session, it offers to recover it. To open an existing `.savshow` project or `.savpack` package, use **File → Open…** or drop the file straight onto the window.
+When SimpleAVShow opens, it starts with a fresh, empty project. If an untitled autosave was left behind from an earlier session, it offers to recover it. To open an existing `.savshow` project or `.savpack` package, use **File → Open…** or drop the file straight onto the window. **File → Open recent** lists the last 10 shows and packages you opened or saved.
 
 ---
 
@@ -81,7 +81,7 @@ Set your **Title**, **Width**, **Height**, **Frames / second**, and **Duration (
 
 ### 2. Arrange a simple scene
 
-Every new show starts with six tracks ready to use: **Background** and **Overlay** (picture layers), **Main audio** and **Ambience** (async audio), plus **Guide** and **Click** (disconnected/silent by default).
+Every new show starts with six tracks ready to use: **Overlay** and **Background** (picture layers; the upper track is in front), **Main audio** and **Ambience** (async audio), plus **Guide** and **Click** (disconnected/silent by default).
 
 1. Click **+ Import media**, select an image and an audio file, and wait for preparation to finish.
 2. Drag the image from the **Media** tab onto the **Background** track at the start of the show.

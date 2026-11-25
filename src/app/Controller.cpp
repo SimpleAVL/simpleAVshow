@@ -980,8 +980,8 @@ QImage Controller::compose() {
     QImage picture(project.width, project.height, QImage::Format_RGB32); picture.fill(Qt::black);
     QPainter painter(&picture); painter.setRenderHint(QPainter::SmoothPixmapTransform); painter.setRenderHint(QPainter::TextAntialiasing);
     bool waiting = false;
-    // Track 0 is the background; successive visual tracks are composited over it.
-    for (std::size_t track = 0; track < project.show.tracks.size(); ++track) {
+    // Like other timeline editors, the topmost track is the front layer: draw from the last track up to track 0.
+    for (std::size_t track = project.show.tracks.size(); track-- > 0;) {
         if (!project.show.tracks[track].visual || project.show.tracks[track].muted) continue;
         for (std::size_t index = 0; index < project.show.clips.size(); ++index) {
             const auto& c = project.show.clips[index];

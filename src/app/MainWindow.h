@@ -47,6 +47,10 @@ private:
     QPushButton *play_ = nullptr, *showButton_ = nullptr, *outputsButton_ = nullptr, *openOutputButton_ = nullptr, *agentButton_ = nullptr, *agentChatButton_ = nullptr, *remoteButton_ = nullptr;
     QAction* outputsAction_ = nullptr;
     QAction* exportPackageAction_ = nullptr;
+    QMenu* recentMenu_ = nullptr;
+    QString recentRecorded_;
+    void addRecentProject(const QString& path);
+    void rebuildRecentMenu();
     QAction* agentChatAction_ = nullptr;
     AgentChatPanel* agentChat_ = nullptr;
     QSplitter* workspaceSplit_ = nullptr;

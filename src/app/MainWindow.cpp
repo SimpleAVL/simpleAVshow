@@ -246,6 +246,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
         if (!c_.canEdit() || c_.projectRevision() != confirmedRev) { c_.report("Open cancelled because the show changed while choosing a file."); return; }
         openPath(path, shouldDiscardAutosave);
     });
+    recentMenu_ = file->addMenu("Open recent");
+    recentMenu_->setObjectName("recentMenu");
+    rebuildRecentMenu();
     file->addAction("Save", QKeySequence::Save, this, [this] { save(); });
     file->addAction("Save as…", QKeySequence::SaveAs, this, [this] { save(true); });
     exportPackageAction_ = file->addAction("Export package…", this, &MainWindow::exportPackage);
@@ -605,6 +608,7 @@ void MainWindow::refresh() {
     library_->verticalScrollBar()->setValue(libraryScroll); cues_->verticalScrollBar()->setValue(cueScroll);
     projectLabel_->setText(c_.project.title + (c_.dirty ? "  •" : "") + QString("  ·  %1 × %2 / %3 fps").arg(c_.project.width).arg(c_.project.height).arg(c_.project.fps));
     setWindowTitle(c_.project.title + (c_.dirty ? " *" : "") + " — SimpleAVShow");
+    if (c_.path != recentRecorded_) { recentRecorded_ = c_.path; if (!c_.path.isEmpty()) addRecentProject(c_.path); }
     showButton_->setChecked(c_.showMode); showButton_->setText(c_.showMode ? "Show mode · locked" : "Show mode");
     timeline_->refresh(); updateInspector(); updatePlayback(); statusBar()->showMessage(c_.status);
 }
@@ -1436,10 +1440,50 @@ void MainWindow::openPath(const QString& rawPath, bool discardPreviousAutosave) 
         if (recovered) {
             c_.report(target.isEmpty() ? "Recovered an unsaved show. Save it to keep it." : "Recovered autosave. Save to replace " + QFileInfo(target).fileName() + ".");
         } else if (isProjectPackage(path)) {
+            addRecentProject(path);
             c_.report("Opened package. Save this show to keep an editable copy, or use Export package to share it.");
         }
     });
     watcher->setFuture(QtConcurrent::run([source] { ProjectResult result; try { result.project = readProject(source); } catch (const std::exception& e) { result.error = QString::fromUtf8(e.what()); } return result; }));
+}
+namespace { constexpr int maxRecentProjects = 10; }
+void MainWindow::addRecentProject(const QString& rawPath) {
+    const QString path = QFileInfo(rawPath).absoluteFilePath();
+    QStringList recent = QSettings().value("recent/projects").toStringList();
+    recent.removeAll(path); recent.prepend(path);
+    while (recent.size() > maxRecentProjects) recent.removeLast();
+    QSettings().setValue("recent/projects", recent);
+    rebuildRecentMenu();
+}
+void MainWindow::rebuildRecentMenu() {
+    if (!recentMenu_) return;
+    recentMenu_->clear();
+    const QStringList recent = QSettings().value("recent/projects").toStringList();
+    for (int i = 0; i < recent.size(); ++i) {
+        const QString path = recent[i];
+        const QFileInfo info(path);
+        auto* action = recentMenu_->addAction(QString("&%1  %2").arg((i + 1) % 10).arg(info.fileName()), this, [this, path] {
+            if (!QFileInfo::exists(path)) {
+                if (QMessageBox::question(this, "Show not found", "“" + path + "” no longer exists. Remove it from the recent list?") == QMessageBox::Yes) {
+                    QStringList list = QSettings().value("recent/projects").toStringList(); list.removeAll(path);
+                    QSettings().setValue("recent/projects", list); rebuildRecentMenu();
+                }
+                return;
+            }
+            quint64 confirmedRev = 0;
+            bool shouldDiscardAutosave = false;
+            if (!c_.canEdit() || !checkDiscard(&confirmedRev, false, &shouldDiscardAutosave)) return;
+            if (!c_.canEdit() || c_.projectRevision() != confirmedRev) { c_.report("Open cancelled because the show changed."); return; }
+            openPath(path, shouldDiscardAutosave);
+        });
+        action->setToolTip(path);
+        if (!info.exists()) action->setText(action->text() + "  (missing)");
+    }
+    if (recent.isEmpty()) recentMenu_->addAction("No recent shows")->setEnabled(false);
+    else {
+        recentMenu_->addSeparator();
+        recentMenu_->addAction("Clear recent shows", this, [this] { QSettings().remove("recent/projects"); rebuildRecentMenu(); });
+    }
 }
 void MainWindow::save(bool as) {
     if (!c_.canEdit()) return;

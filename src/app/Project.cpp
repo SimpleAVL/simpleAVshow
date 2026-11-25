@@ -180,7 +180,7 @@ QString shapeName(CurveShape shape) {
 Project newProject() {
     Project p;
     p.show.tracks = {
-        {newId().toStdString(), "Background", true}, {newId().toStdString(), "Overlay", true},
+        {newId().toStdString(), "Overlay", true}, {newId().toStdString(), "Background", true},
         {newId().toStdString(), "Main audio", false, false, false, 1, 0, 0, 1},
         {newId().toStdString(), "Ambience", false, true, false, 1, 0, 0, 1},
         {newId().toStdString(), "Guide", false, false, false, 1, 0, -1, -1},
@@ -199,9 +199,9 @@ Project demoProject() {
     painter.setPen(QColor(255, 255, 255, 24));
     for (int i = 0; i < 10; ++i) painter.drawEllipse(QPointF(1300, 450), 120 + i * 95, 120 + i * 95);
     painter.end(); p.assets.insert(image.id, image);
-    Clip backdrop; backdrop.id = newId().toStdString(); backdrop.assetId = image.id.toStdString(); backdrop.track = 0; backdrop.duration = frames(70);
+    Clip backdrop; backdrop.id = newId().toStdString(); backdrop.assetId = image.id.toStdString(); backdrop.track = 1; backdrop.duration = frames(70);
     p.show.clips.push_back(backdrop);
-    Clip title; title.id = newId().toStdString(); title.track = 1; title.text = "THE OPENING SCENE\nA moment before the story begins";
+    Clip title; title.id = newId().toStdString(); title.track = 0; title.text = "THE OPENING SCENE\nA moment before the story begins";
     title.start = frames(2); title.duration = frames(36); title.alpha.points = {{0, 0}, {frames(2), 1}, {frames(25), 1}, {frames(28), 0}};
     p.show.clips.push_back(title);
     auto tone = [&](const QString& id, const QString& name, double duration, bool click) {
@@ -478,7 +478,7 @@ QJsonObject projectJson(const Project& p, const QString& directory) {
         }
         assets.append(QJsonObject{{"id", a.id}, {"name", a.name}, {"path", assetPath}});
     }
-    QJsonObject root{{"format", "simpleavshow"}, {"version", 1}, {"title", p.title}, {"width", p.width}, {"height", p.height}, {"fps", p.fps},
+    QJsonObject root{{"format", "simpleavshow"}, {"version", 1}, {"layerOrder", "topFirst"}, {"title", p.title}, {"width", p.width}, {"height", p.height}, {"fps", p.fps},
         {"duration", static_cast<double>(p.show.duration)}, {"tracks", tracks}, {"clips", clips}, {"markers", markers}, {"assets", assets}};
     return root;
 }
@@ -669,6 +669,17 @@ Project parseProject(const QByteArray& json, const QString& directory, const QSt
         c.positionY = readCurve(o["positionY"]); c.size = readCurve(o["size"]); c.alpha = readCurve(o["alpha"]);
         p.show.clips.push_back(std::move(c));
     }
+    // Shows saved before "layerOrder" drew track 0 at the back. Flip the order of their picture tracks
+    // (keeping audio tracks in place) so they still look the same with the topmost track in front.
+    if (!root.contains("layerOrder")) {
+        std::vector<int> visual;
+        for (std::size_t i = 0; i < p.show.tracks.size(); ++i) if (p.show.tracks[i].visual) visual.push_back(static_cast<int>(i));
+        std::vector<int> remap(p.show.tracks.size()); for (std::size_t i = 0; i < remap.size(); ++i) remap[i] = static_cast<int>(i);
+        for (std::size_t i = 0; i < visual.size(); ++i) remap[visual[i]] = visual[visual.size() - 1 - i];
+        auto tracks = p.show.tracks;
+        for (std::size_t i = 0; i < tracks.size(); ++i) p.show.tracks[remap[i]] = tracks[i];
+        for (auto& c : p.show.clips) if (c.track >= 0 && c.track < static_cast<int>(remap.size())) c.track = remap[c.track];
+    } else if (root["layerOrder"] != "topFirst") throw std::runtime_error("Unsupported layer order");
     for (auto value : root["markers"].toArray()) {
         const auto o = readObject(value); Marker m;
         m.id = readString(o, "id").toStdString(); m.name = readString(o, "name").toStdString(); m.time = readFrame(o, "time"); m.hold = readBool(o, "hold");
