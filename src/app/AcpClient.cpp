@@ -187,21 +187,6 @@ QStringList extraSearchPaths() {
     return existing;
 }
 
-QString extractContentText(const QJsonValue& content) {
-    if (content.isString()) return content.toString();
-    if (content.isObject()) {
-        const auto obj = content.toObject();
-        if (obj["type"].toString() == "text" || obj.contains("text")) return obj["text"].toString();
-        if (obj.contains("content")) return extractContentText(obj["content"]);
-    }
-    if (content.isArray()) {
-        QString combined;
-        for (const auto& item : content.toArray()) combined += extractContentText(item);
-        return combined;
-    }
-    return {};
-}
-
 QString summarizeJson(const QJsonValue& value) {
     if (value.isUndefined() || value.isNull()) return {};
     if (value.isString()) return value.toString();
@@ -209,13 +194,45 @@ QString summarizeJson(const QJsonValue& value) {
     if (value.isArray()) return QString::fromUtf8(QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact));
     return value.toVariant().toString();
 }
+
+QString extractContentText(const QJsonValue& content) {
+    if (content.isString()) return content.toString();
+    if (content.isObject()) {
+        const auto obj = content.toObject();
+        const QString type = obj["type"].toString();
+        if (type == "text" || obj.contains("text")) return obj["text"].toString();
+        if (type == "diff" || (obj.contains("path") && (obj.contains("newText") || obj.contains("oldText")))) {
+            QString out = "Diff: " + obj["path"].toString();
+            if (obj.contains("oldText") && !obj["oldText"].isNull())
+                out += "\n--- old\n" + obj["oldText"].toString();
+            if (obj.contains("newText") && !obj["newText"].isNull())
+                out += "\n+++ new\n" + obj["newText"].toString();
+            return out;
+        }
+        if (obj.contains("content")) return extractContentText(obj["content"]);
+        if (!obj.isEmpty()) return summarizeJson(obj);
+    }
+    if (content.isArray()) {
+        QString combined;
+        for (const auto& item : content.toArray()) {
+            const QString part = extractContentText(item);
+            if (part.isEmpty()) continue;
+            const bool structured = item.isObject() && item.toObject()["type"].toString() != "text";
+            if (!combined.isEmpty() && structured && !combined.endsWith('\n')) combined += '\n';
+            combined += part;
+            if (structured && !combined.endsWith('\n')) combined += '\n';
+        }
+        return combined;
+    }
+    return {};
+}
 }
 
 std::vector<AcpAgentPreset> defaultAcpPresets() {
     return {
         {"opencode", "OpenCode", "opencode", {"acp"}, "Install OpenCode from opencode.ai and run `opencode auth` once."},
         {"claude", "Claude Code (ACP)", "claude-agent-acp", {}, "Install with `npm install -g @zed-industries/claude-agent-acp`."},
-        {"codex", "Codex (ACP)", "codex-acp", {}, "Install with `npm install -g @zed-industries/codex-acp`."},
+        {"codex", "Codex (ACP)", "codex-acp", {}, "Install with `npm install -g @agentclientprotocol/codex-acp`."},
         {"antigravity", "Antigravity (agy)", "agy", {"acp"}, "Install Google Antigravity CLI (`agy`) and run `agy acp --login` once."},
         {"pi", "Pi (pi-acp)", "pi-acp", {}, "Install with `npm install -g pi-acp` alongside Pi."},
         {"custom", "Custom ACP command…", {}, {}, "Enter any ACP-compatible executable and arguments (e.g. `my-agent acp`)."}

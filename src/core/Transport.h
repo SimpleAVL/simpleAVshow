@@ -130,6 +130,12 @@ private:
         bool seekCueActive = false;
         CommandSource seekCueSource = CommandSource::Operator;
         std::uint64_t seekCueEpoch = 0;
+        bool seekRollbackActive = false;
+        CommandSource seekRollbackSource = CommandSource::Operator;
+        std::uint64_t seekRollbackEpoch = 0;
+        Frame seekPrevPos = 0;
+        State seekPrevState = State::Stopped;
+        int seekPrevHeldMarker = -1;
     };
     PendingPlayStart pendingStart_;
     void apply(Command command, PendingPlayStart& pendingStart) noexcept;

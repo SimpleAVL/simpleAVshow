@@ -31,6 +31,7 @@ int main(int argc, char** argv) {
     const bool noSessionClose = args.contains("--no-session-close");
     const bool idOnlyPermission = args.contains("--id-only-permission");
     const bool summaryOnlyPermission = args.contains("--summary-only-permission");
+    const bool diffPermission = args.contains("--diff-permission");
     const bool burstAndExit = args.contains("--burst-and-exit");
 
     int sessionCounter = 0;
@@ -176,6 +177,25 @@ int main(int argc, char** argv) {
                     send({{"jsonrpc", "2.0"}, {"id", "perm-1"}, {"method", "session/request_permission"}, {"params", QJsonObject{
                         {"sessionId", pendingPromptSession},
                         {"toolCall", tc},
+                        {"options", QJsonArray{
+                            QJsonObject{{"optionId", "allow-once"}, {"name", "Allow once"}, {"kind", "allow_once"}},
+                            QJsonObject{{"optionId", "reject-once"}, {"name", "Reject"}, {"kind", "reject_once"}}
+                        }}
+                    }}});
+                } else if (diffPermission) {
+                    send({{"jsonrpc", "2.0"}, {"id", "perm-1"}, {"method", "session/request_permission"}, {"params", QJsonObject{
+                        {"sessionId", pendingPromptSession},
+                        {"toolCall", QJsonObject{
+                            {"toolCallId", "tc-diff"},
+                            {"title", "Edit show script"},
+                            {"kind", "edit"},
+                            {"content", QJsonArray{QJsonObject{
+                                {"type", "diff"},
+                                {"path", "/tmp/show.txt"},
+                                {"oldText", "old cue"},
+                                {"newText", "new cue"}
+                            }}}
+                        }},
                         {"options", QJsonArray{
                             QJsonObject{{"optionId", "allow-once"}, {"name", "Allow once"}, {"kind", "allow_once"}},
                             QJsonObject{{"optionId", "reject-once"}, {"name", "Reject"}, {"kind", "reject_once"}}

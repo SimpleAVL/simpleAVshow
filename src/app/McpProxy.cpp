@@ -11,6 +11,8 @@
 #include <QPointer>
 #include <QSet>
 #include <QUuid>
+#include <QVariant>
+#include <cmath>
 #include <deque>
 #include <functional>
 #include <iostream>
@@ -32,7 +34,13 @@ void writeError(const QJsonValue& id, int code, const QString& message) {
 }
 QString requestIdKey(const QJsonValue& id) {
     if (id.isString()) return "s:" + id.toString();
-    if (id.isDouble()) return "n:" + QString::number(id.toDouble(), 'f', 0);
+    if (id.isDouble()) {
+        const QVariant var = id.toVariant();
+        if (var.typeId() == QMetaType::LongLong) return "i:" + QString::number(var.toLongLong());
+        if (var.typeId() == QMetaType::ULongLong) return "u:" + QString::number(var.toULongLong());
+        const double d = id.toDouble();
+        if (std::isfinite(d) && std::floor(d) == d) return "i:" + QString::number(static_cast<qint64>(d));
+    }
     return {};
 }
 bool isLongFileToolCall(const QJsonObject& obj) {

@@ -439,6 +439,14 @@ private slots:
         QVERIFY(QFileInfo::exists(packPath));
         QVERIFY(call(server, "project_action", {{"action", "export_package"}, {"path", packPath}})["isError"].toBool());
         QVERIFY(!call(server, "project_action", {{"action", "export_package"}, {"path", packPath}, {"overwrite", true}})["isError"].toBool());
+#ifndef Q_OS_WIN
+        // Read-only packages must not be overwritten, and private permissions (0600) must be preserved on overwrite.
+        QVERIFY(QFile::setPermissions(packPath, QFileDevice::ReadOwner));
+        QVERIFY(call(server, "project_action", {{"action", "export_package"}, {"path", packPath}, {"overwrite", true}})["isError"].toBool());
+        QVERIFY(QFile::setPermissions(packPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner));
+        QVERIFY(!call(server, "project_action", {{"action", "export_package"}, {"path", packPath}, {"overwrite", true}})["isError"].toBool());
+        QVERIFY(!(QFileInfo(packPath).permissions() & (QFileDevice::ReadGroup | QFileDevice::ReadOther)));
+#endif
         // Show-replacing actions require expected_revision and reject stale revisions even with discard_unsaved: true.
         QVERIFY(call(server, "project_action", {{"action", "new_show"}, {"discard_unsaved", true}})["isError"].toBool());
         QVERIFY(call(server, "project_action", {{"action", "new_show"}, {"expected_revision", revision(server) - 1}, {"discard_unsaved", true}})["isError"].toBool());

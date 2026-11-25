@@ -1042,6 +1042,28 @@ private slots:
         QTRY_COMPARE(burstClient.state(), AcpState::Disconnected);
         QCOMPARE(burstStop, QString("end_turn"));
         QVERIFY(combined.contains("B44 "));
+
+        // An ACP diff block in session/request_permission must be extracted into the permission card detail.
+        AcpClient diffClient;
+        AcpPermissionRequest diffReq;
+        bool gotDiff = false;
+        QObject::connect(&diffClient, &AcpClient::permissionRequested, &diffClient, [&](const AcpPermissionRequest& req) {
+            diffReq = req;
+            gotDiff = true;
+            diffClient.respondPermission(req.requestKey, "allow-once");
+        });
+        QString diffStop;
+        QObject::connect(&diffClient, &AcpClient::promptFinished, &diffClient, [&](const QString& r) { diffStop = r; });
+        diffClient.connectToAgent(QString::fromUtf8(SAV_MOCK_ACP_AGENT), {"--http-mcp", "--require-permission", "--diff-permission"},
+            QDir::tempPath(), {});
+        QTRY_COMPARE(diffClient.state(), AcpState::Ready);
+        diffClient.sendPrompt("test diff permission");
+        QTRY_VERIFY(gotDiff);
+        QVERIFY(diffReq.detail.contains("/tmp/show.txt"));
+        QVERIFY(diffReq.detail.contains("old cue"));
+        QVERIFY(diffReq.detail.contains("new cue"));
+        QTRY_COMPARE(diffStop, QString("end_turn"));
+        diffClient.disconnectFromAgent();
     }
 };
 

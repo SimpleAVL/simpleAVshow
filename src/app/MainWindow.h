@@ -75,6 +75,7 @@ private:
     std::string inspectedClip_, inspectedMarker_;
     int inspectedTrack_ = -1;
     QPointer<QScreen> outputTargetScreen_;
+    QVector<QPointer<QScreen>> outputTwinScreens_;
     QMetaObject::Connection outputScreenConn_;
     QString outputScreen_, outputScreenManufacturer_, outputScreenModel_, outputScreenSerial_;
     void buildInspector();

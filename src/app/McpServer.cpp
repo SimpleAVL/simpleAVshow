@@ -41,6 +41,17 @@ const QStringList versions{"2025-11-25", "2025-06-18", "2025-03-26"};
 [[noreturn]] void fail(const QString& message) { throw std::runtime_error(message.toStdString()); }
 
 bool atomicPublishFile(const QString& source, const QString& target, bool allowOverwrite, QString& error) {
+    if (allowOverwrite) {
+        const QFileInfo existingTarget(target);
+        if (existingTarget.exists()) {
+            if (!existingTarget.isWritable()) {
+                error = "Destination file is read-only";
+                return false;
+            }
+            // Preserve existing permissions so overwriting a private (e.g. 0600) package never widens access.
+            QFile::setPermissions(source, existingTarget.permissions());
+        }
+    }
 #ifdef Q_OS_WIN
     const std::wstring srcW = source.toStdWString();
     const std::wstring dstW = target.toStdWString();
@@ -1761,6 +1772,8 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
         if (!isProjectPackage(path)) path += ".savpack";
         if (!overwrite && (QFileInfo::exists(path) || QFileInfo(path).isSymLink()))
             fail("Destination package already exists; pass overwrite: true to replace it");
+        if (overwrite && QFileInfo::exists(path) && !QFileInfo(path).isWritable())
+            fail("Destination package is read-only");
         for (const auto& asset : c_.project.assets) {
             if (!asset.path.isEmpty() && sameLocalPath(asset.path, path))
                 fail("Cannot overwrite a media file referenced by this show");
@@ -2049,9 +2062,23 @@ void McpServer::dispatch(const QJsonObject& request, const QString& bearerToken,
                          std::shared_ptr<std::atomic<bool>> cancelled,
                          std::function<void()> abortConnection,
                          std::function<void(QJsonObject, QByteArray)> finish) {
+    auto isValidJsonRpcId = [](const QJsonValue& v) -> bool {
+        if (v.isString()) return true;
+        if (!v.isDouble()) return false;
+        const QVariant var = v.toVariant();
+        if (var.typeId() == QMetaType::LongLong || var.typeId() == QMetaType::ULongLong) return true;
+        const double d = v.toDouble();
+        return std::isfinite(d) && std::floor(d) == d;
+    };
     auto idKeyOf = [](const QJsonValue& v) -> QString {
         if (v.isString()) return "s:" + v.toString();
-        if (v.isDouble() && std::floor(v.toDouble()) == v.toDouble()) return "n:" + QString::number(v.toDouble(), 'f', 0);
+        if (v.isDouble()) {
+            const QVariant var = v.toVariant();
+            if (var.typeId() == QMetaType::LongLong) return "i:" + QString::number(var.toLongLong());
+            if (var.typeId() == QMetaType::ULongLong) return "u:" + QString::number(var.toULongLong());
+            const double d = v.toDouble();
+            if (std::isfinite(d) && std::floor(d) == d) return "i:" + QString::number(static_cast<qint64>(d));
+        }
         return {};
     };
     const auto id = request["id"];
@@ -2068,7 +2095,7 @@ void McpServer::dispatch(const QJsonObject& request, const QString& bearerToken,
         return;
     }
     if (request["jsonrpc"] != "2.0" || !request["method"].isString() ||
-        (!id.isUndefined() && !id.isString() && (!id.isDouble() || std::floor(id.toDouble()) != id.toDouble()))) { error(-32600, "Invalid JSON-RPC request"); return; }
+        (!id.isUndefined() && !isValidJsonRpcId(id))) { error(-32600, "Invalid JSON-RPC request"); return; }
     if (request.contains("params") && !request["params"].isObject()) { error(-32602, "Parameters must be an object"); return; }
     const auto method = request["method"].toString(); const auto params = request["params"].toObject();
     if (id.isUndefined()) {

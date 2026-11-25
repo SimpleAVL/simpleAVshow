@@ -161,7 +161,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), mcp_(c_, this), r
         openOutput(matchedIndex, false);
         return bool(outputWindow_ && outputWindow_->isVisible());
     };
-    host.closeDisplay = [this] { outputLost_ = false; outputTargetScreen_.clear(); if (outputWindow_) outputWindow_->hide(); };
+    host.closeDisplay = [this] { outputLost_ = false; outputTargetScreen_.clear(); outputTwinScreens_.clear(); if (outputWindow_) outputWindow_->hide(); };
     host.remoteStatus = [this] {
         return QJsonObject{{"available", true}, {"running", remote_.running()},
             {"port", remote_.running() ? static_cast<int>(remote_.port()) : QSettings().value("remote/port", 48124).toInt()},
@@ -1125,7 +1125,7 @@ void MainWindow::openOutput(int index, bool confirmEditorCover) {
         outputWindow_ = new QWidget(this, Qt::Window | Qt::FramelessWindowHint); outputWindow_->setWindowTitle("SimpleAVShow — Program"); outputWindow_->setStyleSheet("background: black;");
         auto* layout = new QVBoxLayout(outputWindow_); layout->setContentsMargins(0, 0, 0, 0); output_ = new ProgramView; layout->addWidget(output_);
         outputWindow_->setCursor(Qt::BlankCursor);
-        auto* close = new QShortcut(QKeySequence::Close, outputWindow_); connect(close, &QShortcut::activated, this, [this] { outputLost_ = false; outputTargetScreen_.clear(); if (outputWindow_) outputWindow_->hide(); });
+        auto* close = new QShortcut(QKeySequence::Close, outputWindow_); connect(close, &QShortcut::activated, this, [this] { outputLost_ = false; outputTargetScreen_.clear(); outputTwinScreens_.clear(); if (outputWindow_) outputWindow_->hide(); });
     }
     if (confirmEditorCover && target == screen() && QMessageBox::question(this, "Cover the editor?",
             "This display shows the editor. The program output will cover it until you press " + QKeySequence(QKeySequence::Close).toString(QKeySequence::NativeText) + " on the output.",
@@ -1142,6 +1142,16 @@ void MainWindow::openOutput(int index, bool confirmEditorCover) {
     outputScreenModel_ = target->model();
     outputScreenSerial_ = target->serialNumber();
     outputWasNonEditor_ = (target.data() != screen());
+    // Remember any other already-connected displays sharing the exact same reported identity so
+    // unplugging the chosen display never redirects fullscreen output onto a surviving twin monitor.
+    outputTwinScreens_.clear();
+    for (QScreen* s : QGuiApplication::screens()) {
+        if (!s || s == target.data()) continue;
+        if (s->name() == outputScreen_ && s->manufacturer() == outputScreenManufacturer_ &&
+            s->model() == outputScreenModel_ && s->serialNumber() == outputScreenSerial_) {
+            outputTwinScreens_.append(s);
+        }
+    }
     QSettings().setValue("display/screen", outputScreen_);
     openingOutput_ = true;
     output_->setPicture(c_.compose()); outputWindow_->hide(); outputWindow_->winId();
@@ -1185,6 +1195,9 @@ void MainWindow::screensChanged() {
         for (int i = 0; i < screens.size(); ++i) {
             QScreen* s = screens[i];
             if (s == screen()) continue;
+            bool isSurvivingTwin = false;
+            for (const auto& twin : outputTwinScreens_) if (twin && twin.data() == s) { isSurvivingTwin = true; break; }
+            if (isSurvivingTwin) continue;
             const bool exactIdentity = s->name() == outputScreen_ &&
                 s->manufacturer() == outputScreenManufacturer_ &&
                 s->model() == outputScreenModel_ &&
