@@ -54,7 +54,7 @@ To add more tracks, use **Project → Add track** and choose **Picture layer**, 
 
 > **Warning:** Newly added audio tracks route to outputs **1 and 2** by default. Re-route private tracks (like extra guide or click feeds) immediately so they cannot reach audience speakers.
 
-Picture layers stack in timeline order from top to bottom: **Background** sits underneath layers below it. To crossfade or layer graphics, put the incoming image on a lower (higher-numbered) picture track and animate its opacity.
+Picture layers stack like in other timeline editors: the topmost picture track is in front, and each track below it sits further back. **Overlay** draws over **Background**. To crossfade or layer graphics, put the incoming image on a picture track above the outgoing one and animate its opacity. (Shows saved by older versions, which drew the top track at the back, have their picture tracks reordered when opened so they look the same.)
 
 To remove a track, select it (or any clip on it) and choose **Project → Delete selected track…**. The confirmation dialog tells you the track name and how many clips it contains. At least one track must remain in the project, and Undo brings a deleted track right back.
 

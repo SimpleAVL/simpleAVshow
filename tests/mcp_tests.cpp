@@ -191,14 +191,14 @@ private slots:
         // Type without leaving the field: the network request must flush the real inspector.
         QLineEdit* name = nullptr;
         for (auto* field : window.findChildren<QLineEdit*>())
-            if (field->text() == "Background" && field->isVisible()) name = field;
-        QVERIFY(name); name->setFocus(); name->selectAll(); QTest::keyClicks(name, "Operator background");
-        QCOMPARE(window.controller().project.show.tracks.front().name, std::string("Background"));
+            if (field->text() == "Overlay" && field->isVisible()) name = field;
+        QVERIFY(name); name->setFocus(); name->selectAll(); QTest::keyClicks(name, "Operator overlay");
+        QCOMPARE(window.controller().project.show.tracks.front().name, std::string("Overlay"));
         QVERIFY(edits(server, {operation("marker", "conflicting", {{"time", 0}})}, r)["isError"].toBool());
-        QCOMPARE(window.controller().project.show.tracks.front().name, std::string("Operator background"));
+        QCOMPARE(window.controller().project.show.tracks.front().name, std::string("Operator overlay"));
         QVERIFY(window.controller().project.show.markers.empty());
         QVERIFY(!edits(server, {operation("marker", "rebased", {{"time", 0}})})["isError"].toBool());
-        QCOMPARE(window.controller().project.show.tracks.front().name, std::string("Operator background"));
+        QCOMPARE(window.controller().project.show.tracks.front().name, std::string("Operator overlay"));
         QCOMPARE(window.controller().project.show.markers.size(), size_t(1));
         window.controller().dirty = false; server.stop();
     }
@@ -350,19 +350,19 @@ private slots:
         QVERIFY(!envUnlocked["remote"].toObject().contains("links"));
 
         // 5. move_track reorders tracks and remaps clip indices, rejects oversized index, and history undoes/redoes
-        const QString overlayId = QString::fromStdString(window.controller().project.show.tracks[1].id);
-        QVERIFY(edits(server, {operation("move_track", overlayId, {{"index", 1e12}})})["isError"].toBool());
-        QVERIFY(!edits(server, {operation("move_track", overlayId, {{"index", 0}})})["isError"].toBool());
-        QCOMPARE(QString::fromStdString(window.controller().project.show.tracks[0].id), overlayId);
-        // Backdrop clip (originally on track 0) shifted to track 1; Title clip (originally on track 1) shifted to track 0.
-        QCOMPARE(window.controller().project.show.clips[0].track, 1);
-        QCOMPARE(window.controller().project.show.clips[1].track, 0);
+        const QString movedId = QString::fromStdString(window.controller().project.show.tracks[1].id);
+        QVERIFY(edits(server, {operation("move_track", movedId, {{"index", 1e12}})})["isError"].toBool());
+        QVERIFY(!edits(server, {operation("move_track", movedId, {{"index", 0}})})["isError"].toBool());
+        QCOMPARE(QString::fromStdString(window.controller().project.show.tracks[0].id), movedId);
+        // Backdrop clip (originally on track 1) shifted to track 0; Title clip (originally on track 0) shifted to track 1.
+        QCOMPARE(window.controller().project.show.clips[0].track, 0);
+        QCOMPARE(window.controller().project.show.clips[1].track, 1);
         const auto undone = call(server, "history", {{"expected_revision", revision(server)}, {"action", "undo"}});
         QVERIFY(!undone["isError"].toBool());
-        QCOMPARE(QString::fromStdString(window.controller().project.show.tracks[1].id), overlayId);
+        QCOMPARE(QString::fromStdString(window.controller().project.show.tracks[1].id), movedId);
         const auto redone = call(server, "history", {{"expected_revision", revision(server)}, {"action", "redo"}});
         QVERIFY(!redone["isError"].toBool());
-        QCOMPARE(QString::fromStdString(window.controller().project.show.tracks[0].id), overlayId);
+        QCOMPARE(QString::fromStdString(window.controller().project.show.tracks[0].id), movedId);
 
         // 6. seek_and_select and transport_control (seek / stop_all)
         const QString firstClipId = QString::fromStdString(window.controller().project.show.clips.front().id);
@@ -911,19 +911,19 @@ private slots:
             window.controller().replace(demoProject());
             const QString titleClip = QString::fromStdString(window.controller().project.show.clips[1].id);
             QVERIFY(!call(server, "seek_and_select", {{"clip_id", titleClip}})["isError"].toBool());
-            QCOMPARE(call(server, "get_environment")["structuredContent"].toObject()["selection"].toObject()["selected_track"].toInt(), 1);
-            // Move title clip from track 1 to track 0 (first remove backdrop on track 0 so there is no overlap).
+            QCOMPARE(call(server, "get_environment")["structuredContent"].toObject()["selection"].toObject()["selected_track"].toInt(), 0);
+            // Move title clip from track 0 to track 1 (first remove backdrop on track 1 so there is no overlap).
             const QString bgClip = QString::fromStdString(window.controller().project.show.clips[0].id);
             QVERIFY(!call(server, "apply_edits", {
                 {"expected_revision", revision(server)},
                 {"operations", QJsonArray{
                     QJsonObject{{"type", "delete_clip"}, {"id", bgClip}},
-                    QJsonObject{{"type", "clip"}, {"id", titleClip}, {"fields", QJsonObject{{"track", 0}}}}
+                    QJsonObject{{"type", "clip"}, {"id", titleClip}, {"fields", QJsonObject{{"track", 1}}}}
                 }}
             })["isError"].toBool());
             const auto sel = call(server, "get_environment")["structuredContent"].toObject()["selection"].toObject();
             QCOMPARE(sel["selected_clip"].toString(), titleClip);
-            QCOMPARE(sel["selected_track"].toInt(), 0);
+            QCOMPARE(sel["selected_track"].toInt(), 1);
         }
 
         window.controller().dirty = false;

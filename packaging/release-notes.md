@@ -1,12 +1,29 @@
-SimpleAVShow 0.6.0 adds a phone remote: run playback from a phone or tablet's web browser on the same network. This is a development prerelease.
+SimpleAVShow 0.7.0 adds an embedded agent chat, streamed audio, a recent-shows menu and timeline-style layer stacking. This is a development prerelease.
 
-## Phone remote
+## Picture layers stack like other editors
 
-Open **Project → Phone remote…**, or click **Remote · off** in the top bar, and enable it. The dialog lists a link to open in the phone's browser; nothing needs to be installed on the phone. The page shows the clock, state, next cue, time left, the current hold and any playback problem, with one large **Play / Pause / Continue** button and a **Stop All** button that needs two taps within three seconds.
+The topmost picture track is now the front layer, and tracks below it sit further back. New shows start with **Overlay** above **Background**. Shows saved by earlier versions have their picture tracks reordered when opened, so they look the same as before; save them to keep the new order. See [editing a show](https://github.com/SimpleAVL/simpleAVshow/blob/v0.7.0/docs/editing-a-show.md).
 
-Each tap states what it means, so a late or repeated tap does nothing instead of toggling the show back. The remote works in Show mode, uses the same playback checks as the editor, and cannot seek, edit, save or change outputs. If the phone loses its connection, the page dims and disables its buttons until it reconnects. The top-bar button shows how many phones are connected, and the status bar names each remote action.
+## Open recent
 
-Anyone with the link on the same network can control playback, and the remote uses plain HTTP, so use a trusted show network. The link and port stay the same between launches so bookmarks keep working; **Change link…** revokes the old link immediately. The remote is off after each launch until enabled again. Windows and macOS may ask to allow incoming connections the first time. See the [phone remote chapter](https://github.com/SimpleAVL/simpleAVshow/blob/v0.6.0/docs/remote-control.md).
+**File → Open recent** lists the last 10 shows and packages you opened or saved. Missing files are marked and can be removed from the list, and **Clear recent shows** empties it.
+
+## Agent chat and MCP tools
+
+**Project → Agent chat** (Ctrl+Shift+A) opens a chat panel that runs an ACP coding agent, such as Claude Code, Codex or Antigravity, against the open show. The MCP server gains an app guide, environment inspection and the full set of operator controls, behind the same edit locks as the editor. See [agent collaboration](https://github.com/SimpleAVL/simpleAVshow/blob/v0.7.0/docs/agent-collaboration.md).
+
+## Audio
+
+- **Audio sources** (experimental, in **Outputs**): **Stream** decodes compressed audio from the original files during playback instead of preparing a PCM cache; **Prepared** keeps the cache. Show mode warns while audio still streams.
+- **If audio is late**: **Freeze** holds show time as before; **Gap** keeps time running and silences only the late voices.
+
+See [audio and outputs](https://github.com/SimpleAVL/simpleAVshow/blob/v0.7.0/docs/audio-and-outputs.md).
+
+## Editing
+
+- Placing, moving, trimming, pasting or duplicating clips and cues past the end of the show now lengthens it instead of being refused.
+- Drag in the timeline ruler to scrub the playhead; it snaps to clip edges and cues.
+- The user manual was rewritten for readability and accuracy.
 
 ## Downloads and source
 
@@ -16,8 +33,8 @@ Anyone with the link on the same network can control playback, and the remote us
 | macOS 15+ Apple Silicon | `SimpleAVShow-macos-arm64.zip` | Extract; move `simpleavshow.app` to Applications |
 | Linux x64 | `SimpleAVShow-linux-x86_64.AppImage` | `chmod +x`, then run; Ubuntu 24.04 / glibc 2.39 or newer |
 
-Runtime dependencies and the [user manual](https://github.com/SimpleAVL/simpleAVshow/blob/v0.6.0/docs/README.md) are bundled. `SHA256SUMS.txt` contains package and source checksums. If FUSE is unavailable on Linux, set `APPIMAGE_EXTRACT_AND_RUN=1`.
+Runtime dependencies and the [user manual](https://github.com/SimpleAVL/simpleAVshow/blob/v0.7.0/docs/README.md) are bundled. `SHA256SUMS.txt` contains package and source checksums. If FUSE is unavailable on Linux, set `APPIMAGE_EXTRACT_AND_RUN=1`.
 
-SimpleAVShow is free software under the GNU GPL, version 3 or later. Every package includes `LICENSE`, third-party notices and an About dialog license notice. The release includes `SimpleAVShow-0.6.0-source.tar.gz`. Windows ASIO support uses Steinberg's ASIO SDK 2.3.4 under its GPLv3 option.
+SimpleAVShow is free software under the GNU GPL, version 3 or later. Every package includes `LICENSE`, third-party notices and an About dialog license notice. The release includes `SimpleAVShow-0.7.0-source.tar.gz`. Windows ASIO support uses Steinberg's ASIO SDK 2.3.4 under its GPLv3 option.
 
-These builds are unsigned; macOS uses ad-hoc signing without notarization. Rehearse complete shows on the actual show hardware. See [hardware validation](https://github.com/SimpleAVL/simpleAVshow/blob/v0.6.0/docs/hardware-validation.md).
+These builds are unsigned; macOS uses ad-hoc signing without notarization. Rehearse complete shows on the actual show hardware. See [hardware validation](https://github.com/SimpleAVL/simpleAVshow/blob/v0.7.0/docs/hardware-validation.md).

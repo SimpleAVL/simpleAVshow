@@ -4,6 +4,7 @@
 #include "media/Media.h"
 #include "media/AudioSources.h"
 #include "media/MidiOutput.h"
+#include <QMenu>
 #include <QtTest>
 #include "ReportUncaught.h"
 #include <QTemporaryDir>
@@ -313,6 +314,30 @@ private slots:
         QTRY_VERIFY(next->text().contains("Act one · in 0:12")); QVERIFY(next->text().contains("1:30 left"));
         window.controller().seek(frames(20)); QTRY_VERIFY(next->text().contains("Finale · in 0:55"));
         window.controller().setShowMode(false); window.controller().dirty = false;
+    }
+    void legacyShowsKeepTheirPictureStacking() {
+        // Before "layerOrder", track 0 was the back layer. Old files flip their picture tracks; audio stays put.
+        Project old; old.show.tracks = {{"bg", "Background", true}, {"au", "Audio", false}, {"ov", "Overlay", true}};
+        for (const auto& [id, track] : {std::pair{"b", 0}, std::pair{"o", 2}}) { Clip c; c.id = id; c.text = id; c.track = track; c.duration = frames(1); old.show.clips.push_back(c); }
+        QTemporaryDir oldDir; const QString oldPath = oldDir.filePath("old.savshow"); writeProject(old, oldPath);
+        QFile oldFile(oldPath); QVERIFY(oldFile.open(QIODevice::ReadOnly));
+        auto root = QJsonDocument::fromJson(oldFile.readAll()).object(); root.remove("layerOrder");
+        const QByteArray legacy = QJsonDocument(root).toJson();
+        Project p; try { p = parseProject(legacy, QDir::tempPath()); } catch (const std::exception& e) { QFAIL(e.what()); }
+        QCOMPARE(p.show.tracks[0].id, std::string("ov")); QCOMPARE(p.show.tracks[1].id, std::string("au")); QCOMPARE(p.show.tracks[2].id, std::string("bg"));
+        QCOMPARE(p.show.clips[0].track, 2); QCOMPARE(p.show.clips[1].track, 0);
+        // Files written now are already top-first and load unchanged.
+        QTemporaryDir dir; const QString path = dir.filePath("new.savshow"); Project again;
+        try { writeProject(p, path); again = readProject(path); } catch (const std::exception& e) { QFAIL(e.what()); }
+        QCOMPARE(again.show.tracks[0].id, std::string("ov")); QCOMPARE(again.show.clips[1].track, 0);
+    }
+    void recentProjectsMenuListsSavedShows() {
+        MainWindow window; window.show();
+        QTemporaryDir dir; const QString path = dir.filePath("recent.savshow");
+        window.controller().save(path);
+        QTRY_VERIFY(QSettings().value("recent/projects").toStringList().value(0) == QFileInfo(path).absoluteFilePath());
+        auto* menu = window.findChild<QMenu*>("recentMenu"); QVERIFY(menu);
+        QVERIFY(std::any_of(menu->actions().cbegin(), menu->actions().cend(), [](QAction* a) { return a->text().contains("recent.savshow"); }));
     }
     void inspectorAppliesTouchedFieldsAutomatically() {
         MainWindow window; window.show(); auto& c = window.controller();
