@@ -15,7 +15,7 @@ Before locking down Show mode, run at least one full technical rehearsal on the 
 3. Send audio to **Main**, **Ambience**, **Guide**, and **Click** and confirm each one arrives at the right physical output.
 4. Move the playhead to the start (or any cue you're rehearsing). Remember: seeking never sends MIDI, though pressing **Play** directly on a cue fires its arrival message.
 5. Play straight through every hold, pause, **Continue**, fade, and scene transition using your final media files.
-6. Keep an eye on the health indicators at the bottom right—note any clipping, underruns, audio/video waits, or disk retries.
+6. Keep an eye on the health indicators at the bottom right—note any clipping, underruns, audio waits/gaps, video waits, or disk retries.
 7. Run the full physical checks in the [Show-machine validation checklist](hardware-validation.md) before your first audience.
 
 > **Tip for repeat runs:** **Stop All** silences playback without rewinding the playhead. To run a scene again, click **Stop All**, then click the start of the ruler (or focus the timeline and press **Home**) in edit mode. Keep in mind that seeking backward rearms cues—make sure replaying MIDI messages won't put your lighting console or instruments into an unexpected state.
@@ -29,6 +29,7 @@ Work through this quick list right before house opens:
 - [ ] **Right show file:** Confirm you have the latest version, expected final duration, and **no unsaved changes** (no dot beside the title).
 - [ ] **All media online:** No **OFFLINE** items in Media and no unresolved warnings below **PROGRAM**.
 - [ ] **Audio verified:** Correct driver (ASIO on Windows), interface, open channel count, buffer size, routing, and headroom. Confirm **Guide** and **Click** cannot reach audience speakers.
+- [ ] **Playback reliability set:** In **Outputs**, set **Audio sources** to **Prepared cache** on the show machine and choose what **If audio is late** should do (see [Playback reliability](audio-and-outputs.md#playback-reliability)).
 - [ ] **MIDI verified:** Correct destination port connected, cues tested, and any needed end-of-show cleanup messages in place.
 - [ ] **Audience display open:** Fullscreen program output is open on the projector/monitor, framed properly, and holding the right opening frame.
 - [ ] **Cued to start:** Click **Stop All** and place the playhead at your starting position (`00:00:00:00` or your preset cue).
@@ -39,7 +40,7 @@ Work through this quick list right before house opens:
 
 ## Enter Show mode
 
-Click **Show mode** in the top bar. SimpleAVShow runs a quick **preflight check** for unsaved changes, missing timeline media, unconfigured MIDI destinations, audio device/routing issues it can inspect, and whether a needed fullscreen program output is open.
+Click **Show mode** in the top bar. SimpleAVShow runs a quick **preflight check** for unsaved changes, audio that still streams from its media files, missing timeline media, unconfigured MIDI destinations, audio device/routing issues it can inspect, and whether a needed fullscreen program output is open.
 
 ![Show mode preflight warning listing unsaved changes, unconfigured MIDI, and closed program output](screenshots/08-show-preflight.png)
 

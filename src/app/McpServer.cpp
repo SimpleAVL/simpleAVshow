@@ -214,6 +214,8 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& a) {
             if (name == "get_import") return toolResult(importStatus());
             checkWrite(a);
             if (importState_ != "ready") fail("Import job is not ready to commit");
+            // Staged audio was prepared for the preference at import time; committing it under another would mix the two.
+            if (importPreparation_ != audioPreparation()) fail("The operator changed Audio sources since this import was prepared. Import the files again");
             if (!c_.edit([&](Project& p) { for (const auto& asset : imported_) p.assets.insert(asset.id, asset); })) fail(c_.status);
             importState_ = "committed"; c_.report(QString("Agent imported %1 media files. Undo restores the previous show.").arg(imported_.size()));
             auto result = snapshot(); result.insert("import", importStatus()); imported_.clear(); return toolResult(result);
@@ -232,7 +234,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& a) {
             if (!value.isString() || !QFileInfo(value.toString()).isAbsolute() || !QFileInfo(value.toString()).isFile()) fail("Media path must be an existing absolute local file");
             paths.append(value.toString());
         }
-        importId_ = newId(); importState_ = "preparing"; importError_.clear(); imported_.clear();
+        importId_ = newId(); importState_ = "preparing"; importError_.clear(); imported_.clear(); importPreparation_ = audioPreparation();
         struct Prepared { std::vector<MediaAsset> assets; QString error; };
         auto* watcher = new QFutureWatcher<Prepared>(this); const auto job = importId_;
         connect(watcher, &QFutureWatcher<Prepared>::finished, this, [this, watcher, job] {
@@ -241,9 +243,9 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& a) {
             importError_ = prepared.error; imported_ = prepared.assets; importState_ = importError_.isEmpty() ? "ready" : "failed";
             c_.report(importState_ == "ready" ? "Agent media is prepared and waiting to be added to the show." : "Agent media preparation failed: " + importError_);
         });
-        watcher->setFuture(QtConcurrent::run([paths] {
+        watcher->setFuture(QtConcurrent::run([paths, preparation = importPreparation_] {
             Prepared result;
-            try { for (const auto& path : paths) result.assets.push_back(loadMedia(path)); }
+            try { for (const auto& path : paths) result.assets.push_back(loadMedia(path, preparation)); }
             catch (const std::exception& e) { result.error = QString::fromUtf8(e.what()); result.assets.clear(); }
             return result;
         }));

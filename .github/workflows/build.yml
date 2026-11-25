@@ -254,6 +254,14 @@ jobs:
           Copy-Item "$env:FFMPEG_ROOT/bin/*.dll" build/Release/
           $env:PATH = "$env:FFMPEG_ROOT/bin;$env:PATH"
           ctest --test-dir build -C Release --output-on-failure --timeout 300
+          if ($LASTEXITCODE -ne 0) {
+            # Windows can drop a crashed test's buffered stdout; rerun the app suite into a file (QtTest flushes per line).
+            $env:QT_QPA_PLATFORM = 'offscreen'
+            & build/Release/app_tests.exe -o app-tests.txt,txt
+            Write-Host "app_tests exit code: $LASTEXITCODE"
+            if (Test-Path app-tests.txt) { Get-Content app-tests.txt | Select-String -NotMatch '^PASS' }
+            exit 1
+          }
       - run: cmake --install build --config Release --prefix "$pwd/dist"
         if: needs.changes.outputs.package == 'true'
       - name: Package and smoke test

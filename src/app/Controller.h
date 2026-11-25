@@ -4,6 +4,7 @@
 #include "media/MidiOutput.h"
 #include <QObject>
 #include <QTimer>
+#include <QSet>
 #include <QSettings>
 #include <QElapsedTimer>
 #include <deque>
@@ -12,6 +13,7 @@
 #include <map>
 #include <thread>
 #include <atomic>
+#include <mutex>
 
 namespace sav {
 class Controller : public QObject {
@@ -26,7 +28,8 @@ public:
     bool showMode = false, dirty = false, busy = false;
     QString path, status = "Press Play to use your speakers. Choose show equipment in Outputs.", audioName;
     QString playbackProblem;
-    Frame position() const { return transport.position(); }
+    // While disarmed after a failed arm, the position Play will arm at (seeks move it).
+    Frame position() const { return armFailed_ ? pendingPosition_ : transport.position(); }
     // The operator's next cue: later than the playhead, or at it unless that hold is already holding.
     const Marker* nextCue() const;
     bool canEdit(bool report = true);
@@ -43,8 +46,29 @@ public:
     bool needsMidi() const;
     // Offline sources and vanished videos used on the timeline.
     QStringList missingMedia() const;
+    // The missing files the last background check found, among those the show still uses; no disk access.
+    QStringList lastMissingMedia() const;
+    // The warning for what the last check during a show found missing; empty when nothing is.
+    QString missingMediaWarning() const;
+    // Starts a background check of the show's media unless one is running; wait finishes it (tests).
+    void checkMediaInBackground(bool wait = false);
+    // Whether an asset needs relinking: offline since opening, or its file is gone though playback
+    // needs it (a video, or audio read from its original rather than a prepared cache).
+    static bool needsRelink(const MediaAsset& asset);
     // Problems worth fixing before a performance; empty when the show is ready.
     QStringList preflight();
+    // Playback preferences for this machine, remembered across sessions.
+    void setLateAudio(LateAudio policy);
+    void setAudioPreparation(AudioPreparation preparation);
+    // File-backed audio sources of the show and its undo/redo history.
+    QStringList audioSources() const;
+    // Whether any file-backed audio in the show or its history is prepared other than as preparation says.
+    bool audioDiffersFrom(AudioPreparation preparation) const;
+    // Swaps reloaded audio, by source path, into the show and its history (after a preparation change)
+    // without an undo step. Rejected changes nothing (editing locked, or the show cannot use it);
+    // ArmFailed kept the new audio but could not re-arm playback (reported; Play retries).
+    enum class AudioSwap { Rejected, Applied, ArmFailed };
+    AudioSwap replaceAudio(const QMap<QString, std::shared_ptr<const AudioData>>& audio);
     QString midiDestination() const { return midiName_; }
     void setShowMode(bool enabled);
     QImage compose();
@@ -59,6 +83,7 @@ public:
     static QString untitledAutosavePath();
     void discardAutosave();
     bool routesValid() const;
+    bool armFailed() const { return armFailed_; }
     unsigned lateFrames = 0;
 signals:
     void changed();
@@ -70,6 +95,40 @@ private:
     unsigned deviceId_ = 0, channels_ = 2, buffer_ = 512;
     bool configured_ = false;
     QString midiName_;
+    QString midiProblem_; // The playback problem MIDI last reported; a reconnect clears only that.
+    // The last arm failed: nothing is armed, and Play arms at pendingPosition_ (updated by seeks).
+    // armProblem_ is the playback problem it reported; a later successful arm clears only that.
+    bool armFailed_ = false;
+    bool pausedLive_ = false; // Paused by the operator during playback, not stopped or sought since.
+    // Files the show needs that are offline, and those it needs present now (videos, streamed audio).
+    void mediaToCheck(QStringList& offline, QStringList& needed) const;
+    // Shared with the checking thread, which may outlive the controller.
+    struct MediaCheck { std::mutex mutex; QStringList missing; bool running = false; }; // Both under mutex.
+    std::shared_ptr<MediaCheck> mediaCheck_ = std::make_shared<MediaCheck>();
+    QStringList missingNow_; // What the last media check during a show found missing.
+    QString missingWarning_; // Its warning, kept with it.
+    QStringList lastMissingMedia(const QStringList& offline, const QStringList& needed) const;
+    // Reads the latest result and, unless one is running, starts the next check, under one lock.
+    QStringList lastMissingMediaAndCheck(const QStringList& offline, const QStringList& needed);
+    static void startMediaCheck(const std::shared_ptr<MediaCheck>& check, const QStringList& needed, bool wait);
+    std::set<std::string> recovering_; // Reopened after their file came back; their last frame stands in.
+    bool recoveringDrawn_ = false; // The last composed picture polled a recovering clip.
+    QSet<QString> missingSeen_; // Files seen missing since the open video readers started; kept through Stop All.
+    void promoteVideoWarning();
+    // Closes a video reader on a thread of its own: its worker may be blocked reading a share.
+    static void closeVideo(std::unique_ptr<VideoReader> reader);
+    bool wasLive_ = false; // A live show was running at the last tick.
+    std::map<std::string, QImage> clipFrames_; // Each video clip's last picture.
+    std::map<std::string, QString> videoProblems_; // The warning each failed video clip reported.
+    // Forgets what earlier checks found (another show, an edit, a stop) and any check still running.
+    void resetMediaState();
+    QString reportedProblem_; // The missing-media warning last shown, cleared once the files are back.
+    static QString mediaWarning(const QStringList& missing);
+    // Drops a clip's video reader; it closes on a thread of its own.
+    void retireVideo(const std::string& clip);
+    bool wasHeld_ = false; // Held since the last media check, without leaving the hold.
+    QString armProblem_;
+    Frame pendingPosition_ = 0;
     std::map<std::string, std::unique_ptr<VideoReader>> videos_;
     std::shared_ptr<const Show> armed_;
     std::thread midiThread_;
@@ -81,7 +140,8 @@ private:
     Frame lastComposed_ = -1;
     std::vector<Frame> lastClocks_;
     std::deque<Project> undo_, redo_;
-    void arm(Frame position);
+    bool arm(Frame position); // False when preparing playback failed; see armFailed_.
+    void armOrThrow(Frame position);
     void startMidiThread();
     void watchMidi();
     void stopMidiThread();

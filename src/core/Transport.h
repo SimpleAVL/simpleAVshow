@@ -13,6 +13,10 @@ inline const char* stateName(State state) noexcept {
     return state == State::Playing ? "playing" : state == State::Held ? "held" : state == State::Paused ? "paused" : state == State::Ended ? "ended" : "stopped";
 }
 enum class Action { Play, Pause, Seek, StopAll };
+// When a disk or decode read misses the callback: Freeze holds show time until every source is
+// ready, so tracks, cues and holds stay aligned. Gap keeps show time running and silences only
+// the late voices, so the show stays in step with outside clocks (a band, timecode, video).
+enum class LateAudio { Freeze, Gap };
 struct Command { Action action; Frame position = 0; };
 struct MidiEvent { int marker = -1; Frame time = 0; std::uint64_t epoch = 0; };
 
@@ -38,10 +42,21 @@ public:
     float peak() const noexcept { return publishedPeak_.load(); }
     bool clipped() const noexcept { return clipped_.load(); }
     bool eventOverflow() const noexcept { return overflow_.load(); }
+    // Safe at any time; applies from the next callback.
+    void setLateAudio(LateAudio policy) noexcept { lateAudio_.store(policy); }
+    LateAudio lateAudio() const noexcept { return lateAudio_.load(); }
+    // Health counters: callbacks in which Freeze waited for a late source, or Gap silenced one.
+    // A seek always reads its new place cold, so misses within seekGrace of one are not counted.
+    static constexpr Frame seekGrace = sampleRate / 4;
     unsigned bufferWaits() const noexcept { return bufferWaits_.load(); }
+    unsigned audioGaps() const noexcept { return audioGaps_.load(); }
     unsigned readRetries() const noexcept { return readRetries_.load(); }
     bool audioReadFailed() const noexcept { return audioReadFailed_.load(); }
     std::uint64_t epoch() const noexcept { return epoch_.load(std::memory_order_acquire); }
+    // False after a configure that failed partway: nothing plays until a configure succeeds.
+    bool armed() const noexcept { return armed_.load(); }
+    // Drops the show (the device MUST be stopped): silence until the next configure.
+    void disarm() noexcept;
 private:
     enum class VoiceState { Dormant, Running, Finished };
     // source is the async cursor; at is this sample's resolved frame and next follows the last mixed one.
@@ -49,7 +64,7 @@ private:
     // are recomputed only when pan changes.
     struct Voice {
         VoiceState state = VoiceState::Dormant; Frame source = 0, at = 0, next = 0; float left = 0, right = 0;
-        bool ready = false, audible = false; int attack = 0;
+        bool ready = false, audible = false, missed = false; int attack = 0;
         std::size_t volumeKey = 0, balanceKey = 0; double pan = 2, leftGain = 1, rightGain = 1, gain = 0;
     };
     // A cut voice keeps reading its source past the cut, fading from its last gains to silence.
@@ -64,10 +79,12 @@ private:
     std::vector<std::unique_ptr<AudioBuffer>> buffers_;
     std::thread audioWorker_;
     std::atomic<bool> audioStop_{true}, audioReadFailed_{false};
-    std::atomic<unsigned> bufferWaits_{0}, readRetries_{0};
+    std::atomic<unsigned> bufferWaits_{0}, readRetries_{0}, audioGaps_{0};
+    std::atomic<LateAudio> lateAudio_{LateAudio::Freeze};
+    std::atomic<bool> armed_{false};
     Queue<Command, 128> commands_;
     DynamicQueue<MidiEvent> midi_;
-    Frame position_ = 0;
+    Frame position_ = 0, sinceSeek_ = seekGrace; // Device frames rendered since the last seek, up to seekGrace.
     State state_ = State::Stopped;
     int heldMarker_ = -1;
     std::atomic<Frame> publishedPosition_{0};
@@ -80,6 +97,7 @@ private:
     void dispatch(int marker) noexcept;
     void publish(float peak) noexcept;
     void stopAudioWorker();
+    void load(std::shared_ptr<const Show> show, Frame position);
     void locate(Frame position) noexcept;
     Frame entry(std::size_t clip, Frame position) const noexcept;
     void prime() noexcept;

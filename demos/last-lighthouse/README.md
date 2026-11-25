@@ -94,6 +94,23 @@ Use `--scenario routing`, `--scenario async`, `--scenario show`, or `--scenario 
 
 Every scenario writes a native-runner summary, JSONL transport telemetry, MIDI reception log, WAV, screenshots and a fail-closed `verification.json`. The show additionally writes a native `.savpack`, save/reopen round trip, OBS recording metadata/probe and relay logs. The suite's `validation-summary.json` succeeds only when the selected runner and analyses pass.
 
+For a sample-exact comparison of Prepared and Stream, run the audio-only scenarios with the same runner. Operator actions occur at fixed frame counts and the WAVs keep the mixer's 32-bit float samples. The runner exits unsuccessfully on any buffer wait or read error. The long-hold run takes about five minutes per mode.
+
+```sh
+export QT_QPA_PLATFORM=offscreen
+demo=demos/last-lighthouse
+out=artifacts/last-lighthouse/audio-equivalence
+for spec in routing:routing-check async:async-check show:last-lighthouse long-hold:last-lighthouse; do
+  scenario=${spec%:*}
+  project=${spec#*:}
+  for mode in prepared stream; do
+    build/lighthouse_validation --software-audio --audio-sources "$mode" \
+      --scenario "$scenario" --project "$demo/$project.savshow" --output "$out/$mode/$scenario" || exit 1
+  done
+  cmp "$out/prepared/$scenario/software-mix-16ch.wav" "$out/stream/$scenario/software-mix-16ch.wav" || exit 1
+done
+```
+
 For the corresponding Windows ASIO, loopMIDI and OBS workflow, see
 [Windows device-loopback rehearsal](WINDOWS-VALIDATION.md).
 

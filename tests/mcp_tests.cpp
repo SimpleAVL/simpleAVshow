@@ -147,6 +147,11 @@ private slots:
         QVERIFY(c.project.assets.isEmpty()); const auto r = revision(server);
         QVERIFY(c.edit([](Project& p) { p.title = "More operator work"; }));
         QVERIFY(call(server, "commit_import", {{"job_id", job}, {"expected_revision", r}})["isError"].toBool());
+        // Staged media belongs to the Audio sources choice it was prepared under.
+        const auto preparation = audioPreparation();
+        setAudioPreparation(preparation == AudioPreparation::Stream ? AudioPreparation::Prepared : AudioPreparation::Stream);
+        QVERIFY(call(server, "commit_import", {{"job_id", job}, {"expected_revision", revision(server)}})["isError"].toBool());
+        setAudioPreparation(preparation);
         QVERIFY(!call(server, "commit_import", {{"job_id", job}, {"expected_revision", revision(server)}})["isError"].toBool());
         QCOMPARE(c.project.assets.size(), 1); QCOMPARE(c.project.title, QString("More operator work"));
         const auto id = c.project.assets.first().id;

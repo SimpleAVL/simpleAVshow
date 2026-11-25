@@ -19,6 +19,7 @@
 #include <QLabel>
 #include <QAction>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QComboBox>
 #include <QSpinBox>
 #include <QDoubleSpinBox>
@@ -36,8 +37,15 @@
 #include <QStandardPaths>
 #include <QUuid>
 #include <QtEndian>
+#include <bit>
+#include <chrono>
 #include <filesystem>
 #include <future>
+#include <functional>
+#ifndef Q_OS_WIN
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 using namespace sav;
 namespace {
@@ -134,6 +142,42 @@ struct PaintSpy : QObject {
 // A long, empty show: the playhead can travel without holds or clips.
 Project longShow() { auto p = newProject(); p.show.clips.clear(); p.show.markers.clear(); p.show.duration = frames(600); return p; }
 // Imports a resampled source with a unique last frame and returns its new cache key.
+#ifndef Q_OS_WIN
+// How many of this process's descriptors are open on files under prefix (a canonical path: a file, or a
+// folder ending in '/'). Counting every descriptor would also count ones Qt or the system open lazily (an event loop,
+// font or audio services), which differ between machines and runs.
+int descriptorsOn(const QString& prefix) {
+    if (prefix.isEmpty()) return -1; // Would match everything.
+    int count = 0;
+    for (const auto& name : QDir("/dev/fd").entryList(QDir::AllEntries | QDir::System | QDir::NoDotAndDotDot)) {
+        bool ok = false; const int fd = name.toInt(&ok); if (!ok) continue;
+#ifdef Q_OS_MACOS
+        char target[PATH_MAX] = {};
+        if (fcntl(fd, F_GETPATH, target) == -1) continue;
+        const QString path = QFile::decodeName(target);
+#else
+        const QString path = QFile::symLinkTarget(QString("/proc/self/fd/%1").arg(fd));
+#endif
+        if (path.startsWith(prefix)) ++count;
+    }
+    return count;
+}
+#endif
+// Runs action once the named dialog is showing. Setup code can run the event loop before the dialog's
+// exec (CoreMIDI and some audio drivers do), so a zero-delay timer may fire before it is open. Gives up
+// after timeout by closing whatever modal window is open, so a test fails instead of hanging.
+void whenShown(QWidget& parent, const char* name, std::function<void(QDialog*)> action, int timeout = 10000) {
+    auto* timer = new QTimer(&parent); auto started = std::make_shared<QElapsedTimer>(); started->start();
+    QObject::connect(timer, &QTimer::timeout, &parent, [timer, started, name, action, timeout, &parent] {
+        auto* dialog = parent.findChild<QDialog*>(name);
+        const bool shown = dialog && dialog->isVisible();
+        if (!shown && !started->hasExpired(timeout)) return;
+        timer->stop(); timer->deleteLater();
+        if (shown) action(dialog);
+        else if (auto* modal = QApplication::activeModalWidget()) modal->close();
+    });
+    timer->start(5);
+}
 QString importCacheKey(const QString& path, Frame count, std::shared_ptr<const AudioData>* retained = nullptr) {
     auto bytes = waveBytes(16, 1, 2, 44100, false, count); bytes.replace(bytes.size() - 4, 4, QUuid::createUuid().toRfc4122().first(4));
     writeBytes(path, bytes);
@@ -189,7 +233,8 @@ private slots:
     void cleanupTestCase() {
         QVERIFY(QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)).removeRecursively());
     }
-    void init() { QSettings().clear(); }
+    // Most media tests cover the prepared cache; streaming tests opt in.
+    void init() { QSettings().clear(); QSettings().setValue("audio/sources", "prepared"); setAudioPreparation(AudioPreparation::Prepared); }
     void audioSelectionRestoresByNameWithoutFallback() {
         const std::vector<DeviceDescription> devices = {{17, "Show interface", 8, false}, {42, "Speakers", 2, true}};
         auto selected = playbackDevice(devices, {}); QVERIFY(selected); QCOMPARE(selected->id, 42u);
@@ -503,6 +548,13 @@ private slots:
         c.setShowMode(true); c.toggle(); QCOMPARE(c.transport.state(), State::Stopped);
         QVERIFY(c.status.contains("missing")); QVERIFY(c.status.contains("SimpleAVShow absent MIDI test destination"));
         c.setShowMode(false); QVERIFY(c.configureMidi(-1)); QVERIFY(QSettings().value("midi/port").toString().isEmpty()); QVERIFY(c.playbackProblem.isEmpty());
+        // Configuring MIDI clears only the problem MIDI reported, even when another one mentions "MIDI".
+        Controller other; auto missing = newProject();
+        MediaAsset video; video.id = "cue"; video.name = "Cue"; video.video = true; video.duration = 1; video.path = "/MIDI/cue.mov";
+        missing.assets.insert(video.id, video); missing.show.clips.clear(); missing.show.markers.clear();
+        Clip clip; clip.id = "v"; clip.assetId = "cue"; clip.track = 0; clip.duration = frames(1); missing.show.clips.push_back(clip);
+        other.replace(missing); other.toggle(); QVERIFY(other.playbackProblem.contains("/MIDI/cue.mov"));
+        QVERIFY(other.configureMidi(-1)); QVERIFY(other.playbackProblem.contains("/MIDI/cue.mov"));
     }
     void midiTestingRespectsPlaybackAndShowLocks() {
         Controller c; c.setShowMode(true); QVERIFY(!c.testMidi({0x90, 60, 100}));
@@ -569,8 +621,7 @@ private slots:
         QSettings().setValue("audio/channels", 128);
         QSettings().setValue("midi/port", "SimpleAVShow absent MIDI test destination");
         MainWindow window; window.show(); bool audioMissing = false, midiMissing = false;
-        QTimer::singleShot(0, &window, [&] {
-            auto* dialog = window.findChild<QDialog*>("outputSettingsDialog"); if (!dialog) return;
+        whenShown(window, "outputSettingsDialog", [&](QDialog* dialog) {
             auto* audio = dialog->findChild<QComboBox*>("audioOutputDevice");
             auto* midi = dialog->findChild<QComboBox*>("midiOutputDevice");
             auto* apply = dialog->findChild<QPushButton*>("connectAudioOutput");
@@ -581,6 +632,30 @@ private slots:
         });
         window.findChild<QPushButton*>("outputSettingsButton")->click();
         QVERIFY(audioMissing); QVERIFY(midiMissing);
+    }
+    void playbackSettingsInOutputs() {
+        QSettings().setValue("audio/late", "gap");
+        QTemporaryDir dir; QDir caches(detail::audioCacheDirectory());
+        std::shared_ptr<const AudioData> held;
+        const auto unused = importCacheKey(dir.filePath("unused.wav"), 4410), inUse = importCacheKey(dir.filePath("held.wav"), 4420, &held);
+        MainWindow window; window.show(); bool shown = false, cleared = false;
+        whenShown(window, "outputSettingsDialog", [&](QDialog* dialog) {
+            auto* sources = dialog->findChild<QComboBox*>("audioSourcePreparation");
+            auto* late = dialog->findChild<QComboBox*>("lateAudioPolicy");
+            shown = sources && late && sources->currentData().toInt() == static_cast<int>(AudioPreparation::Prepared) && sources->toolTip().contains("Streaming") &&
+                late->currentData().toInt() == static_cast<int>(LateAudio::Gap);
+            if (late) { late->setCurrentIndex(late->findData(static_cast<int>(LateAudio::Freeze))); emit late->activated(late->currentIndex()); }
+            // Clearing keeps caches in use and reports what it freed.
+            if (auto* clear = dialog->findChild<QPushButton*>("clearAudioCache")) {
+                clear->click();
+                cleared = !QFileInfo::exists(caches.filePath(unused + ".pcm")) && QFileInfo::exists(caches.filePath(inUse + ".pcm")) &&
+                    clear->text().startsWith("Clear audio cache · ");
+            }
+            dialog->reject();
+        });
+        window.findChild<QPushButton*>("outputSettingsButton")->click();
+        QVERIFY(shown); QVERIFY(cleared); QCOMPARE(QSettings().value("audio/late").toString(), QString("freeze"));
+        QVERIFY(std::isfinite(sampleAt(*held, 100)));
     }
     void demoSaveReloadAndDecodedAudio() {
         QTemporaryDir dir; QVERIFY(dir.isValid());
@@ -845,11 +920,14 @@ private slots:
         QTimer::singleShot(0, &window, [&] {
             auto* dialog = qobject_cast<QFileDialog*>(QApplication::activeModalWidget());
             if (!dialog) return;
-            selected = true; dialog->selectFile(dir.filePath("menu-export")); QMetaObject::invokeMethod(dialog, "accept", Qt::QueuedConnection);
+            // Some Qt versions apply the dialog's own initial name after selectFile; the name field is what accept reads.
+            selected = true; dialog->setDirectory(dir.path()); dialog->selectFile(dir.filePath("menu-export"));
+            if (auto* name = dialog->findChild<QLineEdit*>("fileNameEdit")) name->setText("menu-export");
+            QMetaObject::invokeMethod(dialog, "accept", Qt::QueuedConnection);
         });
         window.findChild<QAction*>("exportPackageAction")->trigger();
         QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, nativeDisabled);
-        QVERIFY(selected); QVERIFY(QFileInfo::exists(package)); QVERIFY(!c.busy); QVERIFY(c.dirty); QVERIFY(c.path.isEmpty());
+        QVERIFY(selected); QVERIFY2(QFileInfo::exists(package), qPrintable(c.status + " / " + QDir(dir.path()).entryList().join(","))); QVERIFY(!c.busy); QVERIFY(c.dirty); QVERIFY(c.path.isEmpty());
         QCOMPARE(c.status, QString("Exported menu-export.savpack"));
         for (const auto& asset : c.project.assets) QVERIFY(asset.path.isEmpty());
         const auto loaded = readProject(package); QCOMPARE(loaded.assets.size(), c.project.assets.size());
@@ -1010,9 +1088,7 @@ private slots:
         QCOMPARE(controller.transport.asyncVoices(), async ? 1 : 0);
 
         bool opened = false, locked = false, playbackPreserved = false, unlockedAfterStop = false;
-        QTimer::singleShot(0, &window, [&] {
-            auto* dialog = window.findChild<QDialog*>("outputSettingsDialog");
-            if (!dialog) return;
+        whenShown(window, "outputSettingsDialog", [&](QDialog* dialog) {
             opened = dialog->isVisible();
             auto* audio = dialog->findChild<QPushButton*>("connectAudioOutput");
             auto* midi = dialog->findChild<QPushButton*>("connectMidiOutput");
@@ -1051,8 +1127,7 @@ private slots:
         auto* outputs = window.findChild<QPushButton*>("outputSettingsButton"); QVERIFY(outputs);
         for (int attempt = 0; attempt < 2; ++attempt) {
             bool selected = false;
-            QTimer::singleShot(0, &window, [&] {
-                auto* dialog = window.findChild<QDialog*>("outputSettingsDialog"); if (!dialog) return;
+            whenShown(window, "outputSettingsDialog", [&](QDialog* dialog) {
                 auto* displays = dialog->findChild<QComboBox*>("audienceOutputDisplay");
                 auto* open = dialog->findChild<QPushButton*>("openProgramDisplay");
                 if (displays && open) {
@@ -1376,12 +1451,16 @@ private slots:
         auto stale = loadMedia(source); QCOMPARE(caches.entryList({"*.pcm"}, QDir::Files).size(), count);
         QCOMPARE(sampleAt(*stale.audio, 2000), value); stale.audio.reset();
         // Any timestamp (or size) change hashes the whole file again.
-        setModified(source, original.addSecs(1));
+        setModified(source, original.addSecs(4)); // More than FAT's 2 s step.
         auto fresh = loadMedia(source); QCOMPARE(caches.entryList({"*.pcm"}, QDir::Files).size(), count + 1);
         QVERIFY(sampleAt(*fresh.audio, 2000) != value);
         // Files modified within the timestamp granularity are never indexed, so they are always rehashed.
-        const auto recent = dir.filePath("recent.wav"); importCacheKey(recent, 4420);
+        // Ahead of the clock, so the file stays recent however long the test takes (FAT: 2 s steps).
+        const auto recent = dir.filePath("recent.wav");
+        auto recentBytes = waveBytes(16, 1, 2, 44100, false, 4420); recentBytes.replace(recentBytes.size() - 4, 4, QUuid::createUuid().toRfc4122().first(4));
+        writeBytes(recent, recentBytes); setModified(recent, QDateTime::currentDateTime().addSecs(60));
         const auto recentTime = QFileInfo(recent).lastModified();
+        QVERIFY(loadMedia(recent).audio); QCOMPARE(caches.entryList({"*.pcm"}, QDir::Files).size(), count + 2);
         QFile file(recent); QVERIFY(file.open(QIODevice::ReadWrite));
         QVERIFY(file.seek(file.size() - 2)); QCOMPARE(file.write("\x01\x02", 2), 2); file.close(); setModified(recent, recentTime);
         QVERIFY(loadMedia(recent).audio); QCOMPARE(caches.entryList({"*.pcm"}, QDir::Files).size(), count + 3);
@@ -1402,6 +1481,674 @@ private slots:
         QCOMPARE(caches.entryList({"*.wave"}, QDir::Files).size(), before);
         const auto fresh = loadMedia(source); QCOMPARE(sampleAt(*fresh.audio, fresh.audio->length() - 1), .5f);
         QCOMPARE(caches.entryList({"*.wave"}, QDir::Files).size(), before + 1);
+    }
+    void streamedAudioMatchesPreparedCache_data() {
+        QTest::addColumn<QStringList>("encode");
+        // Exact rows must match bit for bit after any seek. Some decoders depend on everything decoded before:
+        // AC-3 dithers quiet bands from a random generator (like AAC noise substitution), MP2 and IMA ADPCM
+        // carry predictor state across packets. Their rows must land on the same frames, within a small error.
+        QTest::addColumn<bool>("exact");
+        QTest::newRow("flac-44k-stereo") << QStringList{"-ar", "44100", "-c:a", "flac", "x.flac"} << true;
+        QTest::newRow("wav-44k-resampled") << QStringList{"-ar", "44100", "-c:a", "pcm_s16le", "x.wav"} << true;
+        QTest::newRow("mp3-44k-mono") << QStringList{"-ar", "44100", "-ac", "1", "-c:a", "libmp3lame", "-b:a", "192k", "x.mp3"} << true;
+        // AAC noise substitution draws from a generator whose state depends on where decoding began, so
+        // noise bands differ (inaudibly) after any seek; without it, placement must be exact.
+        QTest::newRow("aac-48k-m4a") << QStringList{"-ar", "48000", "-c:a", "aac", "-aac_pns", "0", "-b:a", "192k", "x.m4a"} << true;
+        QTest::newRow("opus-ogg") << QStringList{"-c:a", "libopus", "-b:a", "128k", "x.opus"} << true;
+        QTest::newRow("opus-webm-ms") << QStringList{"-c:a", "libopus", "-b:a", "128k", "x.webm"} << true;
+        QTest::newRow("aac-mka-44k-ms") << QStringList{"-ar", "44100", "-c:a", "aac", "-aac_pns", "0", "x.mka"} << true;
+        QTest::newRow("aac-adts-32k") << QStringList{"-ar", "32000", "-c:a", "aac", "-aac_pns", "0", "x.aac"} << true;
+        QTest::newRow("mp3-22k-stereo") << QStringList{"-ar", "22050", "-c:a", "libmp3lame", "x.mp3"} << true;
+        QTest::newRow("wav-32k-short-mono") << QStringList{"-t", "0.03", "-ar", "32000", "-ac", "1", "-c:a", "pcm_s16le", "x.wav"} << true;
+        QTest::newRow("wav-22k-stereo") << QStringList{"-ar", "22050", "-c:a", "pcm_s16le", "x.wav"} << true;
+        QTest::newRow("vorbis-32k") << QStringList{"-ar", "32000", "-c:a", "libvorbis", "x.ogg"} << true;
+        QTest::newRow("ac3-48k") << QStringList{"-c:a", "ac3", "x.ac3"} << false;
+        QTest::newRow("eac3-48k") << QStringList{"-c:a", "eac3", "x.eac3"} << false;
+        QTest::newRow("mp2-44k") << QStringList{"-ar", "44100", "-c:a", "mp2", "x.mp2"} << false;
+        // G.722 in WAV: after a byte seek FFmpeg computes timestamps a linear decode gave other packets.
+        QTest::newRow("g722-wav") << QStringList{"-ar", "16000", "-ac", "1", "-c:a", "g722", "x.wav"} << false;
+        QTest::newRow("ima-adpcm-mov") << QStringList{"-ar", "44100", "-c:a", "adpcm_ima_qt", "x.mov"} << false;
+        QTest::newRow("mp3-in-mpeg-ps") << QStringList{"-ar", "44100", "-c:a", "libmp3lame", "-f", "vob", "x.mpg"} << true;
+        QTest::newRow("vorbis-native-44k") << QStringList{"-ar", "44100", "-c:a", "vorbis", "-strict", "experimental", "x.ogg"} << true;
+    }
+    void streamedAudioMatchesPreparedCache() {
+        QFETCH(QStringList, encode); QFETCH(bool, exact);
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
+        QTemporaryDir dir; const QString file = dir.filePath(encode.takeLast()); QProcess process;
+        // A sweep with noise exercises every band of the codec and resampler.
+        process.start(ffmpeg, QStringList{"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+            "aevalsrc=0.4*sin(2*PI*(100+800*t)*t)+0.1*random(0)|0.3*sin(2*PI*660*t)+0.1*random(1):s=48000:d=12"} + encode + QStringList{file});
+        QVERIFY(process.waitForFinished(30000));
+        if (process.exitCode() != 0) QSKIP(qPrintable("encoder unavailable: " + QString::fromUtf8(process.readAllStandardError())));
+        const auto prepared = loadMedia(file).audio; QVERIFY(prepared); QVERIFY(!prepared->storage->decodes());
+        setAudioPreparation(AudioPreparation::Stream);
+        QDir caches(detail::audioCacheDirectory()); const auto pcm = caches.entryList({"*.pcm"}, QDir::Files);
+        const auto streamed = loadMedia(file).audio; QVERIFY(streamed); QVERIFY(streamed->storage->decodes());
+        QCOMPARE(caches.entryList({"*.pcm"}, QDir::Files), pcm); // Streaming writes no PCM.
+        QCOMPARE(streamed->length(), prepared->length()); QCOMPARE(streamed->mono, prepared->mono); QCOMPARE(streamed->peaks, prepared->peaks);
+        // Out of order: sequential continuation, forward skips, seeks back, and more places than decoders.
+        const Frame length = streamed->length();
+        const std::vector<Frame> starts{0, 1000, 1512, 8191, frames(3) + 7, frames(7) + 12345, 400, frames(9), frames(2), frames(5) + 1, frames(11), length - 600, 30, length - 1};
+        for (const Frame start : starts) {
+            if (start < 0 || start >= length) continue;
+            const auto count = static_cast<std::size_t>(std::min<Frame>(512, length - start));
+            std::vector<float> a(count * 2), b(count * 2);
+            prepared->storage->read(start, a.data(), count); streamed->storage->read(start, b.data(), count);
+            if (!exact) {
+                // Placement: no shift fits better than none; level: differences stay small.
+                const auto error = [&](int lag) { double e = 0; for (std::size_t i = 64; i + 64 < count; ++i) e += std::abs(a[i * 2] - b[(i + lag) * 2]); return e; };
+                for (int lag = -48; lag <= 48 && count > 256; ++lag) if (lag) QVERIFY2(error(lag) > error(0), qPrintable(QString("read at %1 fits shifted by %2").arg(start).arg(lag)));
+                for (std::size_t i = 0; i < a.size(); ++i) QVERIFY2(std::abs(a[i] - b[i]) < .1f, qPrintable(QString("read at %1 differs by %2").arg(start).arg(a[i] - b[i])));
+                continue;
+            }
+            const auto diff = std::mismatch(a.begin(), a.end(), b.begin(), [](float x, float y) {
+                return std::bit_cast<quint32>(x) == std::bit_cast<quint32>(y);
+            });
+            if (diff.first != a.end()) {
+                const auto sample = diff.first - a.begin();
+                QFAIL(qPrintable(QString("read at %1: first mismatch at frame %2 channel %3 (%4 vs %5)")
+                    .arg(start).arg(start + sample / 2).arg(sample % 2).arg(*diff.first, 0, 'g', 9).arg(*diff.second, 0, 'g', 9)));
+            }
+        }
+        // Reopening reuses the waveform summary.
+        QCOMPARE(loadMedia(file).audio->peaks, streamed->peaks);
+        QCOMPARE(caches.entryList({"*.stream"}, QDir::Files).isEmpty(), false);
+    }
+    void streamedAudioPlaysAndDetectsChanges() {
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; const auto path = dir.filePath("resample.wav");
+        writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 * 3));
+        const auto asset = loadMedia(path); QVERIFY(asset.audio->storage->decodes()); QCOMPARE(asset.audio->length(), frames(3));
+        auto show = std::make_shared<Show>(); show->duration = asset.audio->length();
+        show->tracks.push_back({"audio", "Audio", false, false, false, 1, 0, 0, 1});
+        Clip clip; clip.audio = asset.audio; clip.duration = show->duration; show->clips.push_back(clip);
+        Transport transport; transport.configure(show); QVERIFY(!transport.audioReadFailed()); transport.command({Action::Play});
+        std::vector<float> out(4000); transport.render(out.data(), 2000, 2);
+        QCOMPARE(transport.bufferWaits(), 0u);
+        for (Frame i = 0; i < 2000; ++i) QCOMPARE(out[i * 2], std::clamp(sampleAt(*asset.audio, i), -1.f, 1.f));
+        // A rewritten source is a change, a missing one a retryable read failure.
+        const auto time = QFileInfo(path).lastModified();
+        writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 * 2)); setModified(path, time.addSecs(5));
+        float sample[2]; QVERIFY_THROWS_EXCEPTION(AudioSourceChanged, asset.audio->storage->read(10, sample, 1));
+        QVERIFY(QFile::remove(path));
+        try { asset.audio->storage->read(10, sample, 1); QFAIL("missing source read"); }
+        catch (const AudioSourceChanged&) { QFAIL("a missing source can come back"); } catch (const std::runtime_error&) {}
+    }
+    void streamSummaryRejectsStaleIndexedHash() {
+        // An in-place rewrite that keeps size, time and identity reuses the indexed hash of the old
+        // content; the summary would then be filed under content other copies share.
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; const auto path = dir.filePath("rewritten.wav");
+        auto bytes = waveBytes(16, 1, 2, 44100, false, 44100); bytes.replace(bytes.size() - 4, 4, QUuid::createUuid().toRfc4122().first(4));
+        // Whole even seconds: FAT keeps modification times in 2 s steps.
+        auto time = QDateTime::currentDateTime().addSecs(-3600); time = time.addMSecs(-(time.toMSecsSinceEpoch() % 2000));
+        writeBytes(path, bytes); setModified(path, time);
+        QVERIFY(loadMedia(path).audio);
+        detail::trimAudioCache(0); // The summary goes; the source index stays.
+        {
+            QFile file(path); QVERIFY(file.open(QIODevice::ReadWrite)); QVERIFY(file.seek(bytes.size() - 4000));
+            QCOMPARE(file.write(QByteArray(4000, '\x40')), 4000);
+        }
+        setModified(path, time); // After closing: exFAT updates the time when a written file closes.
+        QCOMPARE(QFileInfo(path).size(), bytes.size()); QCOMPARE(QFileInfo(path).lastModified(), time);
+        QVERIFY_THROWS_EXCEPTION(std::runtime_error, loadMedia(path));
+        QVERIFY(QDir(detail::audioCacheDirectory()).entryList({"*.stream"}, QDir::Files).isEmpty());
+        QVERIFY(loadMedia(path).audio); // The stale index entry is gone, so the next import hashes again.
+    }
+    void streamSummaryRechecksRecentSources() {
+        // A file modified just before import can be rewritten during it within one timestamp step (2 s on
+        // FAT) at the same size; its summary must not be filed under the content hashed at the start.
+        QTemporaryDir dir; const auto path = dir.filePath("recent.wav");
+        auto bytes = waveBytes(16, 1, 2, 44100, false, 44100); bytes.replace(bytes.size() - 4, 4, QUuid::createUuid().toRfc4122().first(4));
+        // Ahead of the clock, so the source stays "recent" however long the test takes (FAT: 2 s steps).
+        writeBytes(path, bytes); setModified(path, QDateTime::currentDateTime().addSecs(60)); const auto time = QFileInfo(path).lastModified();
+        const detail::StreamSummary summary(path, "wav");
+        {
+            QFile file(path); QVERIFY(file.open(QIODevice::ReadWrite)); QVERIFY(file.seek(bytes.size() - 4000));
+            QCOMPARE(file.write(QByteArray(4000, '\x40')), 4000);
+        }
+        setModified(path, time); QCOMPARE(QFileInfo(path).lastModified(), time);
+        QVERIFY_THROWS_EXCEPTION(std::runtime_error, summary.save(detail::AudioSummary{44100, false, {}, {}}));
+    }
+    void newSummaryIsCheckedAgainstTheFile() {
+        // A rewrite during import that keeps an older timestamp (a share whose clock differs) must not
+        // file the edited file's summary under the original content.
+        QTemporaryDir dir; const auto path = dir.filePath("old.wav");
+        auto bytes = waveBytes(16, 1, 2, 44100, false, 44100); bytes.replace(bytes.size() - 4, 4, QUuid::createUuid().toRfc4122().first(4));
+        writeBytes(path, bytes); setModified(path, QDateTime::currentDateTime().addSecs(-3600)); const auto time = QFileInfo(path).lastModified();
+        const detail::StreamSummary summary(path, "wav");
+        {
+            QFile file(path); QVERIFY(file.open(QIODevice::ReadWrite)); QVERIFY(file.seek(bytes.size() - 4000));
+            QCOMPARE(file.write(QByteArray(4000, '\x40')), 4000);
+        }
+        setModified(path, time); QCOMPARE(QFileInfo(path).lastModified(), time);
+        QVERIFY_THROWS_EXCEPTION(std::runtime_error, summary.save(detail::AudioSummary{44100, false, {}, {}}));
+    }
+    void reusedSummaryRechecksRecentSources() {
+        // The same rewrite after hashing must not be accepted with the old summary when one exists already.
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; const auto path = dir.filePath("recent-reuse.wav");
+        auto bytes = waveBytes(16, 1, 2, 44100, false, 44100); bytes.replace(bytes.size() - 4, 4, QUuid::createUuid().toRfc4122().first(4));
+        writeBytes(path, bytes); setModified(path, QDateTime::currentDateTime().addSecs(60)); const auto time = QFileInfo(path).lastModified();
+        QVERIFY(loadMedia(path).audio); // Saves the summary.
+        const detail::StreamSummary summary(path, "wav");
+        QVERIFY(summary.reuse(false));
+        {
+            QFile file(path); QVERIFY(file.open(QIODevice::ReadWrite)); QVERIFY(file.seek(bytes.size() - 4000));
+            QCOMPARE(file.write(QByteArray(4000, '\x40')), 4000);
+        }
+        setModified(path, time); QCOMPARE(QFileInfo(path).lastModified(), time);
+        QVERIFY_THROWS_EXCEPTION(std::runtime_error, summary.verify());
+    }
+    void streamedAudioCallbackHeadroom() {
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
+        QTemporaryDir dir; QVERIFY(dir.isValid()); setAudioPreparation(AudioPreparation::Stream);
+        std::vector<std::shared_ptr<const AudioData>> sources;
+        for (int i = 0; i < 8; ++i) {
+            const QString path = dir.filePath(QString::number(i) + (i % 2 ? ".m4a" : ".mp3"));
+            const QStringList codec = i % 2 ? QStringList{"-c:a", "aac"} : QStringList{"-c:a", "libmp3lame"};
+            QProcess ff;
+            ff.start(ffmpeg, QStringList{"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                QString("aevalsrc=0.2*sin(2*PI*%1*t)|0.2*sin(2*PI*%2*t):s=48000:d=18").arg(211 + i*37).arg(547 + i*19),
+                "-ar", "44100"} + codec + QStringList{"-b:a", "160k", path});
+            QVERIFY(ff.waitForFinished(30000));
+            const auto errors = ff.readAllStandardError();
+            if (errors.contains("Unknown encoder")) QSKIP(qPrintable(QString::fromUtf8(errors)));
+            QVERIFY2(ff.exitStatus() == QProcess::NormalExit && ff.exitCode() == 0, errors.constData());
+            auto audio = loadMedia(path).audio; QVERIFY(audio && audio->storage->decodes()); sources.push_back(std::move(audio));
+        }
+        using Clock = std::chrono::steady_clock;
+        constexpr unsigned block = 512;
+        constexpr auto period = std::chrono::nanoseconds(block * 1000000000LL / sampleRate);
+        const auto run = [&](unsigned clips, unsigned seekEvery, bool cold) {
+            auto show = std::make_shared<Show>(); show->duration = frames(40);
+            show->tracks.push_back({"audio", "Audio"});
+            for (unsigned i = 0; i < clips; ++i) {
+                Clip clip; clip.id = std::to_string(i); clip.audio = sources[i % sources.size()];
+                const Frame offsets[] = {0, frames(3.7), frames(8.3), clip.audio->length() - (2*8192 + 1500),
+                    frames(11.1), frames(14.4), frames(6.4), frames(1.5)};
+                clip.offset = offsets[(i / sources.size()) % std::size(offsets)];
+                clip.loop = true; clip.duration = show->duration; clip.gain = 1. / clips;
+                show->clips.push_back(std::move(clip));
+            }
+            Transport transport; transport.configure(show);
+            if (!transport.command({Action::Play})) throw std::runtime_error("Cannot queue Play");
+            std::array<float, block*2> out;
+            auto next = Clock::now();
+            unsigned seeks = 0, deadlineMisses = 0, stalls = 0;
+            bool audible = false;
+            constexpr unsigned callbacks = 5 * sampleRate / block;
+            for (unsigned i = 0; i < callbacks; ++i) {
+                std::this_thread::sleep_until(next); next += period;
+                Frame expected = transport.position() + block;
+                if (seekEvery && i && i % seekEvery == 0) {
+                    const Frame destinations[] = {frames(12.2), frames(26.5), frames(6.4), frames(18.9)};
+                    const Frame destination = cold ? destinations[seeks % std::size(destinations)] : transport.position() + 97;
+                    if (!transport.command({Action::Seek, destination})) throw std::runtime_error("Cannot queue Seek");
+                    ++seeks; expected = destination + block;
+                }
+                transport.render(out.data(), block, 2);
+                // Freeze stops the clock on any miss, so position shows stalls the seek grace hides from the counters.
+                if (transport.position() != expected) ++stalls;
+                audible |= transport.peak() > 0.f;
+                if (Clock::now() > next) ++deadlineMisses;
+            }
+            if (transport.audioReadFailed() || transport.readRetries() || transport.clipped() || !audible)
+                throw std::runtime_error("Unhealthy stress fixture playback");
+            return std::array{transport.bufferWaits(), seeks, deadlineMisses, stalls};
+        };
+        const auto baseline = run(32, 12, false);
+        QCOMPARE(baseline[0], 0u); QCOMPARE(baseline[3], 0u);
+        // Opt-in measurements. Cold jumps deliberately leave the four-block window.
+        if (qEnvironmentVariableIsSet("SAV_MEASURE_STREAM_HEADROOM")) {
+            const auto measure = [&](unsigned clips, unsigned interval, bool cold) {
+                const auto result = run(clips, interval, cold);
+                qInfo("stream load: %u clips, %s seeks, %u callbacks/seek, %u seeks, %u waits, %u stalled callbacks, %u callback deadlines missed",
+                    clips, cold ? "cold" : "warm", interval, result[1], result[0], result[3], result[2]);
+            };
+            for (unsigned clips : {32, 64, 128, 256, 384, 512, 768, 1024}) measure(clips, 0, false);
+            for (unsigned interval : {48, 12, 3, 1}) measure(32, interval, false);
+            for (unsigned interval : {192, 48, 12, 3}) measure(32, interval, true);
+            measure(1, 192, true);
+        }
+    }
+    void streamedAudioGapRecoversAtShowTime() {
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
+        QTemporaryDir dir; QVERIFY(dir.isValid()); const QString path = dir.filePath("gap.mp3");
+        QProcess ff; ff.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+            "aevalsrc=0.3*sin(2*PI*233*t)|0.4*sin(2*PI*547*t):s=44100:d=8", "-c:a", "libmp3lame", path});
+        QVERIFY(ff.waitForFinished(30000));
+        const auto errors = ff.readAllStandardError();
+        if (errors.contains("Unknown encoder")) QSKIP(qPrintable(QString::fromUtf8(errors)));
+        QVERIFY2(ff.exitStatus() == QProcess::NormalExit && ff.exitCode() == 0, errors.constData());
+        const auto reference = loadMedia(path).audio; QVERIFY(reference);
+        setAudioPreparation(AudioPreparation::Stream);
+        const auto streamed = loadMedia(path).audio; QVERIFY(streamed && streamed->storage->decodes());
+        auto audio = std::make_shared<AudioData>(*streamed);
+        struct InterruptedStorage final : AudioStorage {
+            std::shared_ptr<const AudioStorage> source;
+            std::atomic<bool> interrupted{false};
+            Frame length() const noexcept override { return source->length(); }
+            bool decodes() const noexcept override { return true; }
+            void read(Frame first, float* out, std::size_t count) const override {
+                if (interrupted.load()) throw std::runtime_error("Temporary streamed read interruption");
+                source->read(first, out, count);
+            }
+        };
+        auto storage = std::make_shared<InterruptedStorage>(); storage->source = audio->storage; audio->storage = storage;
+        auto resident = std::make_shared<AudioData>(); resident->samples = {.125f, .125f};
+        auto show = std::make_shared<Show>(); show->duration = audio->length();
+        show->tracks = {{"stream", "Stream"}, {"resident", "Resident", false, true, false, 1, 0, 2, 3}};
+        Clip clip; clip.id = "late"; clip.audio = audio; clip.duration = show->duration; show->clips.push_back(clip);
+        clip.id = "steady"; clip.track = 1; clip.audio = resident; clip.loop = true; show->clips.push_back(clip);
+        Transport transport; transport.setLateAudio(LateAudio::Gap); transport.configure(show);
+        QVERIFY(!transport.audioReadFailed());
+        constexpr unsigned block = 512;
+        std::array<float, block*4> out;
+        QVERIFY(transport.command({Action::Play})); transport.render(out.data(), block, 4);
+        QVERIFY(transport.peak() > .125f); QCOMPARE(transport.audioGaps(), 0u);
+        storage->interrupted.store(true);
+        const Frame destination = frames(4) + 301;
+        QVERIFY(transport.command({Action::Seek, destination}));
+        Frame position = destination;
+        auto next = std::chrono::steady_clock::now();
+        const auto render = [&] {
+            std::this_thread::sleep_until(next); next += std::chrono::nanoseconds(block * 1000000000LL / sampleRate);
+            transport.render(out.data(), block, 4); position += block;
+        };
+        // Gaps right after the seek are expected and uncounted; a source still late after seekGrace counts.
+        // The block holding frame seekGrace is the first that counts.
+        const unsigned graceBlocks = static_cast<unsigned>(Transport::seekGrace / block);
+        for (unsigned i = 0; i < graceBlocks + 6; ++i) {
+            render(); QCOMPARE(transport.position(), position); QCOMPARE(transport.audioGaps(), i + 1 > graceBlocks ? i + 1 - graceBlocks : 0u);
+            for (unsigned f = 0; f < block; ++f) {
+                if (i || f >= Transport::fadeFrames) { QCOMPARE(out[4*f], 0.f); QCOMPARE(out[4*f + 1], 0.f); }
+                QCOMPARE(out[4*f + 2], .125f); QCOMPARE(out[4*f + 3], .125f);
+            }
+        }
+        QVERIFY(transport.readRetries() > 0);
+        storage->interrupted.store(false);
+        bool fadingIn = false, recovered = false;
+        for (unsigned i = 0; i < 100; ++i) {
+            const auto gaps = transport.audioGaps();
+            render(); QCOMPARE(transport.position(), position); QCOMPARE(transport.state(), State::Playing);
+            std::array<float, block*2> expected;
+            reference->storage->read(position - block, expected.data(), block);
+            for (unsigned f = 0; f < block; ++f) { QCOMPARE(out[4*f + 2], .125f); QCOMPARE(out[4*f + 3], .125f); }
+            for (unsigned f = 0; f < block && !fadingIn; ++f) {
+                if (out[4*f] == 0.f && out[4*f + 1] == 0.f) continue;
+                const double attack = 1. - static_cast<double>(Transport::fadeFrames - 1) / Transport::fadeFrames;
+                QCOMPARE(out[4*f], static_cast<float>(expected[2*f] * attack));
+                QCOMPARE(out[4*f + 1], static_cast<float>(expected[2*f + 1] * attack));
+                fadingIn = true;
+            }
+            if (transport.audioGaps() != gaps) continue;
+            for (unsigned f = Transport::fadeFrames; f < block; ++f) {
+                QCOMPARE(std::bit_cast<quint32>(out[4*f]), std::bit_cast<quint32>(expected[2*f]));
+                QCOMPARE(std::bit_cast<quint32>(out[4*f + 1]), std::bit_cast<quint32>(expected[2*f + 1]));
+            }
+            recovered = true; break;
+        }
+        QVERIFY(fadingIn && recovered); QCOMPARE(transport.bufferWaits(), 0u); QVERIFY(!transport.audioReadFailed());
+    }
+    void playbackPreferencesPersistAndSwapAudioWithoutUndo() {
+        QSettings().setValue("audio/sources", "stream"); QSettings().setValue("audio/late", "gap");
+        {
+            Controller c; QCOMPARE(audioPreparation(), AudioPreparation::Stream); QCOMPARE(c.transport.lateAudio(), LateAudio::Gap);
+            c.setLateAudio(LateAudio::Freeze); c.setAudioPreparation(AudioPreparation::Prepared);
+        }
+        QCOMPARE(QSettings().value("audio/late").toString(), QString("freeze")); QCOMPARE(QSettings().value("audio/sources").toString(), QString("prepared"));
+        QTemporaryDir dir; const auto path = dir.filePath("resample.wav"); writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 * 2));
+        setAudioPreparation(AudioPreparation::Stream); auto streamed = loadMedia(path);
+        setAudioPreparation(AudioPreparation::Prepared); const auto prepared = loadMedia(path).audio;
+        Controller c; auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}};
+        project.assets.insert(streamed.id, streamed);
+        Clip clip; clip.id = "a"; clip.assetId = streamed.id.toStdString(); clip.audio = streamed.audio; clip.duration = streamed.audio->length(); project.show.clips.push_back(clip);
+        c.replace(project);
+        const auto streaming = [&] { return c.preflight().filter("Audio streams from the original media files").size() == 1; };
+        QVERIFY(streaming());
+        // Prepared is chosen, so this source is one that could not be prepared: the check names it.
+        QVERIFY(!c.preflight().filter("preparing them failed").filter(streamed.name).isEmpty());
+        setAudioPreparation(AudioPreparation::Stream); QVERIFY(!c.preflight().filter("choose Prepared audio sources").isEmpty());
+        setAudioPreparation(AudioPreparation::Prepared);
+        {
+            // A video's sound on a picture layer never plays, so it is no reason to warn.
+            auto pictures = project; auto video = streamed; video.video = true; video.duration = 2; pictures.assets.insert(video.id, video);
+            pictures.show.tracks = {{"picture", "Picture", true}}; Controller other; other.replace(pictures);
+            QVERIFY(other.project.show.clips[0].audio); QVERIFY(other.preflight().filter("Audio streams from the original media files").isEmpty());
+        }
+        QVERIFY(c.edit([](Project& p) { p.show.clips[0].gain = .5; }));
+        QCOMPARE(c.audioSources(), QStringList{streamed.path});
+        QCOMPARE(c.replaceAudio({{streamed.path, prepared}}), Controller::AudioSwap::Applied);
+        QVERIFY(!streaming()); QCOMPARE(c.project.show.clips[0].audio, prepared);
+        // Swapping storage is not an edit, and undo keeps the chosen preparation.
+        c.undo(); QCOMPARE(c.project.show.clips[0].gain, 1.); QCOMPARE(c.project.show.clips[0].audio, prepared);
+        // An asset only redo can bring back is still a source to prepare.
+        const auto other = dir.filePath("other.wav"); writeBytes(other, waveBytes(16, 1, 2, 44100, false, 44100));
+        setAudioPreparation(AudioPreparation::Stream); auto added = loadMedia(other);
+        QVERIFY(c.edit([&](Project& p) { p.assets.insert(added.id, added); }));
+        c.undo(); QVERIFY(!c.project.assets.contains(added.id)); QVERIFY(c.audioSources().contains(other));
+        QVERIFY(c.audioDiffersFrom(AudioPreparation::Prepared)); // Only redo still holds streamed audio.
+        setAudioPreparation(AudioPreparation::Prepared); const auto preparedOther = loadMedia(other).audio;
+        QCOMPARE(c.replaceAudio({{other, preparedOther}}), Controller::AudioSwap::Applied); QVERIFY(!c.audioDiffersFrom(AudioPreparation::Prepared));
+        c.redo(); QCOMPARE(c.project.assets[added.id].audio, preparedOther);
+        // A snapshot the new audio would invalidate keeps its previous audio, so undo can still arm it.
+        QVERIFY(c.edit([](Project& p) { p.show.clips[0].offset = frames(1.5); p.show.clips[0].duration = frames(.4); }));
+        QVERIFY(c.edit([](Project& p) { p.show.clips.clear(); }));
+        const auto shorter = loadMedia([&] { const auto f = dir.filePath("short.wav"); writeBytes(f, waveBytes(16, 1, 2, 44100, false, 44100)); return f; }()).audio;
+        QCOMPARE(c.replaceAudio({{streamed.path, shorter}}), Controller::AudioSwap::Applied);
+        QCOMPARE(c.project.assets[streamed.id].duration, seconds(shorter->length())); // New clips use the reloaded length.
+        c.save(dir.filePath("show.savshow")); QVERIFY2(!c.dirty, qPrintable(c.status)); // Saving must not rebind history to the new audio.
+        c.undo(); QCOMPARE(c.project.show.clips[0].offset, frames(1.5)); QCOMPARE(c.project.show.clips[0].audio, prepared);
+    }
+    void manyStreamedSourcesShareABoundedDecoderBudget() {
+#ifdef Q_OS_WIN
+        QSKIP("counts descriptors through /dev/fd");
+#else
+        // Every armed clip prebuffers; without a shared budget each source would keep its own file open.
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; auto show = std::make_shared<Show>();
+        show->tracks.push_back({"audio", "Audio", false, false, false, 1, 0, 0, 1});
+        constexpr int sources = 160;
+        for (int i = 0; i < sources; ++i) {
+            const auto path = dir.filePath(QString("cue-%1.wav").arg(i)); writeBytes(path, waveBytes(16, 1, 2, 44100, false, 4410 + i));
+            Clip clip; clip.audio = loadMedia(path).audio; clip.start = frames(.2) * i; clip.duration = clip.audio->length(); show->clips.push_back(clip);
+        }
+        show->duration = frames(.2) * sources;
+        const auto descriptors = [] { return QDir("/dev/fd").entryList(QDir::AllEntries | QDir::System | QDir::NoDotAndDotDot).size(); };
+        const auto before = descriptors();
+        Transport transport; transport.configure(show);
+        QVERIFY(!transport.audioReadFailed());
+        // Evicted decoders close on threads of their own, so the count settles shortly after.
+        QTRY_VERIFY2_WITH_TIMEOUT(descriptors() - before <= 72, qPrintable(QString("%1 descriptors opened").arg(descriptors() - before)), 5000);
+        // Evicted decoders reopen on demand: a later cue still plays exactly.
+        transport.command({Action::Seek, show->clips[150].start}); transport.command({Action::Play});
+        std::vector<float> out(512 * 2); transport.render(out.data(), 512, 2); // The seek reads its new place cold.
+        for (int i = 0; i < 200 && transport.position() == show->clips[150].start; ++i) { QTest::qWait(2); transport.render(out.data(), 512, 2); }
+        QVERIFY(!transport.audioReadFailed()); QVERIFY(transport.position() > show->clips[150].start);
+#endif
+    }
+    void saveLeavesARelinkedAssetsHistoryAlone() {
+        // Undo after relink and Save restores the asset as it was, not the relinked file.
+        QTemporaryDir dir; const auto first = dir.filePath("a.wav"), second = dir.filePath("b.wav");
+        writeBytes(first, waveBytes(16, 1, 2, sampleRate, false, 48000)); writeBytes(second, waveBytes(16, 1, 2, sampleRate, false, 96000));
+        Controller c; auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}};
+        auto original = loadMedia(first); project.assets.insert(original.id, original);
+        Clip clip; clip.id = "a"; clip.assetId = original.id.toStdString(); clip.audio = original.audio; clip.duration = original.audio->length(); project.show.clips.push_back(clip);
+        c.replace(project);
+        auto relinked = loadMedia(second); relinked.id = original.id; relinked.name = original.name;
+        QVERIFY(c.edit([&](Project& p) { p.assets.insert(relinked.id, relinked); }));
+        c.save(dir.filePath("show.savshow")); QVERIFY2(!c.dirty, qPrintable(c.status));
+        c.undo(); QCOMPARE(c.project.assets[original.id].path, original.path); QCOMPARE(c.project.assets[original.id].audio, original.audio);
+    }
+    void undoKeepsPackageMediaAliveAcrossSaves() {
+        // Opened package, relink the extracted file to an outside copy, Save twice, Undo: the
+        // extracted original the undo step still uses must outlive both saves.
+        QTemporaryDir dir; const auto source = dir.filePath("cue.wav"); writeBytes(source, waveBytes(16, 1, 2, sampleRate, false, 48000 + 31));
+        auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}};
+        auto asset = loadMedia(source); project.assets.insert(asset.id, asset);
+        Clip clip; clip.id = "a"; clip.assetId = asset.id.toStdString(); clip.audio = asset.audio; clip.duration = asset.audio->length(); project.show.clips.push_back(clip);
+        const auto package = dir.filePath("show.savpack"); writeProjectPackage(project, package);
+        Controller c; c.replace(readProject(package)); const auto extracted = c.project.assets[asset.id].path;
+        QVERIFY(c.project.packageDirectory); QVERIFY(extracted.startsWith(c.project.packageDirectory->path()));
+        const auto outside = dir.filePath("outside.wav"); QVERIFY(QFile::copy(source, outside));
+        auto relinked = loadMedia(outside); relinked.id = asset.id; relinked.name = asset.name;
+        QVERIFY(c.edit([&](Project& p) { p.assets.insert(relinked.id, relinked); }));
+        c.save(dir.filePath("one.savshow")); QVERIFY2(!c.dirty, qPrintable(c.status));
+        QVERIFY(c.edit([](Project& p) { p.title = "Second save"; }));
+        c.save(dir.filePath("two.savshow")); QVERIFY2(!c.dirty, qPrintable(c.status));
+        c.undo(); c.undo();
+        QCOMPARE(c.project.assets[asset.id].path, extracted); QVERIFY(QFileInfo::exists(extracted));
+    }
+    void identicalBytesInDifferentRawFormatsDoNotShareCaches() {
+        // Raw formats are chosen by extension: these 44,100 16-bit samples last 1 s as .sw and 5.5 s as .sln (8 kHz).
+        QTemporaryDir dir; QByteArray bytes(88200, '\0');
+        for (qsizetype i = 0; i + 1 < bytes.size(); i += 2) qToLittleEndian<qint16>(static_cast<qint16>((i * 37) % 20000 - 10000), bytes.data() + i);
+        const auto sln = dir.filePath("cue.sln"), sw = dir.filePath("cue.sw"); writeBytes(sln, bytes); writeBytes(sw, bytes);
+        for (const auto preparation : {AudioPreparation::Stream, AudioPreparation::Prepared}) {
+            const auto first = loadMedia(sln, preparation).audio, second = loadMedia(sw, preparation).audio;
+            QCOMPARE(first->length(), Frame{264600}); QCOMPARE(second->length(), Frame{48000});
+            float sample[2]; second->storage->read(second->length() - 1, sample, 1);
+        }
+    }
+    void deletedStreamedSourceIsMissingMedia() {
+        // Streamed audio needs its original: Play and preflight must say so before cues start.
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; const auto path = dir.filePath("cue.wav"); writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 + 211));
+        auto asset = loadMedia(path); QVERIFY(asset.audio->storage->readsSource());
+        Controller c; auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}}; project.assets.insert(asset.id, asset);
+        Clip clip; clip.id = "a"; clip.assetId = asset.id.toStdString(); clip.audio = asset.audio; clip.duration = asset.audio->length(); project.show.clips.push_back(clip);
+        c.replace(project); QVERIFY(c.missingMedia().isEmpty());
+        QVERIFY(QFile::remove(path));
+        QCOMPARE(c.missingMedia(), QStringList{asset.path}); QVERIFY(!c.preflight().filter(asset.path).isEmpty());
+        // Continuing a live show warns from the background check instead of looking itself.
+        QVERIFY(c.lastMissingMedia().isEmpty()); c.checkMediaInBackground(true); QCOMPARE(c.lastMissingMedia(), QStringList{asset.path});
+        QVERIFY(Controller::needsRelink(c.project.assets[asset.id])); // Relink offers it, though it was online when opened.
+        c.toggle(); QCOMPARE(c.transport.state(), State::Stopped);
+        // A prepared cache does not need the original. Restoring the file under its name needs the
+        // streamed reader released, which happens for unopenable sources (FAT/exFAT keep the name until then).
+        closeIdleStreams(true);
+        writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 + 211)); const auto prepared = loadMedia(path, AudioPreparation::Prepared).audio;
+        QVERIFY(!prepared->storage->readsSource()); QCOMPARE(c.replaceAudio({{asset.path, prepared}}), Controller::AudioSwap::Applied); QVERIFY(QFile::remove(path));
+        QVERIFY(c.missingMedia().isEmpty()); QVERIFY(!Controller::needsRelink(c.project.assets[asset.id]));
+        QVERIFY(c.lastMissingMedia().isEmpty()); // The earlier check named a file the show no longer needs.
+    }
+    void saveKeepsUndoStepsThatSavedMediaWouldInvalidate() {
+        // Opened package; remove a clip that starts 0.8 s into its source; the extracted file then
+        // shrinks to 0.3 s and is reloaded; Save; Undo must restore a valid, playable clip on its old
+        // audio. A prepared cache keeps the old samples (a direct WAV would read the shrunk file and
+        // report it changed, which is the truth about that file).
+        setAudioPreparation(AudioPreparation::Prepared);
+        QTemporaryDir dir; const auto source = dir.filePath("cue.wav"); writeBytes(source, waveBytes(16, 1, 2, 44100, false, 44100 + 37));
+        auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}};
+        auto asset = loadMedia(source); project.assets.insert(asset.id, asset);
+        Clip clip; clip.id = "a"; clip.assetId = asset.id.toStdString(); clip.audio = asset.audio; clip.offset = frames(.8); clip.duration = frames(.2); project.show.clips.push_back(clip);
+        const auto package = dir.filePath("show.savpack"); writeProjectPackage(project, package);
+        Controller c; c.replace(readProject(package)); const auto extracted = c.project.assets[asset.id].path; const auto before = c.project.show.clips[0].audio;
+        QVERIFY(c.edit([](Project& p) { p.show.clips.clear(); }));
+        writeBytes(extracted, waveBytes(16, 1, 2, 44100, false, 13230));
+        QCOMPARE(c.replaceAudio({{extracted, loadMedia(extracted).audio}}), Controller::AudioSwap::Applied);
+        c.save(dir.filePath("show.savshow")); QVERIFY2(!c.dirty, qPrintable(c.status));
+        c.undo(); QCOMPARE(c.project.show.clips.size(), std::size_t{1}); QCOMPARE(c.project.show.clips[0].audio, before);
+        validate(c.project); QVERIFY(!before->storage->readsSource()); QVERIFY(!c.transport.audioReadFailed());
+    }
+    void replacingAnArmedPackageRemovesItsExtraction() {
+        // The armed transport streams from the extraction; replacing the show must release those files
+        // before the extraction is removed (Windows cannot remove a folder whose files are open).
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; const auto source = dir.filePath("cue.wav"); writeBytes(source, waveBytes(16, 1, 2, 44100, false, 44100 + 59));
+        auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}};
+        auto asset = loadMedia(source); project.assets.insert(asset.id, asset);
+        Clip clip; clip.id = "a"; clip.assetId = asset.id.toStdString(); clip.audio = asset.audio; clip.duration = asset.audio->length(); project.show.clips.push_back(clip);
+        const auto package = dir.filePath("show.savpack"); writeProjectPackage(project, package);
+        QString extraction;
+        {
+            Controller c; setAudioPreparation(AudioPreparation::Stream); // The controller applied the saved preference.
+            c.replace(readProject(package));
+            QVERIFY(c.project.assets.first().audio->storage->decodes()); extraction = c.project.packageDirectory->path();
+            c.replace(newProject());
+            QVERIFY2(!QFileInfo::exists(extraction), qPrintable(extraction));
+        }
+    }
+    void fileIdentityComparesWhatBothSidesKnow() {
+        // Unknown parts (a share not reporting them this time) match anything; known parts must agree.
+        using detail::FileIdentity;
+        QVERIFY(detail::sameIdentity(FileIdentity{}, FileIdentity{7, 5}));
+        QVERIFY(detail::sameIdentity(FileIdentity{0, 5}, FileIdentity{7, 5}));
+        QVERIFY(!detail::sameIdentity(FileIdentity{7, 5}, FileIdentity{8, 5})); // Another stick, same file number.
+        QVERIFY(!detail::sameIdentity(FileIdentity{7, 5}, FileIdentity{7, 6}));
+        QVERIFY(detail::identityUncertain(FileIdentity{}, FileIdentity{7, 5}));
+        QVERIFY(detail::identityUncertain(FileIdentity{0, 5}, FileIdentity{7, 5}));
+        QVERIFY(!detail::identityUncertain(FileIdentity{7, 5}, FileIdentity{7, 5}));
+        QVERIFY(!detail::identityUncertain(FileIdentity{0, 5}, FileIdentity{0, 5}));
+        QVERIFY(detail::sameIdentity(FileIdentity{7, 0}, FileIdentity{7, 5})); // A share that left out the file number.
+        QVERIFY(detail::identityUncertain(FileIdentity{7, 0}, FileIdentity{7, 5}));
+        // A lookup that succeeds or finds the file gone is certain either way.
+        QTemporaryDir known; const auto here = known.filePath("here.wav"); writeBytes(here, "x");
+        QCOMPARE(detail::presentIfKnown(here), std::optional<bool>(true));
+        QCOMPARE(detail::presentIfKnown(known.filePath("gone.wav")), std::optional<bool>(false));
+#ifdef Q_OS_MACOS
+        // Local volumes report a stable identifier, which tells two sticks mounted at one path apart.
+        QTemporaryDir dir; const auto path = dir.filePath("id.wav"); writeBytes(path, "x");
+        QVERIFY(detail::fileIdentity(path).first != 0);
+#endif
+    }
+    void extractionStillInUseIsRemovedLater() {
+        // A decoder can still be closing an extracted file on the background sweep when its project
+        // closes; Windows then cannot remove the folder, so removal is retried once the file is free.
+        QTemporaryDir dir; const auto source = dir.filePath("cue.wav"); writeBytes(source, waveBytes(16, 1, 2, 44100, false, 4410));
+        auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        auto asset = loadMedia(source); project.assets.insert(asset.id, asset);
+        const auto package = dir.filePath("held.savpack"); writeProjectPackage(project, package);
+        auto opened = readProject(package); const auto extraction = opened.packageDirectory->path();
+        QFile held(opened.assets.first().path); QVERIFY(held.open(QIODevice::ReadOnly));
+        opened = Project{};
+        held.close(); retryPackageRemovals(true);
+        QVERIFY2(!QFileInfo::exists(extraction), qPrintable(extraction));
+    }
+    void idleStreamDecodersCloseTheirFiles() {
+#ifdef Q_OS_WIN
+        QSKIP("counts descriptors through /dev/fd");
+#else
+        // A fully buffered clip stops reading; its decoder must not hold the file for the rest of the show.
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; const auto path = dir.filePath("short.wav"); writeBytes(path, waveBytes(16, 1, 2, 44100, false, 4410 + 97));
+        const auto audio = loadMedia(path).audio;
+        // Descriptors on the source itself; the canonical path is taken while it exists.
+        const auto canonical = QFileInfo(path).canonicalFilePath(); QVERIFY2(!canonical.isEmpty(), qPrintable(path));
+        const auto open = [&] { return descriptorsOn(canonical); };
+        QCOMPARE(open(), 0); float sample[2]; audio->storage->read(0, sample, 1);
+        QCOMPARE(open(), 1);
+        closeIdleStreams(true); QCOMPARE(open(), 1); // Just read: not idle yet.
+        QTest::qWait(3100); closeIdleStreams(true); QCOMPARE(open(), 0);
+        audio->storage->read(4000, sample, 1); QCOMPARE(open(), 1); // Reopens on demand.
+        // A deleted source's decoder closes at the next sweep, idle or not, so its name can be reused at once
+        // where deleting an open file only marks it (FAT/exFAT on Windows).
+        QVERIFY(QFile::remove(path)); closeIdleStreams(true); QCOMPARE(open(), 0);
+#endif
+    }
+    void rejectedSourceSwitchKeepsThePreviousPreference() {
+        // Selecting Prepared reloads a stem that has since shrunk below a clip's offset: the show keeps
+        // its streamed audio, so the preference must stay Stream (and a later retry must reload).
+        QSettings().setValue("audio/sources", "stream");
+        QTemporaryDir dir; const auto path = dir.filePath("stem.wav"); writeBytes(path, waveBytes(16, 1, 2, 44100, false, 88200 + 3));
+        MainWindow window; window.show(); auto& c = window.controller(); QCOMPARE(audioPreparation(), AudioPreparation::Stream);
+        auto project = newProject(); project.show.clips.clear(); project.show.markers.clear(); project.assets.clear();
+        project.show.tracks = {{"audio", "Audio", false, false, false, 1, 0, 0, 1}};
+        auto asset = loadMedia(path); project.assets.insert(asset.id, asset);
+        Clip clip; clip.id = "a"; clip.assetId = asset.id.toStdString(); clip.audio = asset.audio; clip.offset = frames(1.5); clip.duration = frames(.4); project.show.clips.push_back(clip);
+        c.replace(project);
+        writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 + 5));
+        whenShown(window, "outputSettingsDialog", [&](QDialog* dialog) {
+            auto* sources = dialog->findChild<QComboBox*>("audioSourcePreparation"); if (!sources) return;
+            sources->setCurrentIndex(sources->findData(static_cast<int>(AudioPreparation::Prepared))); emit sources->activated(sources->currentIndex());
+        });
+        window.findChild<QPushButton*>("outputSettingsButton")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!c.busy, 15000);
+        QCOMPARE(audioPreparation(), AudioPreparation::Stream); QCOMPARE(QSettings().value("audio/sources").toString(), QString("stream"));
+        QVERIFY2(c.status.startsWith("Audio sources were not changed"), qPrintable(c.status));
+        QVERIFY(c.project.show.clips[0].audio->storage->decodes());
+    }
+    void manifestsThatReferToOtherFilesAreRejected() {
+        // Two identical manifests can name different files, so their bytes cannot identify the audio.
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
+        QTemporaryDir dir; QProcess process;
+        process.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=1", dir.filePath("cue.flac")});
+        QVERIFY(process.waitForFinished(30000)); QCOMPARE(process.exitCode(), 0);
+        const auto manifest = dir.filePath("show.ffconcat"); writeBytes(manifest, "ffconcat version 1.0\nfile cue.flac\n");
+        for (const auto preparation : {AudioPreparation::Prepared, AudioPreparation::Stream})
+            QVERIFY_THROWS_EXCEPTION(std::runtime_error, loadMedia(manifest, preparation));
+        // Refused from its bytes, before FFmpeg would open the playlist and fetch its (missing) segment.
+        const auto playlist = dir.filePath("show.m3u8");
+        writeBytes(playlist, "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nmissing-segment.ts\n#EXT-X-ENDLIST\n");
+        try { loadMedia(playlist); QFAIL("playlist imported"); }
+        catch (const std::runtime_error& e) { QVERIFY2(QString::fromUtf8(e.what()).startsWith("Playlists"), e.what()); }
+    }
+    void explicitPreparationOverridesThePreference() {
+        // A batch prepares as it was asked to, even if the operator changes the preference meanwhile.
+        QTemporaryDir dir; const auto path = dir.filePath("batch.wav"); writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 + 13));
+        setAudioPreparation(AudioPreparation::Stream); QVERIFY(!loadMedia(path, AudioPreparation::Prepared).audio->storage->decodes());
+        setAudioPreparation(AudioPreparation::Prepared); QVERIFY(loadMedia(path, AudioPreparation::Stream).audio->storage->decodes());
+    }
+    void damagedStreamSidecarIsRejected() {
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; const auto path = dir.filePath("source.wav"); writeBytes(path, waveBytes(16, 1, 2, 44100, false, 44100 + 77)); // Unique content, unique sidecar.
+        QDir caches(detail::audioCacheDirectory()); const auto before = caches.entryList({"*.stream"}, QDir::Files);
+        const auto first = loadMedia(path).audio;
+        auto created = caches.entryList({"*.stream"}, QDir::Files); for (const auto& name : before) created.removeAll(name);
+        QCOMPARE(created.size(), 1);
+        // Appended whole seek-point records no longer match the stored count; the file is rebuilt, not trusted.
+        QFile sidecar(caches.filePath(created.front())); QVERIFY(sidecar.open(QIODevice::Append)); QCOMPARE(sidecar.write(QByteArray(16 * 4096, '\x7f')), 16 * 4096); sidecar.close();
+        const auto reopened = loadMedia(path).audio;
+        QCOMPARE(reopened->peaks, first->peaks); QVERIFY(QFileInfo(sidecar.fileName()).size() < 16 * 4096);
+    }
+    void streamedAudioSurvivesTimestampJumps() {
+        // A broadcast recording whose timestamps jump forward: positions follow counted samples, not timestamps.
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
+        QTemporaryDir dir; QByteArray joined;
+        for (const auto& [name, start, offset] : {std::tuple{"a.ts", "0", "0"}, std::tuple{"b.ts", "4", "6"}}) {
+            QProcess process;
+            process.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                "aevalsrc=0.4*sin(2*PI*(100+800*t)*t)+0.1*random(0)|0.3*sin(2*PI*660*t):s=48000:d=18", "-ss", start, "-t", QString(name) == "a.ts" ? "4" : "14",
+                "-c:a", "aac", "-aac_pns", "0", "-output_ts_offset", offset, "-f", "mpegts", dir.filePath(name)});
+            QVERIFY(process.waitForFinished(30000)); QCOMPARE(process.exitCode(), 0);
+            QFile part(dir.filePath(name)); QVERIFY(part.open(QIODevice::ReadOnly)); joined += part.readAll();
+        }
+        const auto file = dir.filePath("jump.ts"); writeBytes(file, joined);
+        const auto prepared = loadMedia(file).audio;
+        setAudioPreparation(AudioPreparation::Stream); const auto streamed = loadMedia(file).audio;
+        QCOMPARE(streamed->length(), prepared->length());
+        for (const Frame start : {frames(10), frames(12.5), frames(2), frames(16), frames(5) + 77}) {
+            std::vector<float> a(1024), b(1024);
+            prepared->storage->read(start, a.data(), 512); streamed->storage->read(start, b.data(), 512);
+            QCOMPARE(b, a);
+        }
+    }
+    void audioFormatChangePartwayIsRejected() {
+        // Stereo ADTS followed by 5.1 ADTS: the decoder changes layout mid-stream.
+        const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
+        QTemporaryDir dir; QByteArray joined;
+        for (const auto& [name, layout] : {std::pair{"a.aac", "stereo"}, std::pair{"b.aac", "5.1"}}) {
+            QProcess process;
+            process.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", QString("sine=frequency=440:sample_rate=48000:duration=1"),
+                "-af", QString("aformat=channel_layouts=") + layout, "-c:a", "aac", dir.filePath(name)});
+            QVERIFY(process.waitForFinished(30000)); QCOMPARE(process.exitCode(), 0);
+            QFile part(dir.filePath(name)); QVERIFY(part.open(QIODevice::ReadOnly)); joined += part.readAll();
+        }
+        const auto file = dir.filePath("changing.aac"); writeBytes(file, joined);
+        for (const auto preparation : {AudioPreparation::Prepared, AudioPreparation::Stream}) {
+            setAudioPreparation(preparation);
+            QVERIFY_THROWS_EXCEPTION(std::runtime_error, loadMedia(file));
+        }
+    }
+    void replacedStreamedSourceIsDetected() {
+        // An editor saving through a new file keeps size and modification time but not the file itself.
+        setAudioPreparation(AudioPreparation::Stream);
+        QTemporaryDir dir; const auto path = dir.filePath("source.wav");
+        auto bytes = waveBytes(16, 1, 2, 44100, false, 44100); writeBytes(path, bytes);
+        const auto time = QDateTime::currentDateTimeUtc().addDays(-1); setModified(path, time);
+        const auto stored = QFileInfo(path).lastModified(); // FAT and exFAT round to 2 s.
+        const auto asset = loadMedia(path); float sample[2]; asset.audio->storage->read(100, sample, 1);
+        bytes[bytes.size() - 2] ^= 0x40; const auto replacement = dir.filePath("replacement.wav"); writeBytes(replacement, bytes);
+        setModified(replacement, time); QVERIFY(QFile::remove(path));
+        // Where deleting an open file only marks it (FAT/exFAT), its name frees once the open reader is
+        // released, which a read of the missing source does; that read is retryable, not "changed".
+        try { asset.audio->storage->read(100, sample, 1); QFAIL("missing source read"); }
+        catch (const AudioSourceChanged&) { QFAIL("a missing source can come back"); } catch (const std::runtime_error&) {}
+        QVERIFY(QFile::rename(replacement, path));
+        QCOMPARE(QFileInfo(path).size(), static_cast<qint64>(bytes.size())); QCOMPARE(QFileInfo(path).lastModified(), stored);
+        QVERIFY_THROWS_EXCEPTION(AudioSourceChanged, asset.audio->storage->read(100, sample, 1));
+        // Reopening, as the error asks, must measure the replacement rather than reuse the old summary.
+        const auto copy = dir.filePath("copy.wav"); QVERIFY(QFile::copy(path, copy));
+        const auto reopened = loadMedia(path).audio, fresh = loadMedia(copy).audio;
+        QCOMPARE(reopened->peaks, fresh->peaks); QVERIFY(reopened->peaks != asset.audio->peaks);
+        QCOMPARE(sampleAt(*reopened, reopened->length() - 1), sampleAt(*fresh, fresh->length() - 1));
     }
     void diskAudioCacheHasBoundedMemoryAndPersists() {
         const QString ffmpeg = QStandardPaths::findExecutable("ffmpeg"); if (ffmpeg.isEmpty()) QSKIP("ffmpeg fixture generation unavailable");
@@ -1467,6 +2214,8 @@ private slots:
         QTemporaryDir dir; const QString file = dir.filePath("offset.mkv"); QProcess process;
         process.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=red:s=160x90:r=24:d=2", "-itsoffset", "0.5", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-map", "0:v", "-map", "1:a", "-c:v", "ffv1", "-c:a", "pcm_s16le", file});
         QVERIFY(process.waitForFinished(15000)); QCOMPARE(process.exitCode(), 0);
+        for (const auto preparation : {AudioPreparation::Prepared, AudioPreparation::Stream}) {
+        setAudioPreparation(preparation);
         const auto asset = loadMedia(file); QVERIFY(asset.audio); QCOMPARE(asset.audio->length(), frames(1.5));
         for (Frame i = 0; i < frames(.5); ++i) QCOMPARE(sampleAt(*asset.audio, i), 0.f);
         float peak = 0; for (Frame i = frames(.5); i < frames(.6); ++i) peak = std::max(peak, std::abs(sampleAt(*asset.audio, i))); QVERIFY(peak > .1);
@@ -1478,6 +2227,7 @@ private slots:
         QCOMPARE(transport.bufferWaits(), 0u);
         for (Frame i = 0; i < frames(.6); ++i) {
             QCOMPARE(out[i * 2], sampleAt(*asset.audio, i)); QCOMPARE(out[i * 2 + 1], 0.f);
+        }
         }
     }
     void timelineTrimStopsAtNonLoopingSourceEnd() {

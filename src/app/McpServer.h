@@ -30,6 +30,7 @@ private:
     quint64 revision_ = 0;
     QString importId_, importState_, importError_;
     std::vector<MediaAsset> imported_;
+    AudioPreparation importPreparation_ = AudioPreparation::Stream;
     void acceptConnection();
     QJsonObject dispatch(const QJsonObject& request);
     QJsonObject callTool(const QString& name, const QJsonObject& arguments);

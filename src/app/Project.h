@@ -12,10 +12,12 @@ struct Project {
     QString title = "Untitled show";
     int width = 1920, height = 1080;
     double fps = 24;
+    // Shared by undo snapshots so extracted sources remain available until their last user closes.
+    // Declared before the media, so it is destroyed after them: open files are released before the
+    // extraction is removed (Windows cannot remove a folder whose files are still open).
+    std::shared_ptr<QTemporaryDir> packageDirectory;
     Show show;
     QMap<QString, MediaAsset> assets;
-    // Shared by undo snapshots so extracted sources remain available until their last user closes.
-    std::shared_ptr<QTemporaryDir> packageDirectory;
 };
 QString newId();
 Project newProject();
@@ -36,6 +38,9 @@ void writeProjectPackage(const Project& project, const QString& path);
 void materializeProjectMedia(Project& project, const QString& directory);
 // Removes package extractions abandoned by crashed instances; call once at startup.
 void removeStalePackageDirectories();
+// Retries removing extractions that were still in use when their project closed; call periodically.
+// The retry runs on a worker unless wait (tests).
+void retryPackageRemovals(bool wait = false);
 QString timecode(Frame position, double fps = 24);
 // Whole seconds remaining, rounded up: M:SS, or H:MM:SS from an hour.
 QString countdown(Frame duration);
