@@ -777,6 +777,40 @@ int main() {
             checkedRender(ept, dout.data(), 16, 2); // Rolls back chat seek.
             expect(ept.epoch() == opEpoch && ept.position() < farPos,
                 "rolled-back chat seek preserves global MIDI epoch for queued operator cues");
+
+            // Round 33 High #1: Reverse order [Chat Seek(farPos), Operator Play] from a Hold with
+            // Resume MIDI, stalled and revoked during disk wait, must continue past the hold AND
+            // emit the Operator's Resume MIDI cue once.
+            auto revStorage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto revp = show(false);
+            revp->duration = revStorage->length();
+            revp->clips[0].duration = revp->duration;
+            revp->clips[0].audio = diskAudio(revStorage);
+            revp->markers.push_back({"rev-hold", "RevHold", rcHoldPos, true, MidiTiming::Resume, {0x90, 66, 100}});
+            Transport revt; revt.configure(revp);
+            revt.command({Action::Seek, rcHoldPos - 4, CommandSource::Operator, 0});
+            play(revt);
+            for (int i = 0; i < 200 && revt.state() != State::Held; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                checkedRender(revt, dout.data(), 16, 2);
+            }
+            expect(revt.state() == State::Held && revt.position() == rcHoldPos, "reached hold for reverse-order test");
+            revStorage->fail.store(true);
+            revt.command({Action::Seek, farPos, CommandSource::ChatAgent, revt.chatAgentEpoch()});
+            revt.command({Action::Play, 0, CommandSource::Operator, 0});
+            checkedRender(revt, dout.data(), 64, 2); // Stalls at farPos.
+            expect(revt.position() == farPos, "reverse-order test stalled at farPos");
+            revt.invalidateChatAgentCommands();
+            revStorage->fail.store(false);
+            checkedRender(revt, dout.data(), 16, 2); // Rolls back chat seek, preserves Operator Play.
+            for (int i = 0; i < 200 && revt.position() <= rcHoldPos; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                checkedRender(revt, dout.data(), 16, 2);
+            }
+            int revResumes = 0;
+            while (revt.takeMidi(rcEv)) if (rcEv.marker == 0) ++revResumes;
+            expect(revt.state() == State::Playing && revt.position() > rcHoldPos && revt.position() < farPos && revResumes == 1,
+                "revoked chat seek before Operator Play synthesizes hold-resume MIDI once");
         }}
     };
     for (const auto& [name, test] : tests) {

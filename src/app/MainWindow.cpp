@@ -1270,6 +1270,7 @@ void MainWindow::openPath(const QString& rawPath, bool discardPreviousAutosave) 
     const QString path = QFileInfo(rawPath).absoluteFilePath();
     const quint64 initialRev = c_.projectRevision();
     const QString previousAutosave = discardPreviousAutosave ? c_.autosavePath() : QString();
+    const QString previousRecoveredAutosave = discardPreviousAutosave ? c_.recoveredAutosavePath() : QString();
     // A sidecar opens as unsaved edits to its show, so Save replaces the show rather than writing "x.savshow.autosave.savshow".
     QString source = path, target = isProjectPackage(path) ? QString() : path;
     bool recovered = path.endsWith(".savshow.autosave", Qt::CaseInsensitive);
@@ -1307,23 +1308,25 @@ void MainWindow::openPath(const QString& rawPath, bool discardPreviousAutosave) 
     const quint64 expectedRev = initialRev;
     auto* progress = new QProgressDialog("Opening project and preparing media…", QString(), 0, 0, this); progress->setWindowModality(Qt::WindowModal); progress->setMinimumDuration(0); progress->show();
     auto* watcher = new QFutureWatcher<ProjectResult>(this);
-    connect(watcher, &QFutureWatcher<ProjectResult>::finished, this, [this, watcher, progress, path, source, target, recovered, lease, expectedRev, previousAutosave] {
+    connect(watcher, &QFutureWatcher<ProjectResult>::finished, this, [this, watcher, progress, path, source, target, recovered, lease, expectedRev, previousAutosave, previousRecoveredAutosave] {
         const auto result = watcher->result(); c_.releaseBusy(lease); progress->deleteLater(); watcher->deleteLater();
         if (!result.error.isEmpty()) { QMessageBox::warning(this, "Could not open project", result.error); return; }
         if (!c_.canEdit() || c_.projectRevision() != expectedRev) { c_.report("Open cancelled because the show changed while loading."); return; }
-        if (!previousAutosave.isEmpty()) {
-            const auto sameFile = [](const QString& a, const QString& b) {
-                if (a.isEmpty() || b.isEmpty()) return false;
-                const QFileInfo ia(a), ib(b);
-                if (ia.exists() && ib.exists() && ia.canonicalFilePath() == ib.canonicalFilePath()) return true;
-                return QDir::cleanPath(ia.absoluteFilePath()) == QDir::cleanPath(ib.absoluteFilePath());
-            };
-            if (!sameFile(previousAutosave, source) && !sameFile(previousAutosave, path))
-                QFile::remove(previousAutosave);
-        }
+        const auto sameFile = [](const QString& a, const QString& b) {
+            if (a.isEmpty() || b.isEmpty()) return false;
+            const QFileInfo ia(a), ib(b);
+            if (ia.exists() && ib.exists() && ia.canonicalFilePath() == ib.canonicalFilePath()) return true;
+            return QDir::cleanPath(ia.absoluteFilePath()) == QDir::cleanPath(ib.absoluteFilePath());
+        };
+        if (!previousAutosave.isEmpty() && !sameFile(previousAutosave, source) && !sameFile(previousAutosave, path))
+            QFile::remove(previousAutosave);
+        if (!previousRecoveredAutosave.isEmpty() && !sameFile(previousRecoveredAutosave, source) && !sameFile(previousRecoveredAutosave, path))
+            QFile::remove(previousRecoveredAutosave);
         timeline_->selectedClip.clear(); timeline_->selectedMarker.clear(); timeline_->selectedTrack = 0;
         const bool markDirty = recovered || isProjectPackage(path);
         c_.replace(result.project, target, markDirty);
+        if (recovered && !sameFile(source, c_.autosavePath()))
+            c_.setRecoveredAutosavePath(source);
         QTimer::singleShot(0, this, [this] { if (std::any_of(c_.project.assets.cbegin(), c_.project.assets.cend(), [](const MediaAsset& a) { return a.offline; })) relinkMedia(true); });
         if (recovered) {
             c_.report(target.isEmpty() ? "Recovered an unsaved show. Save it to keep it." : "Recovered autosave. Save to replace " + QFileInfo(target).fileName() + ".");

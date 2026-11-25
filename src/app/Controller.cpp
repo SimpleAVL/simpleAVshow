@@ -55,7 +55,13 @@ QString Controller::untitledAutosavePath() {
     return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/Untitled.savshow.autosave";
 }
 QString Controller::autosavePath() const { return path.isEmpty() ? untitledAutosavePath() : path + ".autosave"; }
-void Controller::discardAutosave() { QFile::remove(autosavePath()); }
+void Controller::discardAutosave() {
+    QFile::remove(autosavePath());
+    if (!recoveredAutosavePath_.isEmpty()) {
+        QFile::remove(recoveredAutosavePath_);
+        recoveredAutosavePath_.clear();
+    }
+}
 quint64 Controller::acquireBusy() {
     if (busy) return 0;
     busy = true;
@@ -152,6 +158,7 @@ void Controller::replace(Project next, QString projectPath, bool markDirty) {
     // Readers hold extracted package files open; Windows cannot remove them while open.
     videos_.clear(); lastPicture_ = {};
     project = std::move(next); path = std::move(projectPath); dirty = markDirty; playbackProblem.clear();
+    recoveredAutosavePath_.clear();
     undo_.clear(); redo_.clear(); ++projectRevision_; ++historyEpoch_; ++showEpoch_;
     arm(0); report("Project ready. Space plays or pauses; Stop All stops async audio and video."); emit changed();
 }
@@ -804,6 +811,10 @@ bool Controller::commitSave(Project candidate, QString target, bool allowOverwri
         // Only remove target's sidecar when overwriting or saving back to the same project path.
         if (allowOverwrite || sameTarget) QFile::remove(target + ".autosave");
         if (!previous.isEmpty()) QFile::remove(previous + ".autosave");
+        if (!recoveredAutosavePath_.isEmpty()) {
+            QFile::remove(recoveredAutosavePath_);
+            recoveredAutosavePath_.clear();
+        }
         QFile::remove(untitledAutosavePath());
         report("Saved " + QFileInfo(target).fileName()); emit changed();
         return true;

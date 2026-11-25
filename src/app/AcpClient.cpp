@@ -1,5 +1,6 @@
 #include "app/AcpClient.h"
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -1040,8 +1041,11 @@ void AcpClient::handleNotification(const QString& method, const QJsonObject& par
         auto entrySize = [](const QString& idKey, const KnownToolCall& tc) {
             return idKey.size() + tc.title.size() + tc.kind.size() + tc.rawInput.size() + tc.content.size();
         };
+        const QString rawToolCallId = update["toolCallId"].toString();
         AcpToolCallUpdate call;
-        call.toolCallId = clampStr(update["toolCallId"].toString(), 256);
+        call.toolCallId = rawToolCallId.size() <= 512
+            ? rawToolCallId
+            : QString("sha256:") + QString::fromLatin1(QCryptographicHash::hash(rawToolCallId.toUtf8(), QCryptographicHash::Sha256).toHex());
         call.title = clampStr(update["title"].toString(), 256);
         call.kind = clampStr(update["kind"].toString(), 64);
         call.status = clampStr(update["status"].toString(), 64);
@@ -1050,7 +1054,6 @@ void AcpClient::handleNotification(const QString& method, const QJsonObject& par
         call.detail = clampStr(contentDetail, 4096);
         if (call.detail.isEmpty() && update.contains("rawOutput")) call.detail = clampStr(summarizeJson(update["rawOutput"]), 4096);
         if (call.detail.isEmpty() && !rawInputDetail.isEmpty()) call.detail = clampStr(rawInputDetail, 4096);
-        const QString rawToolCallId = update["toolCallId"].toString();
         if (!rawToolCallId.isEmpty() && rawToolCallId.size() <= 512) {
             const bool isNew = !knownToolCalls_.contains(rawToolCallId);
             auto& tracked = knownToolCalls_[rawToolCallId];

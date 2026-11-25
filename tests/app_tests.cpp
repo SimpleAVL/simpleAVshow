@@ -972,6 +972,36 @@ private slots:
             const auto doc = QJsonDocument::fromJson(checkFile.readAll()).object();
             QCOMPARE(doc["assets"].toArray()[0].toObject()["path"].toString(), QString("media/title.png"));
         }
+
+        // Save As into the target of a media symlink (show/media -> vol-a, asset show/media/pictures/title.png,
+        // saved as vol-a/pictures/new.savshow) must keep the show/media symlink rather than collapsing to "title.png".
+        const QString saveAsRoot = dir.filePath("saveas-sym-root");
+        const QString saveAsShowDir = saveAsRoot + "/show";
+        const QString saveAsVolA = saveAsRoot + "/vol-a";
+        const QString saveAsVolB = saveAsRoot + "/vol-b";
+        QVERIFY(QDir().mkpath(saveAsShowDir));
+        QVERIFY(QDir().mkpath(saveAsVolA + "/pictures"));
+        QVERIFY(QDir().mkpath(saveAsVolB + "/pictures"));
+        QVERIFY(green.save(saveAsVolA + "/pictures/title.png"));
+        QVERIFY(blue.save(saveAsVolB + "/pictures/title.png"));
+        const QString saveAsMediaLink = saveAsShowDir + "/media";
+        QVERIFY(QFile::link(saveAsVolA, saveAsMediaLink));
+        Project saveAsProj = newProject();
+        MediaAsset saveAsAsset = loadMedia(saveAsMediaLink + "/pictures/title.png");
+        saveAsProj.assets.insert(saveAsAsset.id, saveAsAsset);
+        const QString saveAsPath = saveAsVolA + "/pictures/new.savshow";
+        writeProject(saveAsProj, saveAsPath);
+        {
+            QFile checkFile(saveAsPath);
+            QVERIFY(checkFile.open(QIODevice::ReadOnly));
+            const auto doc = QJsonDocument::fromJson(checkFile.readAll()).object();
+            QCOMPARE(doc["assets"].toArray()[0].toObject()["path"].toString(), QString("../../show/media/pictures/title.png"));
+        }
+        QVERIFY(QFile::remove(saveAsMediaLink));
+        QVERIFY(QFile::link(saveAsVolB, saveAsMediaLink));
+        const Project saveAsRepointed = readProject(saveAsPath);
+        QVERIFY(!saveAsRepointed.assets[saveAsAsset.id].offline);
+        QCOMPARE(saveAsRepointed.assets[saveAsAsset.id].still.pixelColor(0, 0), QColor(Qt::blue));
 #endif
     }
     void zip64AndCompressedPackagesCanBeOpened() {

@@ -1390,7 +1390,7 @@ QJsonObject McpServer::historyTool(const QJsonObject& a) {
     }
     const QString summary = QString("Agent performed %1 (%2 step%3).").arg(action).arg(applied).arg(applied == 1 ? "" : "s");
     c_.report(summary);
-    emit showModified(summary);
+    emit showModified(summary, action == "redo" ? applied : -applied);
     auto result = snapshot();
     result.insert("applied_steps", applied);
     return toolResult(result);

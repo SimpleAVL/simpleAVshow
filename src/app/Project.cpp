@@ -410,37 +410,50 @@ QJsonObject projectJson(const Project& p, const QString& directory) {
             if (isCanonicalAncestor(cleanBase, cleanAsset)) {
                 assetPath = QDir(cleanBase).relativeFilePath(cleanAsset);
             } else {
-                // Otherwise walk up from the asset's parent directory to a shared canonical ancestor
-                // (reconciling OS aliases like /var vs /private/var or /tmp vs /private/tmp),
-                // preferring a non-symlink ancestor so symlinked media directories (even those
-                // pointing to a parent like media -> ..) are never collapsed.
+                // Walk top-down through the asset's parent directory segments, advancing only while
+                // each prefix's canonical path is an ancestor of canonicalBase (and stopping as
+                // soon as it equals canonicalBase or diverges). This reconciles shared OS symlink
+                // aliases (/var -> /private/var, /tmp -> /private/tmp) without ever stepping into
+                // or dereferencing a media directory symlink in a divergent branch or below base
+                // (e.g. show/media -> volume-a saved into volume-a/pictures).
                 const QFileInfo assetInfo(assetPath);
-                QDir anc = assetInfo.absoluteDir();
-                QStringList trailing;
-                bool matched = false;
-                QString symlinkFallback;
-                for (;;) {
-                    const QString ancCanonical = anc.canonicalPath();
-                    if (isCanonicalAncestor(ancCanonical, canonicalBase)) {
-                        QDir rebuilt(ancCanonical);
-                        for (const QString& segment : trailing) rebuilt.setPath(rebuilt.filePath(segment));
-                        const QString rel = dir.relativeFilePath(rebuilt.filePath(assetInfo.fileName()));
-                        if (!QFileInfo(anc.absolutePath()).isSymLink()) {
-                            assetPath = rel;
-                            matched = true;
-                            break;
-                        }
-                        if (symlinkFallback.isEmpty()) symlinkFallback = rel;
-                    }
-                    const QString current = anc.absolutePath();
-                    const QString leaf = anc.dirName();
-                    if (leaf.isEmpty() || !anc.cdUp() || anc.absolutePath() == current) break;
-                    trailing.prepend(leaf);
+                const QString absDir = QDir::cleanPath(assetInfo.absolutePath());
+                QString matchedCanonical;
+                qsizetype matchedLen = 0;
+                qsizetype pos = 0;
+                if (absDir.startsWith("//")) {
+                    const qsizetype s1 = absDir.indexOf('/', 2);
+                    const qsizetype s2 = s1 >= 0 ? absDir.indexOf('/', s1 + 1) : -1;
+                    pos = s2 >= 0 ? s2 + 1 : absDir.size();
+                } else if (absDir.size() >= 3 && absDir[1] == ':' && absDir[2] == '/') {
+                    pos = 3;
+                } else if (absDir.startsWith('/')) {
+                    pos = 1;
                 }
-                if (!matched) {
-                    assetPath = !symlinkFallback.isEmpty()
-                        ? symlinkFallback
-                        : QDir(directory).relativeFilePath(assetPath);
+                auto checkPrefix = [&](qsizetype endPos) -> int {
+                    const QString sub = absDir.left(endPos);
+                    const QString can = QDir(sub).canonicalPath();
+                    if (!isCanonicalAncestor(can, canonicalBase)) return 0;
+                    matchedCanonical = can;
+                    matchedLen = endPos;
+                    return can == canonicalBase ? 2 : 1;
+                };
+                if (pos > 0 && checkPrefix(pos) == 1) {
+                    while (pos < absDir.size()) {
+                        const qsizetype slash = absDir.indexOf('/', pos);
+                        const qsizetype endPos = slash >= 0 ? slash : absDir.size();
+                        if (checkPrefix(endPos) != 1) break;
+                        pos = slash >= 0 ? slash + 1 : absDir.size();
+                    }
+                }
+                if (!matchedCanonical.isEmpty()) {
+                    QString remainder = absDir.mid(matchedLen);
+                    while (remainder.startsWith('/')) remainder.remove(0, 1);
+                    QDir rebuilt(matchedCanonical);
+                    if (!remainder.isEmpty()) rebuilt.setPath(rebuilt.filePath(remainder));
+                    assetPath = dir.relativeFilePath(rebuilt.filePath(assetInfo.fileName()));
+                } else {
+                    assetPath = QDir(directory).relativeFilePath(assetPath);
                 }
             }
         }

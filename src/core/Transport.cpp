@@ -216,6 +216,19 @@ bool Transport::rollbackRevokedSeeks(PendingPlayStart& pendingStart, bool onlyAf
         } else if (pendingStart.active) {
             pendingStart.prevState = entry.prevState;
             pendingStart.prevHeldMarker = entry.prevHeldMarker;
+            if (!entry.prevWasHeld && entry.prevState == State::Held) {
+                // A valid Play ran after this revoked Seek; without the Seek, that Play would
+                // have continued the Hold at entry.prevPos, so synthesize its deferred resume MIDI.
+                std::size_t begin = nextMarker_;
+                while (begin > 0 && show_->markers[markers_[begin - 1]].time == position_) --begin;
+                pendingStart.wasHeld = true;
+                pendingStart.begin = begin;
+                pendingStart.end = nextMarker_;
+                pendingStart.resumeSource = pendingStart.source;
+                pendingStart.resumeEpoch = pendingStart.sourceEpoch;
+                pendingStart.resumePrevState = entry.prevState;
+                pendingStart.resumePrevHeldMarker = entry.prevHeldMarker;
+            }
         }
         if (entry.prevWasHeld) {
             pendingStart.wasHeld = true;

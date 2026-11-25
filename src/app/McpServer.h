@@ -43,7 +43,7 @@ signals:
     void stateChanged();
     // Flush in-progress inspector fields before checking the caller's revision.
     void aboutToEdit();
-    void showModified(const QString& summary);
+    void showModified(const QString& summary, int undoSteps = 1);
 private:
     Controller& c_;
     McpHost host_;

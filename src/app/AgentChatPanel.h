@@ -60,9 +60,11 @@ private:
     bool sentContextPreamble_ = false;
     int agentUndoCount_ = 0;
     int preChangeAgentUndoCount_ = 0;
+    int mcpBatchStartUndoCount_ = 0;
     int prevUndoCount_ = 0;
     int lastUndoDelta_ = 0;
     quint64 lastHistoryEpoch_ = 0;
+    quint64 mcpBatchStartHistoryEpoch_ = 0;
     quint64 sessionGeneration_ = 0;
     bool undoingAgent_ = false;
     bool lastCanEdit_ = true;

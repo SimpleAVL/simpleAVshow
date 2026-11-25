@@ -85,6 +85,8 @@ public:
     // Sidecar for crash recovery: next to the show, or in app data while untitled.
     QString autosavePath() const;
     static QString untitledAutosavePath();
+    const QString& recoveredAutosavePath() const { return recoveredAutosavePath_; }
+    void setRecoveredAutosavePath(QString sidecarPath) { recoveredAutosavePath_ = std::move(sidecarPath); }
     void discardAutosave();
     bool routesValid() const;
     unsigned lateFrames = 0;
@@ -98,6 +100,7 @@ private:
     unsigned deviceId_ = 0, channels_ = 2, buffer_ = 512;
     bool configured_ = false;
     QString midiName_;
+    QString recoveredAutosavePath_;
     std::map<std::string, std::unique_ptr<VideoReader>> videos_;
     std::shared_ptr<const Show> armed_;
     std::thread midiThread_;

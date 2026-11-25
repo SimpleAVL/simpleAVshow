@@ -3,6 +3,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFileInfo>
 #include <QFrame>
@@ -418,7 +419,10 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         auto clampField = [](const QString& s, qsizetype limit) {
             return s.size() > limit ? (s.left(limit) + "…") : s;
         };
-        const QString toolId = clampField(update.toolCallId, 128);
+        // Never truncate toolCallId before matching: long IDs with a shared prefix must not collide.
+        const QString toolId = update.toolCallId.size() <= 512
+            ? update.toolCallId
+            : QString("sha256:") + QString::fromLatin1(QCryptographicHash::hash(update.toolCallId.toUtf8(), QCryptographicHash::Sha256).toHex());
         const QString title = clampField(update.title, 256);
         const QString meta = clampField(update.kind, 64);
         const QString status = clampField(update.status, 32);
@@ -474,9 +478,18 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         }
         updateControls();
     });
-    connect(&mcp_, &McpServer::showModified, this, [this](const QString& summary) {
-        if (c_.undoCount() > 0 && lastUndoDelta_ >= 0) {
-            agentUndoCount_ = std::min(preChangeAgentUndoCount_ + 1, static_cast<int>(c_.undoCount()));
+    connect(&mcp_, &McpServer::aboutToEdit, this, [this] {
+        mcpBatchStartUndoCount_ = agentUndoCount_;
+        mcpBatchStartHistoryEpoch_ = c_.historyEpoch();
+    });
+    connect(&mcp_, &McpServer::showModified, this, [this](const QString& summary, int undoSteps) {
+        const int curUndo = static_cast<int>(c_.undoCount());
+        const int base = (mcpBatchStartHistoryEpoch_ != 0 && c_.historyEpoch() != mcpBatchStartHistoryEpoch_)
+            ? mcpBatchStartUndoCount_
+            : preChangeAgentUndoCount_;
+        mcpBatchStartHistoryEpoch_ = 0;
+        if (curUndo > 0 && undoSteps != 0) {
+            agentUndoCount_ = std::clamp(base + undoSteps, 0, curUndo);
             preChangeAgentUndoCount_ = agentUndoCount_;
         } else {
             agentUndoCount_ = 0;
