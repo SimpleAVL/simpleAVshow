@@ -25,7 +25,7 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
             const QString reason = stalled ? QString("stopped responding") : device.lastError().isEmpty() ? QString("stopped") : "failed: " + device.lastError();
             configured_ = false; device.close();
             // Once the device is closed, it is safe to render a zero-sized control block.
-            transport.command({Action::StopAll}); transport.render(nullptr, 0, 0);
+            transport.command({Action::StopAll}); transport.render(nullptr, 0, 0); pausedLive_ = false;
             report("Audio output " + reason + ". Press Play to reconnect, or choose another device in Outputs.");
             playbackProblem = status;
         }
@@ -98,6 +98,7 @@ void Controller::redo() {
     arm(std::min(position(), project.show.duration)); emit changed();
 }
 bool Controller::arm(Frame position) {
+    pausedLive_ = false; // Arming starts over from position.
     // Callers have already committed their change; a failure (out of memory, no worker thread) must not
     // escape into Qt or leave the previous snapshot playing. The stream closes (so the device watchdog
     // keeps quiet), the transport disarms, and Play or the next edit arms again at the kept position.
@@ -178,9 +179,11 @@ void Controller::toggle() {
         if (transport.audioReadFailed()) { report("Audio source is unreadable. Restore missing media and press Play to retry, or reopen the project to rebuild changed or damaged caches."); playbackProblem = status; return; }
         // Resuming a live show never blocks on picture or MIDI; it warns and continues.
         const bool resuming = state == State::Held || transport.asyncVoices() || (state == State::Paused && device.running());
-        // Resuming does not look for missing files either: a stalled share would hold up the cue. Reads
-        // and the background sweep report a source that went missing; preflight lists them all.
-        if (const auto missing = resuming ? QStringList{} : missingMedia(); !missing.isEmpty()) {
+        // Continuing a live show does not look for missing files either: a stalled share would hold up the
+        // cue. Reads and the background sweep report a source that went missing; preflight lists them all.
+        // Paused after Stop All or a seek is a fresh start and checks.
+        const bool live = state == State::Held || transport.asyncVoices() || (state == State::Paused && pausedLive_);
+        if (const auto missing = live ? QStringList{} : missingMedia(); !missing.isEmpty()) {
             report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
             playbackProblem = warning = status;
             if (!resuming) return;
@@ -189,7 +192,9 @@ void Controller::toggle() {
         if (!prepareAudio()) { playbackProblem = status; return; }
         if (!routesValid()) { report("A track needs more output channels. Open Outputs to increase channels, or change the track's routing."); playbackProblem = status; return; }
     }
-    if (!transport.command({playing ? Action::Pause : Action::Play})) report("Transport command queue is full");
+    const bool sent = transport.command({playing ? Action::Pause : Action::Play});
+    if (sent) pausedLive_ = playing;
+    if (!sent) report("Transport command queue is full");
     else if (!warning.isEmpty()) { report(warning); playbackProblem = warning; }
     else if (recovering) report("Playback resumed."); // Replaces the resolved problem in the status bar.
 }
@@ -199,10 +204,11 @@ void Controller::seek(Frame time) {
     if (armFailed_) { pendingPosition_ = std::clamp(time, Frame{0}, project.show.duration); lastComposed_ = -1; return; }
     if (!transport.command({Action::Seek, time})) report("Transport command queue is full");
     if (!device.running()) transport.render(nullptr, 0, 0);
-    lastComposed_ = -1;
+    lastComposed_ = -1; pausedLive_ = false;
 }
 void Controller::stopAll() {
     if (armFailed_) return; // Nothing is armed, so nothing plays; the transport could not take the command.
+    pausedLive_ = false;
     if (!transport.command({Action::StopAll})) { report("Transport command queue is full"); return; }
     if (!device.running()) transport.render(nullptr, 0, 0);
 }

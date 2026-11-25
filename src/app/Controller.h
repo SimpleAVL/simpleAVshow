@@ -91,6 +91,7 @@ private:
     // The last arm failed: nothing is armed, and Play arms at pendingPosition_ (updated by seeks).
     // armProblem_ is the playback problem it reported; a later successful arm clears only that.
     bool armFailed_ = false;
+    bool pausedLive_ = false; // Paused by the operator during playback, not stopped or sought since.
     QString armProblem_;
     Frame pendingPosition_ = 0;
     std::map<std::string, std::unique_ptr<VideoReader>> videos_;
