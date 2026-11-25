@@ -109,8 +109,11 @@ void Transport::configure(std::shared_ptr<const Show> show, Frame position) {
         starts_.push_back(i);
         if (c.audio->storage) {
             const Frame from = entry(i, position_); bool resident = false;
-            if (const auto found = previous.find(c.id); found != previous.end() && reusable[found->second] && reusable[found->second]->matches(c.audio.get(), c.offset, c.loop)) {
-                buffers_[i] = std::move(reusable[found->second]); resident = buffers_[i]->retarget(from);
+            if (const auto found = previous.find(c.id); found != previous.end() && reusable[found->second] &&
+                reusable[found->second]->matchesContent(c.audio.get(), c.offset, c.loop)) {
+                buffers_[i] = std::move(reusable[found->second]);
+                buffers_[i]->rebindData(c.audio);
+                resident = buffers_[i]->retarget(from);
             } else buffers_[i] = std::make_unique<AudioBuffer>(c.audio, c.offset, c.loop, from);
             if (!resident) buffers_[i]->prebuffer(); // Before opening the device.
             if (buffers_[i]->failed()) audioReadFailed_.store(true);
@@ -507,6 +510,10 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 const auto i = active_[cursor]; const auto& clip = show_->clips[i]; const auto& track = show_->tracks[clip.track]; auto& voice = voices_[i];
                 voice.ready = false;
                 if (!clip.contains(position_) && state_ == State::Playing) {
+                    // When deferStartCommit is true, do not swap-remove expired clips from active_
+                    // before readiness succeeds, or rollback via active_.resize(savedActiveSize) could
+                    // leave a newly appended clip in an earlier slot and duplicate it on retry.
+                    if (deferStartCommit) { ++cursor; continue; }
                     cut(i); voice = {}; active_[cursor] = active_.back(); active_.pop_back(); continue;
                 }
                 ++cursor;
@@ -594,6 +601,16 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                         pendingStart.seekCueActive = false;
                         rolledBackOnReady = true;
                     }
+                }
+            }
+            if (deferStartCommit && !waiting && !rolledBackOnReady && state_ == State::Playing) {
+                // Now that readiness and authorization succeeded, remove clips that ended at position_.
+                for (std::size_t cursor = 0; cursor < active_.size();) {
+                    const auto i = active_[cursor];
+                    if (!show_->clips[i].contains(position_)) {
+                        cut(i); voices_[i] = {}; active_[cursor] = active_.back(); active_.pop_back(); continue;
+                    }
+                    ++cursor;
                 }
             }
             // Voices that stop sounding fade out. A miss fades every voice; normal voices fade back in once ready.

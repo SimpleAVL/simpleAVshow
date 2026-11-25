@@ -8,6 +8,7 @@
 #include <QPointer>
 #include <QProcess>
 #include <QString>
+#include <QStringDecoder>
 #include <QStringList>
 #include <QTimer>
 #include <memory>
@@ -146,6 +147,7 @@ private:
     bool stdoutDrainScheduled_ = false;
     bool stderrDrainScheduled_ = false;
     QByteArray stdoutBuffer_;
+    QStringDecoder stderrDecoder_{QStringDecoder::Utf8};
     int nextId_ = 1;
     int nextPermissionKey_ = 1;
     QMap<int, PendingRequest> pending_;

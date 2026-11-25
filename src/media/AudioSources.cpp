@@ -208,6 +208,7 @@ public:
         return copy;
     }
     Frame length() const noexcept override { return length_; }
+    const void* contentIdentity() const noexcept override { return blockHashes_.get(); }
     void prepare(AudioData& data, const std::function<bool()>& isCancelled = {}) {
         // A sidecar keyed like the source index skips reading unchanged files on reopen;
         // read() still verifies every block against the recorded hashes.

@@ -565,6 +565,38 @@ int main() {
             checkedRender(at, dout.data(), 64, 2);
             expect(at.state() == State::Playing && at.asyncVoices() == 1 && at.takeMidi(asyncEv) && asyncEv.source == CommandSource::Operator,
                 "operator play after revoked async disk stall starts voice and fires preserved arrival MIDI");
+            // A cache miss on resume at a boundary where clip A ends and clip B starts must NOT duplicate B in active_.
+            auto spanStorage = std::make_shared<PatternStorage>(frames(60));
+            const Frame boundary = 4 * AudioBuffer::blockFrames; // Right past the initial 4 prebuffered blocks.
+            auto bp = show(false);
+            bp->duration = spanStorage->length();
+            Clip base = bp->clips[0];
+            bp->clips.clear();
+            Clip clipA = base; clipA.id = "a"; clipA.start = 0; clipA.duration = boundary; clipA.audio = audio({.1f}); clipA.loop = true;
+            Clip clipC = base; clipC.id = "c"; clipC.start = 0; clipC.duration = bp->duration; clipC.audio = diskAudio(spanStorage); clipC.loop = false;
+            Clip clipB = base; clipB.id = "b"; clipB.start = boundary; clipB.duration = 1000; clipB.audio = audio({.25f}); clipB.loop = true;
+            bp->clips = {clipA, clipC, clipB};
+            Transport bt; bt.configure(bp);
+            spanStorage->fail.store(true);
+            bt.command({Action::Seek, boundary - 1, CommandSource::Operator, 0});
+            bt.command({Action::Play, 0, CommandSource::Operator, 0});
+            std::vector<float> bout(64 * 2, 0.f);
+            checkedRender(bt, bout.data(), 1, 2); // Plays boundary-1 with A & C in active_, advances to boundary.
+            bt.command({Action::Pause, 0, CommandSource::Operator, 0});
+            checkedRender(bt, bout.data(), 1, 2); // Paused at boundary with expired A still in active_.
+            expect(bt.state() == State::Paused && bt.position() == boundary, "paused exactly at clip A/B boundary");
+            bt.command({Action::Play, 0, CommandSource::Operator, 0});
+            checkedRender(bt, bout.data(), 8, 2); // Stalls at boundary because C's block 4 is unavailable.
+            spanStorage->fail.store(false);
+            for (int i = 0; i < 200 && bt.position() == boundary; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                checkedRender(bt, bout.data(), 1, 2);
+            }
+            expect(bt.position() == boundary + 1, "resumes once spanning disk clip is ready");
+            std::vector<float> afterBoundary(fade * 2, 0.f);
+            checkedRender(bt, afterBoundary.data(), fade, 2);
+            near(afterBoundary[(fade - 1) * 2], PatternStorage::value(boundary + fade) + .25,
+                "boundary clip B is mixed exactly once, never duplicated");
         }}
     };
     for (const auto& [name, test] : tests) {

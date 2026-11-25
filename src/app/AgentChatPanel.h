@@ -56,7 +56,11 @@ private:
     bool autoStartedMcp_ = false;
     bool connecting_ = false;
     bool sentContextPreamble_ = false;
-    bool hasAgentEdit_ = false;
+    int agentUndoCount_ = 0;
+    int preChangeAgentUndoCount_ = 0;
+    int prevUndoCount_ = 0;
+    int lastUndoDelta_ = 0;
+    bool undoingAgent_ = false;
     bool lastCanEdit_ = true;
     bool shuttingDown_ = false;
     bool renderPending_ = false;

@@ -426,20 +426,31 @@ void writeProject(const Project& p, const QString& path, bool allowOverwrite) {
     if (bytes.size() > compactThresholdBytes) bytes = QJsonDocument(root).toJson(QJsonDocument::Compact);
     if (bytes.size() > maxProjectFileBytes)
         throw std::runtime_error("Show manifest exceeds the 128 MB save limit");
-    if (allowOverwrite) {
-        QSaveFile file(resolvedPath);
-        if (!file.open(QIODevice::WriteOnly)) throw std::runtime_error(file.errorString().toStdString());
-        if (file.write(bytes) != bytes.size() || !file.commit()) throw std::runtime_error(file.errorString().toStdString());
-        return;
-    }
-    if (QFileInfo::exists(path))
+    if (!allowOverwrite && (QFileInfo::exists(path) || QFileInfo(path).isSymLink()))
         throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
-    QTemporaryFile temp(QFileInfo(path).absolutePath() + "/.simpleavshow-save-XXXXXX");
+    QTemporaryFile temp(QFileInfo(resolvedPath).absolutePath() + "/.simpleavshow-save-XXXXXX");
     temp.setAutoRemove(true);
     if (!temp.open()) throw std::runtime_error(temp.errorString().toStdString());
     if (temp.write(bytes) != bytes.size() || !temp.flush()) throw std::runtime_error(temp.errorString().toStdString());
     const QString tempPath = temp.fileName();
     temp.close();
+    QFile::setPermissions(tempPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadGroup | QFileDevice::ReadOther);
+    if (allowOverwrite) {
+        // Atomic rename replaces the target entry directly and never follows a symlink created after pre-checks.
+#ifdef Q_OS_WIN
+        const std::wstring srcW = tempPath.toStdWString();
+        const std::wstring dstW = resolvedPath.toStdWString();
+        if (!MoveFileExW(srcW.c_str(), dstW.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            throw std::runtime_error("Cannot save project file (Win32 error " + std::to_string(GetLastError()) + ")");
+        }
+#else
+        if (::rename(QFile::encodeName(tempPath).constData(), QFile::encodeName(resolvedPath).constData()) != 0) {
+            throw std::runtime_error(std::string("Cannot save project file: ") + std::strerror(errno));
+        }
+#endif
+        temp.setAutoRemove(false);
+        return;
+    }
 #ifdef Q_OS_WIN
     const std::wstring srcW = tempPath.toStdWString();
     const std::wstring dstW = path.toStdWString();

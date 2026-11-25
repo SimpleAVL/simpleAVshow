@@ -1720,6 +1720,11 @@ void McpServer::projectActionAsync(const QJsonObject& a, std::shared_ptr<std::at
                         {"revision", static_cast<double>(revision_)}}, true));
                     return;
                 }
+                if (QFileInfo(target).isSymLink()) {
+                    finish(toolResult({{"error", "Save cancelled because destination path became a symbolic link while staging"},
+                        {"revision", static_cast<double>(revision_)}}, true));
+                    return;
+                }
                 PublishedMediaRollback rollback;
                 try {
                     rollback = publishStagedProjectMedia(prep.candidate, stagingDir->path(), Controller::mediaDirectory(target), prep.staged);

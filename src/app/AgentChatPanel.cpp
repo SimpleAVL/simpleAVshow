@@ -315,11 +315,13 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         }
     });
     connect(undoButton_, &QPushButton::clicked, this, [this] {
-        if (!c_.canEdit() || c_.undoCount() == 0) return;
+        if (!c_.canEdit() || agentUndoCount_ <= 0 || c_.undoCount() == 0) return;
         const quint64 before = c_.projectRevision();
+        undoingAgent_ = true;
         c_.undo();
+        undoingAgent_ = false;
         if (c_.projectRevision() != before)
-            appendEntry({ChatEntry::Kind::System, {}, {}, {}, "Reverted last show edit (Undo).", {}, {}});
+            appendEntry({ChatEntry::Kind::System, {}, {}, {}, "Reverted last agent edit (Undo).", {}, {}});
         updateControls();
     });
     connect(allowEditing_, &QCheckBox::toggled, this, [this](bool on) {
@@ -447,11 +449,27 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
         updateControls();
     });
     connect(&mcp_, &McpServer::showModified, this, [this](const QString& summary) {
-        hasAgentEdit_ = true;
+        if (c_.undoCount() > 0 && lastUndoDelta_ >= 0) {
+            agentUndoCount_ = std::min(preChangeAgentUndoCount_ + 1, static_cast<int>(c_.undoCount()));
+            preChangeAgentUndoCount_ = agentUndoCount_;
+        } else {
+            agentUndoCount_ = 0;
+            preChangeAgentUndoCount_ = 0;
+        }
         appendEntry({ChatEntry::Kind::System, {}, {}, {}, summary, {}, {}});
         updateControls();
     });
     connect(&c_, &Controller::changed, this, [this] {
+        const int curUndo = static_cast<int>(c_.undoCount());
+        lastUndoDelta_ = curUndo - prevUndoCount_;
+        prevUndoCount_ = curUndo;
+        if (undoingAgent_) {
+            agentUndoCount_ = std::min(std::max(0, agentUndoCount_ - 1), curUndo);
+            preChangeAgentUndoCount_ = agentUndoCount_;
+        } else {
+            preChangeAgentUndoCount_ = agentUndoCount_;
+            agentUndoCount_ = 0;
+        }
         if (c_.showMode && permissionLayout_->count() > 0) {
             for (int i = 0; i < permissionLayout_->count(); ++i) {
                 if (auto* w = permissionLayout_->itemAt(i)->widget()) {
@@ -586,9 +604,9 @@ void AgentChatPanel::updateControls() {
         ? "Connect an agent (or start the local MCP server) before granting edits and controls."
         : "Allow the agent to edit this show, import/relink media, configure outputs and phone remote, save/open/export files, and run rehearsal playback. Project edits use Undo; Show mode stays operator-only.");
 
-    const bool canUndo = c_.undoCount() > 0;
-    undoButton_->setVisible(hasAgentEdit_ && canUndo);
-    undoButton_->setEnabled(editable && canUndo);
+    const bool canUndoAgent = agentUndoCount_ > 0 && c_.undoCount() > 0;
+    undoButton_->setVisible(canUndoAgent);
+    undoButton_->setEnabled(editable && canUndoAgent);
 
     promptInput_->setEnabled(ready || prompting);
     sendButton_->setEnabled(ready || prompting);
@@ -693,7 +711,8 @@ void AgentChatPanel::startNewSession() {
     clearPermissionCards();
     entries_.clear();
     sentContextPreamble_ = false;
-    hasAgentEdit_ = false;
+    agentUndoCount_ = 0;
+    preChangeAgentUndoCount_ = 0;
     if (!chatMcpToken_.isEmpty()) mcp_.revokeChatToken(chatMcpToken_);
     chatMcpToken_ = mcp_.issueChatToken();
     AcpMcpConfig mcpConfig{"simpleavshow", mcp_.endpoint(), chatMcpToken_, QCoreApplication::applicationFilePath()};

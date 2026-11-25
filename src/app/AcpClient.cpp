@@ -513,7 +513,7 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
     stderrDrainScheduled_ = false;
     agentName_.clear(); agentVersion_.clear(); sessionId_.clear(); lastError_.clear();
     agentSupportsHttpMcp_ = false; agentSupportsSessionClose_ = false; usedHttpMcp_ = false;
-    stdoutBuffer_.clear(); pending_.clear(); pendingPermissions_.clear();
+    stdoutBuffer_.clear(); stderrDecoder_.resetState(); pending_.clear(); pendingPermissions_.clear();
     knownToolCalls_.clear(); knownToolCallOrder_.clear(); knownToolCallsBytes_ = 0; hadToolCallEviction_ = false;
     nextId_ = 1;
 
@@ -602,7 +602,11 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
                 spawnedProcess->setReadChannel(QProcess::StandardError);
                 const QByteArray stderrTail = spawnedProcess->read(maxStderrTailBytes);
                 spawnedProcess->setReadChannel(QProcess::StandardOutput);
-                if (!stderrTail.isEmpty()) emit stderrReceived(QString::fromUtf8(stderrTail));
+                if (!stderrTail.isEmpty()) {
+                    const QString decoded = stderrDecoder_(stderrTail);
+                    if (!decoded.isEmpty()) emit stderrReceived(decoded);
+                }
+                stderrDecoder_.resetState();
                 const qint64 remainingBudget = std::max<qint64>(0, maxStdoutBufferBytes * 2 - stdoutBuffer_.size());
                 if (remainingBudget > 0) stdoutBuffer_.append(spawnedProcess->read(remainingBudget));
                 int drained = 0;
@@ -771,7 +775,10 @@ void AcpClient::handleStderr() {
     const QByteArray chunk = process_->read(maxStderrReadPerTurn);
     const bool hasMore = process_->bytesAvailable() > 0;
     process_->setReadChannel(QProcess::StandardOutput);
-    if (!chunk.isEmpty()) emit stderrReceived(QString::fromUtf8(chunk));
+    if (!chunk.isEmpty()) {
+        const QString decoded = stderrDecoder_(chunk);
+        if (!decoded.isEmpty()) emit stderrReceived(decoded);
+    }
     if (hasMore && !stderrDrainScheduled_) {
         stderrDrainScheduled_ = true;
         QTimer::singleShot(16, this, [this] {

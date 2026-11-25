@@ -3,6 +3,7 @@
 #include "app/MidiMessageEditor.h"
 #include <limits>
 #include <QApplication>
+#include <QAbstractItemView>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -11,6 +12,7 @@
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QTemporaryDir>
 #include <QFormLayout>
 #include <QFutureWatcher>
 #include <QGroupBox>
@@ -1312,38 +1314,72 @@ void MainWindow::save(bool as) {
     if (target.isEmpty()) return;
     if (!c_.canEdit() || c_.projectRevision() != initialRev) { c_.report("Save cancelled because the show changed."); return; }
     if (!target.endsWith(".savshow", Qt::CaseInsensitive)) target += ".savshow";
+    if (const QFileInfo ti(target); ti.isSymLink() && !ti.canonicalFilePath().isEmpty()) {
+        if (!ti.canonicalFilePath().endsWith(".savshow", Qt::CaseInsensitive)) {
+            c_.report("Save failed: Refusing to overwrite symlink target that is not a .savshow file");
+            QMessageBox::warning(this, "Could not save", "Refusing to overwrite symlink target that is not a .savshow file");
+            return;
+        }
+        target = ti.canonicalFilePath();
+    }
     if (!c_.savingCopiesMedia()) { c_.save(target); return; }
-    // Copying package media can take minutes; keep the GUI responsive and the project locked meanwhile.
+    // Copying package media can take minutes; stage into a temporary sibling directory first so
+    // a failed manifest write rolls back cleanly without leaving orphaned copies behind.
     const quint64 lease = c_.acquireBusy();
     if (!lease) { c_.report("Wait for the current file operation to finish"); return; }
+    const QString directory = Controller::mediaDirectory(target);
+    const QString stageParent = QDir(directory).exists() ? directory : QFileInfo(target).absolutePath();
+    auto stagingDir = std::make_shared<QTemporaryDir>(stageParent + "/.simpleavshow-save-XXXXXX");
+    if (!stagingDir->isValid()) {
+        c_.releaseBusy(lease);
+        c_.report("Save failed: Cannot create staging directory next to target file");
+        QMessageBox::warning(this, "Could not save", "Cannot create staging directory next to target file");
+        return;
+    }
     const quint64 expectedRev = initialRev;
     updatePlayback();
     PackageProgress progress("Copying media next to the show…", QString(), 0, 0, this);
     progress.setWindowTitle("Saving show"); progress.setWindowModality(Qt::WindowModal); progress.setMinimumDuration(0);
     progress.setAutoClose(false); progress.setAutoReset(false); progress.setCancelButton(nullptr);
-    QFutureWatcher<ProjectResult> watcher;
+    struct GuiSavePrep { Project candidate; StagedProjectMedia staged; QString error; };
+    QFutureWatcher<GuiSavePrep> watcher;
     QEventLoop loop;
     bool completed = false;
-    ProjectResult result;
-    connect(&watcher, &QFutureWatcher<ProjectResult>::finished, &loop, [&] {
+    GuiSavePrep result;
+    connect(&watcher, &QFutureWatcher<GuiSavePrep>::finished, &loop, [&] {
         result = watcher.result();
         completed = true;
         c_.releaseBusy(lease);
         progress.hide();
         loop.quit();
     });
-    const QString directory = Controller::mediaDirectory(target);
-    watcher.setFuture(QtConcurrent::run([candidate = c_.project, directory]() mutable {
-        ProjectResult res;
-        try { materializeProjectMedia(candidate, directory); res.project = std::move(candidate); }
-        catch (const std::exception& e) { res.error = QString::fromUtf8(e.what()); }
+    watcher.setFuture(QtConcurrent::run([candidate = c_.project, stagingDir, directory]() mutable {
+        GuiSavePrep res;
+        try {
+            res.staged = stageProjectMedia(candidate, stagingDir->path(), directory);
+            res.candidate = std::move(candidate);
+        } catch (const std::exception& e) { res.error = QString::fromUtf8(e.what()); }
         return res;
     }));
     progress.show();
     if (!completed) loop.exec();
     if (!result.error.isEmpty()) { c_.report("Save failed: " + result.error); QMessageBox::warning(this, "Could not save", result.error); refresh(); return; }
     if (!c_.canEdit() || c_.projectRevision() != expectedRev) { c_.report("Save cancelled because the show changed."); refresh(); return; }
-    c_.commitSave(std::move(result.project), target);
+    if (QFileInfo(target).isSymLink()) { c_.report("Save cancelled because destination became a symbolic link."); refresh(); return; }
+    PublishedMediaRollback rollback;
+    try {
+        rollback = publishStagedProjectMedia(result.candidate, stagingDir->path(), directory, result.staged);
+    } catch (const std::exception& e) {
+        c_.report("Save failed: " + QString::fromUtf8(e.what()));
+        QMessageBox::warning(this, "Could not save", QString::fromUtf8(e.what()));
+        refresh();
+        return;
+    }
+    if (!c_.commitSave(std::move(result.candidate), target)) {
+        rollback.rollback();
+        QMessageBox::warning(this, "Could not save", c_.status);
+        refresh();
+    }
 }
 void MainWindow::exportPackage() {
     if (!c_.canEdit()) return;
@@ -1472,8 +1508,10 @@ bool MainWindow::eventFilter(QObject* object, QEvent* event) {
         auto* le = qobject_cast<QLineEdit*>(w);
         auto* te = qobject_cast<QTextEdit*>(w);
         auto* pe = qobject_cast<QPlainTextEdit*>(w);
+        auto* cb = qobject_cast<QComboBox*>(w);
+        const bool activeCombo = cb && (cb->isEditable() || (cb->view() && cb->view()->isVisible()));
         return (le && !le->isReadOnly()) || (te && !te->isReadOnly()) ||
-            (pe && !pe->isReadOnly()) || qobject_cast<QAbstractSpinBox*>(w) || qobject_cast<QComboBox*>(w);
+            (pe && !pe->isReadOnly()) || qobject_cast<QAbstractSpinBox*>(w) || activeCombo;
     };
     QWidget* focusWidget = QApplication::focusWidget();
     // Check both the event target and current focus widget so keys ignored by an editable field

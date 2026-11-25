@@ -61,6 +61,8 @@ class AudioStorage {
 public:
     virtual ~AudioStorage() = default;
     virtual Frame length() const noexcept = 0;
+    // Optional opaque identity for identical immutable audio content across path rebinding.
+    virtual const void* contentIdentity() const noexcept { return nullptr; }
     // Worker-only: may perform disk I/O and throw on failure.
     virtual void read(Frame first, float* stereo, std::size_t count) const = 0;
 };
