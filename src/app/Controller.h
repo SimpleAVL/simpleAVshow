@@ -4,6 +4,7 @@
 #include "media/MidiOutput.h"
 #include <QObject>
 #include <QTimer>
+#include <QSet>
 #include <QSettings>
 #include <QElapsedTimer>
 #include <deque>
@@ -113,6 +114,8 @@ private:
     static void startMediaCheck(const std::shared_ptr<MediaCheck>& check, const QStringList& needed, bool wait);
     std::set<std::string> recovering_; // Reopened after their file came back; their last frame stands in.
     bool recoveringDrawn_ = false; // The last composed picture polled a recovering clip.
+    QSet<QString> missingSeen_; // Files seen missing since the open video readers started; kept through Stop All.
+    void promoteVideoWarning();
     std::map<std::string, QImage> clipFrames_; // Each video clip's last picture.
     std::map<std::string, QString> videoProblems_; // The warning each failed video clip reported.
     // Forgets what earlier checks found (another show, an edit, a stop) and any check still running.
