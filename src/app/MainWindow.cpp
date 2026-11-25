@@ -1434,13 +1434,15 @@ void MainWindow::openPath(const QString& rawPath, bool discardPreviousAutosave) 
         timeline_->selectedClip.clear(); timeline_->selectedMarker.clear(); timeline_->selectedTrack = 0;
         const bool markDirty = recovered || isProjectPackage(path);
         c_.replace(result.project, target, markDirty);
+        // Record every successful open, even when the path did not change (e.g. reopening after clearing the list).
+        if (!target.isEmpty()) addRecentProject(target);
+        else if (isProjectPackage(path)) addRecentProject(path);
         if (recovered && !sameFile(source, c_.autosavePath()))
             c_.setRecoveredAutosavePath(source);
         QTimer::singleShot(0, this, [this] { if (std::any_of(c_.project.assets.cbegin(), c_.project.assets.cend(), [](const MediaAsset& a) { return a.offline; })) relinkMedia(true); });
         if (recovered) {
             c_.report(target.isEmpty() ? "Recovered an unsaved show. Save it to keep it." : "Recovered autosave. Save to replace " + QFileInfo(target).fileName() + ".");
         } else if (isProjectPackage(path)) {
-            addRecentProject(path);
             c_.report("Opened package. Save this show to keep an editable copy, or use Export package to share it.");
         }
     });
