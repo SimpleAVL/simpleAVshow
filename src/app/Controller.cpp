@@ -831,9 +831,14 @@ bool Controller::prepareMidi() {
         report("MIDI output: " + midi.name());
         return true;
     }
-    report(error.contains("not found", Qt::CaseInsensitive)
-        ? ("MIDI destination “" + remembered + "” is missing. Plug it in, or choose another destination in Outputs.")
-        : error);
+    // Not found, or no MIDI system to look in (Linux without an ALSA sequencer): the destination is missing.
+    // Other failures (several ports with that name, a port that changed while opening) say what happened.
+    const bool ambiguous = error.startsWith("Multiple", Qt::CaseInsensitive);
+    if (!ambiguous && (error.contains("not found", Qt::CaseInsensitive) || !midi.hasPortByName(remembered))) {
+        const bool detail = !error.isEmpty() && !error.contains("not found", Qt::CaseInsensitive);
+        report("MIDI destination “" + remembered + "” is missing. Plug it in, or choose another destination in Outputs." +
+               (detail ? " (" + error + ")" : QString()));
+    } else report(error);
     return false;
 }
 bool Controller::prepareAudio() {
