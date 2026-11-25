@@ -44,8 +44,9 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
             const bool live = state == State::Playing || state == State::Held || transport.asyncVoices() || (state == State::Paused && pausedLive_);
             if (!busy && live) {
                 QStringList offline, needed; mediaToCheck(offline, needed);
-                checkMediaInBackground(needed);
+                // Read the finished check before starting the next, so no result goes unseen.
                 const auto missing = lastMissingMedia(offline, needed);
+                checkMediaInBackground(needed);
                 // Each file found again reopens its pictures (a reader that failed while it was gone stays
                 // failed), whatever else is still missing.
                 const QSet<QString> still(missing.cbegin(), missing.cend());
@@ -220,12 +221,21 @@ void Controller::toggle() {
         const bool live = state == State::Held || transport.asyncVoices() || (state == State::Paused && pausedLive_);
         const auto missing = live ? lastMissingMedia() : missingMedia();
         // A fresh start's own check is the latest: background checks continue from it.
-        if (!live) { resetMediaState(); const std::lock_guard lock(mediaCheck_->mutex); mediaCheck_->missing = missing; }
+        if (!live) {
+            resetMediaState(); { const std::lock_guard lock(mediaCheck_->mutex); mediaCheck_->missing = missing; }
+            // Pictures that failed while a file was gone open again now that it is back.
+            if (missing.isEmpty()) {
+                std::vector<std::string> failed(videoErrors_.begin(), videoErrors_.end());
+                for (const auto& [clip, reader] : videos_) if (!videoErrors_.contains(clip) && !reader->error().isEmpty()) failed.push_back(clip);
+                for (const auto& clip : failed) retireVideo(clip);
+                lastComposed_ = -1;
+            }
+        }
         if (!missing.isEmpty()) {
             report(mediaWarning(missing));
-            playbackProblem = warning = status;
+            // Tracked as the missing-media warning, so an edit, relink or stop that resolves it clears it.
+            playbackProblem = reportedProblem_ = warning = status;
             if (!live) return; // Only a live show continues past missing media (it warned above).
-            reportedProblem_ = status; // Cleared once a background check finds them.
         }
         if (needsMidi() && !prepareMidi()) { playbackProblem = midiProblem_ = status; if (!resuming) return; if (warning.isEmpty()) warning = status; }
         if (!prepareAudio()) { playbackProblem = status; return; }
