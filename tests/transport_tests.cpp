@@ -268,6 +268,31 @@ int main() {
             checkedRender(t, out.data(), 2048, 2); // Frames 10240-12287 straddle the 12000-frame grace.
             expect(t.audioGaps() == 1, "a gap past the grace counts even mid-callback");
         }},
+        {"under Freeze, cues and holds wait for their audio", [] {
+            auto storage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto p = show(false); p->duration = storage->length(); p->clips[0].duration = p->duration; p->clips[0].audio = diskAudio(storage);
+            const Frame cue = frames(30 * 3600), hold = frames(31 * 3600);
+            p->markers.push_back({"cue", "Cue", cue, false, MidiTiming::Arrival, {0x90, 60, 100}});
+            p->markers.push_back({"hold", "Hold", hold, true, MidiTiming::Resume, {0x90, 61, 100}});
+            Transport t; t.configure(p); std::vector<float> out(64 * 2); MidiEvent event;
+            storage->delay.store(60); // Every block read from here on is late.
+            t.command({Action::Seek, cue}); play(t);
+            checkedRender(t, out.data(), 16, 2);
+            expect(t.position() == cue && !t.takeMidi(event), "a cue at an uncached place waits with the audio");
+            for (int i = 0; i < 400 && t.position() == cue; ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); checkedRender(t, out.data(), 16, 2); }
+            int cues = 0; while (t.takeMidi(event)) cues += event.marker == 0;
+            expect(t.position() > cue && cues == 1, "the cue goes out once, with its first audio frame");
+            // Audio stops at a hold, so reaching one needs no audio; continuing from it does, and the hold's
+            // resume cue waits for that audio instead of going out while the show is still frozen.
+            t.command({Action::Seek, hold}); play(t);
+            checkedRender(t, out.data(), 16, 2);
+            expect(t.state() == State::Held && t.position() == hold, "the hold is taken at once");
+            play(t); checkedRender(t, out.data(), 16, 2);
+            expect(t.position() == hold && !t.takeMidi(event), "the resume cue waits while the audio after the hold loads");
+            for (int i = 0; i < 400 && t.position() == hold; ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); checkedRender(t, out.data(), 16, 2); }
+            int resumes = 0; while (t.takeMidi(event)) resumes += event.marker == 1;
+            expect(t.position() > hold && resumes == 1, "continuing sends the resume cue once");
+        }},
         {"revoked agent commands are dropped, applied ones are kept, and an emergency stop always lands", [] {
             auto p = show(false); p->duration = 2000;
             Transport t; t.configure(p); std::vector<float> out(64 * 2);

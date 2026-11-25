@@ -4,6 +4,8 @@
 #include <QJsonObject>
 #include <QStringList>
 #include <iostream>
+#include <thread>
+#include <chrono>
 #include <string>
 
 namespace {
@@ -38,6 +40,7 @@ int main(int argc, char** argv) {
     const bool largeToolOutput = args.contains("--large-tool-output");
     const bool configOptions = args.contains("--config-options");
     const bool echoPrompt = args.contains("--echo-prompt");
+    const bool slowConfig = args.contains("--slow-config"); // Answers setting changes late, so a prompt can overtake them.
     const bool rejectConfig = args.contains("--reject-config");
     const bool legacyModels = args.contains("--legacy-models");
     QString model = "m1", thinking = "low";
@@ -184,6 +187,7 @@ int main(int argc, char** argv) {
                 waitingCancel = false;
             }
         } else if (method == "session/set_config_option" || method == "session/set_model") {
+            if (slowConfig) std::this_thread::sleep_for(std::chrono::milliseconds(300));
             if (rejectConfig) {
                 send({{"jsonrpc", "2.0"}, {"id", id}, {"error", QJsonObject{{"code", -32602}, {"message", "Setting locked"}}}});
                 continue;

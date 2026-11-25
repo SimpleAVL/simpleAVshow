@@ -790,6 +790,19 @@ private slots:
         QCOMPARE(model->currentData().toString(), QString("m2"));
         connectButton->click();
         QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
+        // A prompt sent while the remembered settings are still being restored does not stop the restoring.
+        customCommand->setText(QString("\"%1\" --http-mcp --config-options --slow-config").arg(SAV_MOCK_ACP_AGENT));
+        connectButton->click();
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
+        QVERIFY(panel->acpClient().configChangePending()); // The model is on its way.
+        auto* promptInput = panel->findChild<QPlainTextEdit*>("agentPromptInput");
+        promptInput->setPlainText("Hello"); panel->findChild<QPushButton*>("agentSendButton")->click();
+        QCOMPARE(panel->acpClient().state(), AcpState::Prompting);
+        QTRY_COMPARE_WITH_TIMEOUT(thinking->currentData().toString(), QString("max"), 5000);
+        QCOMPARE(model->currentData().toString(), QString("m2"));
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Ready);
+        connectButton->click();
+        QTRY_COMPARE(panel->acpClient().state(), AcpState::Disconnected);
         // An agent without these settings shows no pickers.
         customCommand->setText(QString("\"%1\" --http-mcp").arg(SAV_MOCK_ACP_AGENT));
         connectButton->click();

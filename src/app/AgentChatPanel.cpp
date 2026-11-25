@@ -408,6 +408,8 @@ AgentChatPanel::AgentChatPanel(Controller& controller, McpServer& mcp, QWidget* 
 
     // ACP client signals
     connect(&acp_, &AcpClient::stateChanged, this, [this](AcpState st) {
+        // Restoring remembered settings pauses while a turn runs (changes are applied between turns); finish it after.
+        if (st == AcpState::Ready && !savedSettingsToApply_.isEmpty() && !acp_.configChangePending()) applyNextSavedSetting();
         if (st == AcpState::Disconnected || st == AcpState::Error) {
             clearPermissionCards();
             if (!connecting_ && !chatMcpToken_.isEmpty()) {

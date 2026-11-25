@@ -169,18 +169,17 @@ void Transport::apply(Command command) noexcept {
     case Action::Play:
         if (state_ == State::Playing || (position_ >= show_->duration && state_ != State::Held)) break;
         if (state_ == State::Held) {
-            // Only the consumed group at this hold can send resume messages.
+            // Only the consumed group at this hold can send resume messages. They go out with the first frame
+            // that renders, so under Freeze they never run ahead of audio that is still loading.
             auto begin = nextMarker_;
             while (begin > 0 && show_->markers[markers_[begin - 1]].time == position_) --begin;
-            for (auto m = begin; m < nextMarker_; ++m) {
-                const auto i = markers_[m]; const auto& marker = show_->markers[i];
-                if (marker.hold && marker.timing == MidiTiming::Resume) dispatch(static_cast<int>(i));
-            }
+            resumeBegin_ = begin; resumeEnd_ = nextMarker_;
         }
         state_ = State::Playing; heldMarker_ = -1;
         break;
     case Action::Pause:
         if (state_ == State::Playing) state_ = State::Paused;
+        sendResumeCues(); // Play left the hold; its cues still belong to that.
         break;
     case Action::Seek: {
         const Frame next = std::clamp(command.position, Frame{0}, show_->duration);
@@ -188,7 +187,7 @@ void Transport::apply(Command command) noexcept {
             if (!show_->clips[i].contains(next)) { cut(i); voices_[i] = {}; }
             else if (voices_[i].audible && next != position_ && !show_->tracks[show_->clips[i].track].async) cut(i); // A normal source jumps.
         }
-        position_ = next; heldMarker_ = -1; locate(next); sinceSeek_ = 0;
+        position_ = next; heldMarker_ = -1; locate(next); sinceSeek_ = 0; resumeBegin_ = resumeEnd_ = 0;
         if (state_ != State::Playing) state_ = State::Paused;
         epoch_.fetch_add(1);
         break;
@@ -198,7 +197,15 @@ void Transport::apply(Command command) noexcept {
         break;
     }
 }
+void Transport::sendResumeCues() noexcept {
+    for (auto m = resumeBegin_; m < resumeEnd_; ++m) {
+        const auto i = markers_[m]; const auto& marker = show_->markers[i];
+        if (marker.hold && marker.timing == MidiTiming::Resume) dispatch(static_cast<int>(i));
+    }
+    resumeBegin_ = resumeEnd_ = 0;
+}
 void Transport::applyStopAll() noexcept {
+    resumeBegin_ = resumeEnd_ = 0;
     for (std::size_t i = 0; i < voices_.size(); ++i) cut(i);
     std::fill(voices_.begin(), voices_.end(), Voice{}); state_ = State::Stopped; heldMarker_ = -1;
     epoch_.fetch_add(1); clipped_.store(false); prime();
@@ -236,18 +243,18 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
         if (!waiting) {
             const bool advancingAtBoundary = state_ == State::Playing;
             bool gapped = false; // This frame left a late voice silent.
+            // A hold here stops normal voices on this frame; its cues and the hold itself are taken below,
+            // once the frame can render, so a Freeze wait never sends cues ahead of their audio.
+            bool holdHere = false;
             if (state_ == State::Playing) {
                 while (nextStart_ < starts_.size() && show_->clips[starts_[nextStart_]].start <= position_) {
                     const auto i = starts_[nextStart_++];
                     if (show_->clips[i].contains(position_)) active_.push_back(i);
                 }
-                while (nextMarker_ < markers_.size() && show_->markers[markers_[nextMarker_]].time == position_) {
-                    const auto i = markers_[nextMarker_++]; const auto& marker = show_->markers[i];
-                    if (marker.timing == MidiTiming::Arrival) dispatch(static_cast<int>(i));
-                    if (marker.hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); }
-                    else if (marker.timing == MidiTiming::Resume) dispatch(static_cast<int>(i));
-                }
-                if (state_ == State::Playing && position_ >= show_->duration) {
+                for (auto m = nextMarker_; m < markers_.size() && show_->markers[markers_[m]].time == position_; ++m)
+                    holdHere = holdHere || show_->markers[markers_[m]].hold;
+                if (!holdHere && position_ >= show_->duration) {
+                    sendResumeCues(); // Resuming a final hold: nothing renders after it, but its cues still belong to it.
                     state_ = State::Ended; for (std::size_t i = 0; i < voices_.size(); ++i) cut(i);
                     std::fill(voices_.begin(), voices_.end(), Voice{}); active_.clear();
                 }
@@ -271,7 +278,7 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                     if (voice.state != VoiceState::Running) continue;
                     source = voice.source;
                 } else {
-                    if (state_ != State::Playing || !clip.contains(position_)) continue;
+                    if (state_ != State::Playing || holdHere || !clip.contains(position_)) continue;
                     source = clip.offset + position_ - clip.start;
                 }
                 const Frame length = sourceLength(clip);
@@ -300,6 +307,15 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             const bool counted = sinceSeek_ + static_cast<Frame>(f) >= seekGrace;
             if (!ready) { if (counted) bufferWaits_.fetch_add(1, std::memory_order_relaxed); waiting = true; }
             gapCounted = gapCounted || (gapped && counted);
+            if (!waiting && state_ == State::Playing) {
+                sendResumeCues();
+                while (nextMarker_ < markers_.size() && show_->markers[markers_[nextMarker_]].time == position_) {
+                    const auto i = markers_[nextMarker_++]; const auto& marker = show_->markers[i];
+                    if (marker.timing == MidiTiming::Arrival) dispatch(static_cast<int>(i));
+                    if (marker.hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); }
+                    else if (marker.timing == MidiTiming::Resume) dispatch(static_cast<int>(i));
+                }
+            }
             // Voices that stop sounding fade out. A miss fades every voice; normal voices fade back in once ready.
             for (const auto i : active_) if (waiting || !voices_[i].ready) cut(i);
             if (!waiting) for (const auto i : active_) {

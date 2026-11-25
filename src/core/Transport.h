@@ -110,6 +110,8 @@ private:
     std::atomic<bool> armed_{false};
     Queue<Command, 128> commands_;
     DynamicQueue<MidiEvent> midi_;
+    // Resume cues of a hold that Play released, sent with the first frame that actually renders.
+    std::size_t resumeBegin_ = 0, resumeEnd_ = 0;
     Frame position_ = 0, sinceSeek_ = seekGrace; // Device frames rendered since the last seek, up to seekGrace.
     State state_ = State::Stopped;
     int heldMarker_ = -1;
@@ -123,6 +125,7 @@ private:
     std::atomic<std::uint64_t> commandsApplied_{0};
     void apply(Command command) noexcept;
     void applyStopAll() noexcept;
+    void sendResumeCues() noexcept;
     void dispatch(int marker) noexcept;
     void publish(float peak) noexcept;
     void stopAudioWorker();
