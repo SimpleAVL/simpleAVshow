@@ -220,6 +220,8 @@ void Controller::toggle() {
         // cue. It warns with what the background check last found. Paused after Stop All or a seek is a
         // fresh start and checks.
         const bool live = state == State::Held || transport.asyncVoices() || (state == State::Paused && pausedLive_);
+        // A fresh start first takes in what the last background check confirmed missing.
+        if (!live) { const std::lock_guard lock(mediaCheck_->mutex); for (const auto& path : mediaCheck_->missing) missingSeen_.insert(path); }
         auto missing = live ? lastMissingMedia() : missingMedia();
         if (!live && !missingSeen_.isEmpty()) {
             // A file confirmed missing earlier counts as back only when a lookup confirms it; an inconclusive
