@@ -610,6 +610,7 @@ QImage Controller::compose() {
                             report("Video error in " + a.name + ": " + error + " The picture holds its last frame; audio continues.");
                             playbackProblem = videoProblems_[c.id] = status;
                         }
+                        if (!error.isEmpty()) recovering_.erase(c.id); // Failed again: no longer polled every frame.
                     }
                     if (!source.isNull()) {
                         clipFrames_[c.id] = source;
