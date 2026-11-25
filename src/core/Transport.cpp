@@ -399,7 +399,9 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
         }
         position_ = next; heldMarker_ = -1; locate(next);
         if (state_ != State::Playing) state_ = State::Paused;
-        epoch_.fetch_add(1);
+        // Operator seeks commit immediately; revocable agent seeks defer bumping the global MIDI
+        // epoch until the seek actually commits so a rolled-back seek never drops earlier Operator MIDI.
+        if (command.source == CommandSource::Operator) epoch_.fetch_add(1);
         if (pendingStart.seekRollbackCount > 0 && !isSourceValid(command.source, command.sourceEpoch))
             rollbackRevokedSeeks(pendingStart, false);
         break;
@@ -609,11 +611,13 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
         }
     }
     if (state_ != State::Playing) {
+        if (pendingStart.seekRollbackCount > 0) epoch_.fetch_add(1);
         pendingStart.active = false;
         pendingStart.wasHeld = false;
         pendingStart.seekCueActive = false;
         pendingStart.seekRollbackCount = 0;
     } else if (count == 0) {
+        if (pendingStart.seekRollbackCount > 0) epoch_.fetch_add(1);
         pendingStart.seekRollbackCount = 0;
     }
     float peak = 0; bool waiting = false;
@@ -771,36 +775,56 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                         heldMarker_ = savedBoundaryHeld;
                     }
                 } else {
-                    // Disk is ready and authorization is valid: now consume boundary markers and emit MIDI.
-                    while (nextMarker_ < markers_.size() && show_->markers[markers_[nextMarker_]].time == position_) {
-                        const auto i = markers_[nextMarker_++]; const auto& marker = show_->markers[i];
-                        if (marker.timing == MidiTiming::Arrival && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
-                        if (marker.hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); }
-                        else if (marker.timing == MidiTiming::Resume && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
-                    }
-                    if (f == 0 && pendingStart.active && pendingStart.source != CommandSource::Operator &&
-                        !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
-                        state_ = pendingStart.prevState;
-                        heldMarker_ = pendingStart.prevHeldMarker;
-                        pendingStart.active = false;
-                        pendingStart.wasHeld = false;
-                        pendingStart.seekCueActive = false;
-                        if (!rollbackRevokedSeeks(pendingStart, false)) {
+                    // Re-verify agent Seek and Play authorization immediately before committing
+                    // epoch_, consuming markers, or entering State::Held.
+                    auto checkCommitRevocation = [&]() noexcept -> bool {
+                        if (f != 0 || (pendingStart.seekRollbackCount == 0 && !pendingStart.active)) return false;
+                        bool revoked = false;
+                        bool seekRevoked = false;
+                        if (rollbackRevokedSeeks(pendingStart, true)) { revoked = true; seekRevoked = true; }
+                        if (pendingStart.active && pendingStart.source != CommandSource::Operator &&
+                            !isSourceValid(pendingStart.source, pendingStart.sourceEpoch)) {
+                            state_ = pendingStart.prevState;
+                            heldMarker_ = pendingStart.prevHeldMarker;
+                            pendingStart.active = false;
+                            pendingStart.wasHeld = false;
+                            pendingStart.seekCueActive = false;
+                            revoked = true;
+                        }
+                        if (rollbackRevokedSeeks(pendingStart, false)) { revoked = true; seekRevoked = true; }
+                        if (revoked && !seekRevoked) {
                             nextStart_ = savedNextStart;
                             nextMarker_ = savedNextMarker;
                             active_.resize(savedActiveSize);
                         }
+                        return revoked;
+                    };
+                    if (checkCommitRevocation()) {
                         rolledBackOnReady = true;
-                    } else if (willEnd && state_ == State::Playing) {
-                        state_ = State::Ended; for (std::size_t i = 0; i < voices_.size(); ++i) cut(i);
-                        std::fill(voices_.begin(), voices_.end(), Voice{}); active_.clear();
-                    } else if (hasExpired && state_ == State::Playing) {
-                        for (std::size_t cursor = 0; cursor < active_.size();) {
-                            const auto i = active_[cursor];
-                            if (!show_->clips[i].contains(position_)) {
-                                cut(i); voices_[i] = {}; active_[cursor] = active_.back(); active_.pop_back(); continue;
+                    } else {
+                        // Commit pending agent Seek epoch right before dispatching landing cues so
+                        // stale pre-seek MIDI cues are cancelled while landing cues get the new epoch.
+                        if (f == 0 && pendingStart.seekRollbackCount > 0) epoch_.fetch_add(1);
+                        // Disk is ready and authorization is valid: now consume boundary markers and emit MIDI.
+                        while (nextMarker_ < markers_.size() && show_->markers[markers_[nextMarker_]].time == position_) {
+                            const auto i = markers_[nextMarker_++]; const auto& marker = show_->markers[i];
+                            if (marker.timing == MidiTiming::Arrival && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
+                            if (marker.hold) { state_ = State::Held; heldMarker_ = static_cast<int>(i); }
+                            else if (marker.timing == MidiTiming::Resume && !suppressSeekCue) dispatch(static_cast<int>(i), cueSource, cueEpoch, cueSource2, cueEpoch2);
+                        }
+                        if (checkCommitRevocation()) {
+                            rolledBackOnReady = true;
+                        } else if (willEnd && state_ == State::Playing) {
+                            state_ = State::Ended; for (std::size_t i = 0; i < voices_.size(); ++i) cut(i);
+                            std::fill(voices_.begin(), voices_.end(), Voice{}); active_.clear();
+                        } else if (hasExpired && state_ == State::Playing) {
+                            for (std::size_t cursor = 0; cursor < active_.size();) {
+                                const auto i = active_[cursor];
+                                if (!show_->clips[i].contains(position_)) {
+                                    cut(i); voices_[i] = {}; active_[cursor] = active_.back(); active_.pop_back(); continue;
+                                }
+                                ++cursor;
                             }
-                            ++cursor;
                         }
                     }
                 }

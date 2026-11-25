@@ -33,6 +33,8 @@ int main(int argc, char** argv) {
     const bool summaryOnlyPermission = args.contains("--summary-only-permission");
     const bool diffPermission = args.contains("--diff-permission");
     const bool burstAndExit = args.contains("--burst-and-exit");
+    const bool closeNotFound = args.contains("--close-not-found");
+    const bool largeToolOutput = args.contains("--large-tool-output");
     if (args.contains("--exit-zero-on-start")) return 0;
 
     int sessionCounter = 0;
@@ -70,7 +72,9 @@ int main(int argc, char** argv) {
                 {"sessionUpdate", "tool_call_update"},
                 {"toolCallId", "tc-1"},
                 {"status", "completed"},
-                {"rawOutput", QJsonObject{{"mcpServers", lastMcpServers}}}
+                {"rawOutput", largeToolOutput
+                    ? QJsonObject{{"mcpServers", lastMcpServers}, {"image", QString(6 * 1024 * 1024, 'A')}}
+                    : QJsonObject{{"mcpServers", lastMcpServers}}}
             }}
         }}});
         send({{"jsonrpc", "2.0"}, {"method", "session/update"}, {"params", QJsonObject{
@@ -130,7 +134,11 @@ int main(int argc, char** argv) {
             send({{"jsonrpc", "2.0"}, {"id", id}, {"result", initResult}});
         } else if (method == "session/close") {
             lastClosedSession = params["sessionId"].toString();
-            send({{"jsonrpc", "2.0"}, {"id", id}, {"result", QJsonObject{}}});
+            if (closeNotFound) {
+                send({{"jsonrpc", "2.0"}, {"id", id}, {"error", QJsonObject{{"code", -32002}, {"message", "Session already closed"}}}});
+            } else {
+                send({{"jsonrpc", "2.0"}, {"id", id}, {"result", QJsonObject{}}});
+            }
         } else if (method == "session/new") {
             lastMcpServers = params["mcpServers"].toArray();
             const QString previousSession = pendingPromptSession;

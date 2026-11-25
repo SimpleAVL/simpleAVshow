@@ -614,7 +614,7 @@ void AcpClient::launchProcess(bool emitDisconnectedOnReset) {
             // clean agent exit after a burst >32 lines never drops the tail of a reply or prompt result.
             // Guard against handleLine() launching a replacement process (e.g. session/close fallback).
             if (process_ == spawnedProcess) {
-                constexpr qsizetype maxStdoutBufferBytes = 4 * 1024 * 1024;
+                constexpr qsizetype maxStdoutBufferBytes = 16 * 1024 * 1024;
                 constexpr qint64 maxStderrTailBytes = 64 * 1024;
                 constexpr int maxExitDrainLines = 2048;
                 spawnedProcess->setReadChannel(QProcess::StandardError);
@@ -814,7 +814,9 @@ void AcpClient::handleStderr() {
 
 void AcpClient::handleStdout() {
     if (!process_) return;
-    constexpr qsizetype maxStdoutBufferBytes = 4 * 1024 * 1024;
+    // Allow up to 16 MiB per JSON-RPC line so full-resolution 1280x1280 base64 PNG preview
+    // tool results echoed inside tool_call_update.rawOutput do not disconnect the ACP chat.
+    constexpr qsizetype maxStdoutBufferBytes = 16 * 1024 * 1024;
     constexpr qint64 maxReadPerTurn = 64 * 1024;
     constexpr int maxLinesPerTurn = 32;
     process_->setReadChannel(QProcess::StandardOutput);
@@ -829,12 +831,12 @@ void AcpClient::handleStdout() {
         const qsizetype newline = stdoutBuffer_.indexOf('\n');
         if (newline < 0) {
             if (stdoutBuffer_.size() > maxStdoutBufferBytes) {
-                failConnection("ACP agent output exceeded maximum line size (4 MiB).");
+                failConnection("ACP agent output exceeded maximum line size (16 MiB).");
             }
             break;
         }
         if (newline > maxStdoutBufferBytes) {
-            failConnection("ACP agent output exceeded maximum line size (4 MiB).");
+            failConnection("ACP agent output exceeded maximum line size (16 MiB).");
             break;
         }
         QByteArray line = stdoutBuffer_.left(newline);
@@ -923,6 +925,16 @@ void AcpClient::handleResponse(int id, const QJsonObject& msg) {
             return;
         }
         if (kind == PendingKind::SessionClose) {
+            // Per ACP session/close, -32002 (Resource not found) means the session is already closed
+            // and should proceed directly to session/new without restarting the agent process.
+            if (code == -32002) {
+                QJsonObject params{
+                    {"cwd", cwd_},
+                    {"mcpServers", buildMcpServers()}
+                };
+                sendRequest("session/new", params, PendingKind::SessionNew);
+                return;
+            }
             // Closing the previous session failed: restart the agent process so no orphaned session lingers.
             if (!program_.isEmpty()) launchProcess(false);
             else failConnection(errMessage);

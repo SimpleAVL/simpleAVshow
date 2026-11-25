@@ -804,7 +804,10 @@ void McpServer::renderPreviewAsync(const QJsonObject& arguments, std::shared_ptr
         maxWidth = v.toInt();
     }
     const int maxHeight = std::max(1, static_cast<int>(std::llround(static_cast<double>(maxWidth) * c_.project.height / std::max(1, c_.project.width))));
-    const QSize targetSize(maxWidth, maxHeight);
+    QSize targetSize(maxWidth, maxHeight);
+    if (targetSize.height() > 1280) {
+        targetSize = QSize(std::max(1, static_cast<int>(std::llround(1280.0 * c_.project.width / std::max(1, c_.project.height)))), 1280);
+    }
     const Project projectSnapshot = c_.project;
     const quint64 rev = revision_;
     const quint64 jobGen = generation_;

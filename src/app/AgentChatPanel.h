@@ -66,6 +66,7 @@ private:
     bool lastCanEdit_ = true;
     bool shuttingDown_ = false;
     bool renderPending_ = false;
+    bool entriesTrimmed_ = false;
     bool logsPending_ = false;
     QString pendingLogs_;
     QString chatMcpToken_;

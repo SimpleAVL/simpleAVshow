@@ -804,12 +804,16 @@ void AgentChatPanel::appendEntry(ChatEntry entry) {
     if (entry.text.size() > maxEntryChars) entry.text = entry.text.left(maxEntryChars) + "\n… [truncated]";
     if (entry.thought.size() > maxEntryChars) entry.thought = entry.thought.left(maxEntryChars) + "\n… [truncated]";
     entries_.push_back(std::move(entry));
-    if (entries_.size() > maxEntries) entries_.erase(entries_.begin(), entries_.begin() + static_cast<std::ptrdiff_t>(entries_.size() - maxEntries));
+    if (entries_.size() > maxEntries) {
+        entries_.erase(entries_.begin(), entries_.begin() + static_cast<std::ptrdiff_t>(entries_.size() - maxEntries));
+        entriesTrimmed_ = true;
+    }
     qsizetype totalChars = 0;
     for (const auto& e : entries_) totalChars += e.text.size() + e.thought.size();
     while (entries_.size() > 1 && totalChars > maxTotalChars) {
         totalChars -= entries_.front().text.size() + entries_.front().thought.size();
         entries_.erase(entries_.begin());
+        entriesTrimmed_ = true;
     }
     scheduleRender();
 }
@@ -858,8 +862,11 @@ void AgentChatPanel::renderTranscript() {
     auto* bar = transcript_->verticalScrollBar();
     const int prevScroll = bar ? bar->value() : 0;
     const bool stickToBottom = !bar || prevScroll >= bar->maximum() - 24;
+    const bool trimmed = entriesTrimmed_;
+    entriesTrimmed_ = false;
     const QTextCursor prevCursor = transcript_->textCursor();
     const bool hadSelection = prevCursor.hasSelection();
+    const QString prevSelected = hadSelection ? prevCursor.selectedText() : QString();
     const int prevAnchor = prevCursor.anchor();
     const int prevPos = prevCursor.position();
 
@@ -919,12 +926,14 @@ void AgentChatPanel::renderTranscript() {
     }
     html += "</body></html>";
     transcript_->setHtml(html);
-    if (hadSelection) {
+    if (hadSelection && !trimmed) {
         const int maxPos = std::max(0, transcript_->document()->characterCount() - 1);
         QTextCursor restored = transcript_->textCursor();
         restored.setPosition(std::clamp(prevAnchor, 0, maxPos));
         restored.setPosition(std::clamp(prevPos, 0, maxPos), QTextCursor::KeepAnchor);
-        transcript_->setTextCursor(restored);
+        // Only restore numeric offsets when they still point to the exact same selected text.
+        if (restored.selectedText() == prevSelected)
+            transcript_->setTextCursor(restored);
     }
     if (bar) bar->setValue(stickToBottom ? bar->maximum() : std::min(prevScroll, bar->maximum()));
 }

@@ -753,6 +753,30 @@ int main() {
                 "revoked chat seek emits Operator resume cue without replaying arrival cue");
             expect(rct.asyncVoices() == 1,
                 "running async voice remains active after revoked chat seek rollback");
+
+            // Round 30 High #1: A rolled-back chat seek during disk wait must NOT bump the global
+            // MIDI epoch, so an earlier queued Operator MIDI cue remains valid for the MIDI worker.
+            auto epStorage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto epp = show(false);
+            epp->duration = epStorage->length();
+            epp->clips[0].duration = epp->duration;
+            epp->clips[0].audio = diskAudio(epStorage);
+            epp->markers.push_back({"op-cue", "OpCue", 0, false, MidiTiming::Arrival, {0x90, 60, 100}});
+            Transport ept; ept.configure(epp);
+            play(ept);
+            checkedRender(ept, dout.data(), 8, 2); // Emits op-cue at epoch == ept.epoch().
+            MidiEvent opCueEv;
+            expect(ept.takeMidi(opCueEv) && opCueEv.epoch == ept.epoch(), "operator cue emitted at current epoch");
+            const auto opEpoch = opCueEv.epoch;
+            epStorage->fail.store(true);
+            ept.command({Action::Seek, farPos, CommandSource::ChatAgent, ept.chatAgentEpoch()});
+            checkedRender(ept, dout.data(), 64, 2); // Stalls on disk miss at farPos.
+            expect(ept.epoch() == opEpoch, "uncommitted stalled chat seek does not bump global MIDI epoch");
+            ept.invalidateChatAgentCommands();
+            epStorage->fail.store(false);
+            checkedRender(ept, dout.data(), 16, 2); // Rolls back chat seek.
+            expect(ept.epoch() == opEpoch && ept.position() < farPos,
+                "rolled-back chat seek preserves global MIDI epoch for queued operator cues");
         }}
     };
     for (const auto& [name, test] : tests) {

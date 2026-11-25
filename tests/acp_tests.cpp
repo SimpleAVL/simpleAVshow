@@ -1081,6 +1081,48 @@ private slots:
         auto* permScroll = chatPanel->findChild<QScrollArea*>("agentPermissionScroll");
         QVERIFY(permScroll);
         QVERIFY(permScroll->maximumHeight() > 0 && permScroll->maximumHeight() <= 240);
+
+        // A ~6 MiB JSON-RPC tool_call_update.rawOutput (e.g. 1280x1280 PNG preview) must NOT disconnect ACP chat.
+        AcpClient largeOutClient;
+        QString largeStop;
+        QObject::connect(&largeOutClient, &AcpClient::promptFinished, &largeOutClient, [&](const QString& r) { largeStop = r; });
+        largeOutClient.connectToAgent(QString::fromUtf8(SAV_MOCK_ACP_AGENT), {"--http-mcp", "--large-tool-output"},
+            QDir::tempPath(), {});
+        QTRY_COMPARE(largeOutClient.state(), AcpState::Ready);
+        largeOutClient.sendPrompt("render large preview");
+        QTRY_COMPARE_WITH_TIMEOUT(largeStop, QString("end_turn"), 5000);
+        QCOMPARE(largeOutClient.state(), AcpState::Ready);
+        largeOutClient.disconnectFromAgent();
+
+        // ACP session/close returning -32002 (already closed) must reuse the running process for session/new.
+        AcpClient closeNotFoundClient;
+        QString firstReply, secondReply;
+        int replyPhase = 0;
+        QObject::connect(&closeNotFoundClient, &AcpClient::messageChunk, &closeNotFoundClient, [&](const QString& c) {
+            if (replyPhase == 1) firstReply += c;
+            else if (replyPhase == 2) secondReply += c;
+        });
+        QString cnfStop;
+        QObject::connect(&closeNotFoundClient, &AcpClient::promptFinished, &closeNotFoundClient, [&](const QString& r) { cnfStop = r; });
+        closeNotFoundClient.connectToAgent(QString::fromUtf8(SAV_MOCK_ACP_AGENT), {"--http-mcp", "--close-not-found"},
+            QDir::tempPath(), {});
+        QTRY_COMPARE(closeNotFoundClient.state(), AcpState::Ready);
+        replyPhase = 1;
+        closeNotFoundClient.sendPrompt("first");
+        QTRY_COMPARE(cnfStop, QString("end_turn"));
+        const QRegularExpression pidRe("pid=(\\d+)");
+        const auto m1 = pidRe.match(firstReply);
+        QVERIFY(m1.hasMatch());
+        cnfStop.clear();
+        closeNotFoundClient.startNewSession(QDir::tempPath(), {});
+        QTRY_COMPARE(closeNotFoundClient.state(), AcpState::Ready);
+        replyPhase = 2;
+        closeNotFoundClient.sendPrompt("second");
+        QTRY_COMPARE(cnfStop, QString("end_turn"));
+        const auto m2 = pidRe.match(secondReply);
+        QVERIFY(m2.hasMatch());
+        QCOMPARE(m2.captured(1), m1.captured(1)); // Same PID: did not restart agent process on -32002.
+        closeNotFoundClient.disconnectFromAgent();
     }
 };
 
