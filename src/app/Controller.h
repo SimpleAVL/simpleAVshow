@@ -102,12 +102,18 @@ private:
     // Files the show needs that are offline, and those it needs present now (videos, streamed audio).
     void mediaToCheck(QStringList& offline, QStringList& needed) const;
     // Shared with the checking thread, which may outlive the controller.
-    struct MediaCheck { std::mutex mutex; QStringList missing; std::atomic<bool> running{false}; };
+    struct MediaCheck { std::mutex mutex; QStringList missing; bool running = false; }; // Both under mutex.
     std::shared_ptr<MediaCheck> mediaCheck_ = std::make_shared<MediaCheck>();
     QStringList missingNow_; // What the last media check during a show found missing.
     QString missingWarning_; // Its warning, kept with it.
     QStringList lastMissingMedia(const QStringList& offline, const QStringList& needed) const;
-    void checkMediaInBackground(const QStringList& needed, bool wait = false);
+    struct MediaCheck;
+    // Reads the latest result and, unless one is running, starts the next check, under one lock.
+    QStringList lastMissingMediaAndCheck(const QStringList& offline, const QStringList& needed);
+    static void startMediaCheck(const std::shared_ptr<MediaCheck>& check, const QStringList& needed, bool wait);
+    std::set<std::string> recovering_; // Reopened after their file came back; their last frame stands in.
+    std::map<std::string, QImage> clipFrames_; // Each video clip's last picture.
+    std::map<std::string, QString> videoProblems_; // The warning each failed video clip reported.
     // Forgets what earlier checks found (another show, an edit, a stop) and any check still running.
     void resetMediaState();
     QString reportedProblem_; // The missing-media warning last shown, cleared once the files are back.

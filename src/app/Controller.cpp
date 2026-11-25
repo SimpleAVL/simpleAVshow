@@ -44,9 +44,8 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
             const bool live = state == State::Playing || state == State::Held || transport.asyncVoices() || (state == State::Paused && pausedLive_);
             if (!busy && live) {
                 QStringList offline, needed; mediaToCheck(offline, needed);
-                // Read the finished check before starting the next, so no result goes unseen.
-                const auto missing = lastMissingMedia(offline, needed);
-                checkMediaInBackground(needed);
+                // The finished check is read and the next one reserved under one lock, so no result goes unseen.
+                const auto missing = lastMissingMediaAndCheck(offline, needed);
                 // Each file found again reopens its pictures (a reader that failed while it was gone stays
                 // failed), whatever else is still missing.
                 const QSet<QString> still(missing.cbegin(), missing.cend());
@@ -116,7 +115,7 @@ void Controller::replace(Project next, QString projectPath) {
     // Readers hold extracted package files open; Windows cannot remove them while open. The previous
     // project and its history (which may own an extraction) outlive re-arming, which releases the
     // transport's streamed decoders, and are destroyed at the end of this function.
-    videos_.clear(); lastPicture_ = {};
+    videos_.clear(); clipFrames_.clear(); recovering_.clear(); videoProblems_.clear(); lastPicture_ = {};
     auto retired = std::move(project); auto retiredUndo = std::move(undo_), retiredRedo = std::move(redo_);
     project = std::move(next); path = std::move(projectPath); dirty = false; playbackProblem.clear();
     undo_.clear(); redo_.clear();
@@ -155,7 +154,7 @@ void Controller::armOrThrow(Frame position) {
     // The callback must be stopped before configure; a healthy stream only pauses.
     const bool keep = configured_ && device.running();
     if (keep) device.pause(); else device.close();
-    videos_.clear(); videoErrors_.clear(); lastPicture_ = {}; lastComposed_ = -1; lateFrames = 0;
+    videos_.clear(); videoErrors_.clear(); clipFrames_.clear(); recovering_.clear(); videoProblems_.clear(); lastPicture_ = {}; lastComposed_ = -1; lateFrames = 0;
     auto armed = std::make_shared<Show>(project.show);
     for (auto& clip : armed->clips) {
         if (!armed->tracks[clip.track].visual) continue;
@@ -399,10 +398,11 @@ QString Controller::missingMediaWarning() const { return missingWarning_; }
 void Controller::resetMediaState() {
     mediaCheck_ = std::make_shared<MediaCheck>(); // A check still running finishes into the old state, unread.
     if (!reportedProblem_.isEmpty() && playbackProblem == reportedProblem_) playbackProblem.clear();
+    if (!reportedProblem_.isEmpty() && status == reportedProblem_) report(QString()); // Not left on screen either.
     missingNow_.clear(); missingWarning_.clear(); reportedProblem_.clear(); wasHeld_ = false;
 }
 void Controller::retireVideo(const std::string& clip) {
-    videoErrors_.erase(clip);
+    videoErrors_.erase(clip); recovering_.insert(clip); // Its last frame stands in until the new reader has one.
     const auto it = videos_.find(clip); if (it == videos_.end()) return;
     // Its worker may still be blocked reading a share; joining it here would freeze the controls.
     auto holder = std::make_shared<std::unique_ptr<VideoReader>>(std::move(it->second)); videos_.erase(it);
@@ -416,12 +416,29 @@ QStringList Controller::lastMissingMedia(const QStringList& offline, const QStri
     for (const auto& path : needed) if (found.contains(path)) missing << path;
     return missing;
 }
-void Controller::checkMediaInBackground(bool wait) {
-    QStringList offline, needed; mediaToCheck(offline, needed); checkMediaInBackground(needed, wait);
+QStringList Controller::lastMissingMediaAndCheck(const QStringList& offline, const QStringList& needed) {
+    const auto check = mediaCheck_; QSet<QString> found; bool start = false;
+    {
+        const std::lock_guard lock(check->mutex);
+        found = QSet<QString>(check->missing.cbegin(), check->missing.cend());
+        if (!check->running) start = check->running = true;
+    }
+    QStringList missing = offline;
+    for (const auto& path : needed) if (found.contains(path)) missing << path;
+    if (start) startMediaCheck(check, needed, false);
+    return missing;
 }
-void Controller::checkMediaInBackground(const QStringList& needed, bool wait) {
+void Controller::checkMediaInBackground(bool wait) {
+    QStringList offline, needed; mediaToCheck(offline, needed);
     const auto check = mediaCheck_;
-    while (check->running.exchange(true)) { if (!wait) return; std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+    for (;;) {
+        { const std::lock_guard lock(check->mutex); if (!check->running) { check->running = true; break; } }
+        if (!wait) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    startMediaCheck(check, needed, wait);
+}
+void Controller::startMediaCheck(const std::shared_ptr<MediaCheck>& check, const QStringList& needed, bool wait) {
     // Lookups can stall on a share, so they run on a thread of their own, never the show's controls.
     auto run = [check, needed] {
         QStringList missing; QSet<QString> before;
@@ -433,10 +450,9 @@ void Controller::checkMediaInBackground(const QStringList& needed, bool wait) {
                 if (here ? !*here : before.contains(path)) missing << path;
             }
         } catch (...) { missing = QStringList(before.cbegin(), before.cend()); }
-        { const std::lock_guard lock(check->mutex); check->missing = missing; }
-        check->running = false;
+        const std::lock_guard lock(check->mutex); check->missing = missing; check->running = false;
     };
-    if (!wait) try { std::thread(run).detach(); return; } catch (...) { check->running = false; return; }
+    if (!wait) try { std::thread(run).detach(); return; } catch (...) { const std::lock_guard lock(check->mutex); check->running = false; return; }
     run();
 }
 void Controller::watchMidi() {
@@ -529,6 +545,8 @@ QImage Controller::compose() {
         if (!needed.contains(it->first)) { videoErrors_.erase(it->first); it = videos_.erase(it); }
         else ++it;
     }
+    std::erase_if(clipFrames_, [&](const auto& entry) { return !needed.contains(entry.first); });
+    std::erase_if(recovering_, [&](const std::string& clip) { return !needed.contains(clip); });
     for (const auto& clip : project.show.clips) {
         if (!needed.contains(clip.id)) continue;
         const auto asset = project.assets.constFind(QString::fromStdString(clip.assetId));
@@ -589,10 +607,20 @@ QImage Controller::compose() {
                         if (!error.isEmpty() && !videoErrors_.contains(c.id)) {
                             videoErrors_.insert(c.id);
                             report("Video error in " + a.name + ": " + error + " The picture holds its last frame; audio continues.");
-                            playbackProblem = status;
+                            playbackProblem = videoProblems_[c.id] = status;
                         }
                     }
-                    if (source.isNull()) waiting = true;
+                    if (!source.isNull()) {
+                        clipFrames_[c.id] = source;
+                        // A reopened reader that delivers a picture resolves its own warning, not a newer problem.
+                        if (recovering_.erase(c.id) && it != videos_.end() && it->second->error().isEmpty()) {
+                            const auto problem = videoProblems_.find(c.id);
+                            if (problem != videoProblems_.end()) { if (playbackProblem == problem->second) playbackProblem.clear(); videoProblems_.erase(problem); }
+                        }
+                    } else if (recovering_.contains(c.id)) {
+                        // While a reopened reader starts, this layer keeps its last frame and the others go on.
+                        if (const auto held = clipFrames_.find(c.id); held != clipFrames_.end()) source = held->second;
+                    } else waiting = true;
                 }
                 if (!source.isNull()) {
                     const QSizeF fitted = QSizeF(source.size()).scaled(bounds.size(), Qt::KeepAspectRatio);
