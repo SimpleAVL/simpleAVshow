@@ -699,7 +699,7 @@ QImage Controller::compose() {
     }
     painter.end();
     if (waiting) {
-        ++lateFrames;
+        ++lateFrames; lastComposed_ = -1; // An unfinished picture is never reused for this frame.
         if (!lastPicture_.isNull()) return lastPicture_;
         return picture;
     }
