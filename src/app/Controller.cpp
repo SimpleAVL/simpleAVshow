@@ -43,12 +43,19 @@ Controller::Controller(QObject* parent) : QObject(parent), project(newProject())
                 checkMediaInBackground();
                 const bool held = transport.state() == State::Held;
                 const auto missing = lastMissingMedia();
-                if (held && !missing.isEmpty() && (missing != reportedMissing_ || !wasHeld_)) {
-                    // Each hold says it again, and so does a change while held.
+                if (held && !missing.isEmpty() && (missing != reportedMissing_ || !wasHeld_ || playbackProblem.isEmpty())) {
+                    // Each hold says it again, and so does a change while held or another problem clearing
+                    // (a MIDI reconnect) while these files are still missing.
                     report(QString("%1 media file%2 missing: %3. Relink it from File, or remove its clips.").arg(missing.size()).arg(missing.size() == 1 ? " is" : "s are", missing.join(", ")));
                     playbackProblem = reportedProblem_ = status; reportedMissing_ = missing;
                 } else if (missing.isEmpty() && !reportedMissing_.isEmpty()) {
                     // A completed check found the files again, held or not; the warning goes if it is still on screen.
+                    // Pictures that failed to open while their file was gone open again on the next frame.
+                    for (const auto& clip : project.show.clips) {
+                        const auto asset = project.assets.constFind(QString::fromStdString(clip.assetId));
+                        if (asset != project.assets.cend() && reportedMissing_.contains(asset->path)) { videos_.erase(clip.id); videoErrors_.erase(clip.id); }
+                    }
+                    lastComposed_ = -1;
                     if (playbackProblem == reportedProblem_) { playbackProblem.clear(); report("Missing media is back online."); }
                     reportedMissing_.clear(); reportedProblem_.clear();
                 }
