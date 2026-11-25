@@ -514,77 +514,93 @@ void writeProject(const Project& p, const QString& path, bool allowOverwrite) {
     const bool hadExistingTarget = allowOverwrite && existingTarget.exists();
     if (hadExistingTarget && !existingTarget.isWritable())
         throw std::runtime_error("Destination file is read-only");
-    QTemporaryFile temp(QFileInfo(resolvedPath).absolutePath() + "/.simpleavshow-save-XXXXXX");
-    temp.setAutoRemove(true);
-    if (!temp.open()) throw std::runtime_error(temp.errorString().toStdString());
-    if (temp.write(bytes) != bytes.size() || !temp.flush()) throw std::runtime_error(temp.errorString().toStdString());
-    // Sync file data to durable storage before atomic rename so a power cut cannot leave an empty manifest.
-    if (const int fd = temp.handle(); fd >= 0) {
+    // The manifest is written to a sibling file that is closed before it is renamed into place: Windows
+    // refuses to rename a file that is still open, and an unrenamed temporary is removed on any failure.
+    struct TemporaryName {
+        QString path;
+        bool keep = false;
+        ~TemporaryName() { if (!keep && !path.isEmpty()) QFile::remove(path); }
+    } temp{QFileInfo(resolvedPath).absolutePath() + "/.simpleavshow-save-" + QUuid::createUuid().toString(QUuid::Id128) + ".tmp"};
+    {
+        QFile file(temp.path);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::NewOnly)) { temp.path.clear(); throw std::runtime_error(file.errorString().toStdString()); }
+        if (file.write(bytes) != bytes.size() || !file.flush()) throw std::runtime_error(file.errorString().toStdString());
+        // Sync file data to durable storage before the rename so a power cut cannot leave an empty manifest.
+        if (const int fd = file.handle(); fd >= 0) {
 #ifdef Q_OS_WIN
-        if (HANDLE h = reinterpret_cast<HANDLE>(_get_osfhandle(fd)); h != INVALID_HANDLE_VALUE) {
-            if (!FlushFileBuffers(h))
-                throw std::runtime_error("Cannot sync project file to disk (Win32 error " + std::to_string(GetLastError()) + ")");
-        }
+            if (HANDLE h = reinterpret_cast<HANDLE>(_get_osfhandle(fd)); h != INVALID_HANDLE_VALUE) {
+                if (!FlushFileBuffers(h))
+                    throw std::runtime_error("Cannot sync project file to disk (Win32 error " + std::to_string(GetLastError()) + ")");
+            }
 #elif defined(Q_OS_MACOS)
-        if (::fcntl(fd, F_FULLFSYNC) != 0 && ::fsync(fd) != 0)
-            throw std::runtime_error(std::string("Cannot sync project file to disk: ") + std::strerror(errno));
+            if (::fcntl(fd, F_FULLFSYNC) != 0 && ::fsync(fd) != 0)
+                throw std::runtime_error(std::string("Cannot sync project file to disk: ") + std::strerror(errno));
 #else
-        if (::fsync(fd) != 0)
-            throw std::runtime_error(std::string("Cannot sync project file to disk: ") + std::strerror(errno));
+            if (::fsync(fd) != 0)
+                throw std::runtime_error(std::string("Cannot sync project file to disk: ") + std::strerror(errno));
 #endif
+        }
+        file.close();
+        if (file.error() != QFileDevice::NoError) throw std::runtime_error(file.errorString().toStdString());
     }
-    const QString tempPath = temp.fileName();
-    temp.close();
+    const QString& tempPath = temp.path;
     if (hadExistingTarget) {
         // Preserve existing file permissions rather than widening private manifests (e.g. 0600 -> 0644).
         QFile::setPermissions(tempPath, existingTarget.permissions());
     }
+#ifdef Q_OS_WIN
+    // A scanner or indexer briefly opening the new file makes the rename fail with a sharing violation; retry.
+    const auto move = [&](const QString& to, DWORD flags) -> DWORD {
+        const std::wstring srcW = QDir::toNativeSeparators(tempPath).toStdWString();
+        const std::wstring dstW = QDir::toNativeSeparators(to).toStdWString();
+        for (int attempt = 0;; ++attempt) {
+            if (MoveFileExW(srcW.c_str(), dstW.c_str(), flags)) return ERROR_SUCCESS;
+            const DWORD err = GetLastError();
+            if ((err != ERROR_SHARING_VIOLATION && err != ERROR_LOCK_VIOLATION && err != ERROR_ACCESS_DENIED) || attempt >= 40) return err;
+            Sleep(50);
+        }
+    };
+#endif
     if (allowOverwrite) {
         // Atomic rename replaces the target entry directly and never follows a symlink created after pre-checks.
 #ifdef Q_OS_WIN
-        const std::wstring srcW = tempPath.toStdWString();
-        const std::wstring dstW = resolvedPath.toStdWString();
-        if (!MoveFileExW(srcW.c_str(), dstW.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-            throw std::runtime_error("Cannot save project file (Win32 error " + std::to_string(GetLastError()) + ")");
-        }
+        if (const DWORD err = move(resolvedPath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH); err != ERROR_SUCCESS)
+            throw std::runtime_error("Cannot save project file (Win32 error " + std::to_string(err) + ")");
 #else
         if (::rename(QFile::encodeName(tempPath).constData(), QFile::encodeName(resolvedPath).constData()) != 0) {
             throw std::runtime_error(std::string("Cannot save project file: ") + std::strerror(errno));
         }
 #endif
-        temp.setAutoRemove(false);
+        temp.keep = true;
         return;
     }
 #ifdef Q_OS_WIN
-    const std::wstring srcW = tempPath.toStdWString();
-    const std::wstring dstW = path.toStdWString();
-    if (!MoveFileExW(srcW.c_str(), dstW.c_str(), MOVEFILE_WRITE_THROUGH)) {
-        const DWORD err = GetLastError();
+    if (const DWORD err = move(path, MOVEFILE_WRITE_THROUGH); err != ERROR_SUCCESS) {
         if (err == ERROR_ALREADY_EXISTS || err == ERROR_FILE_EXISTS)
             throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
         throw std::runtime_error("Cannot save project file (Win32 error " + std::to_string(err) + ")");
     }
-    temp.setAutoRemove(false);
+    temp.keep = true;
 #else
     const QByteArray src = QFile::encodeName(tempPath);
     const QByteArray dst = QFile::encodeName(path);
 #ifdef Q_OS_MACOS
     if (::renamex_np(src.constData(), dst.constData(), RENAME_EXCL) == 0) {
-        temp.setAutoRemove(false);
+        temp.keep = true;
         return;
     }
     if (errno == EEXIST)
         throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
 #elif defined(Q_OS_LINUX) && defined(SYS_renameat2) && defined(RENAME_NOREPLACE)
     if (::syscall(SYS_renameat2, AT_FDCWD, src.constData(), AT_FDCWD, dst.constData(), RENAME_NOREPLACE) == 0) {
-        temp.setAutoRemove(false);
+        temp.keep = true;
         return;
     }
     if (errno == EEXIST)
         throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
 #endif
     if (::link(src.constData(), dst.constData()) == 0) {
-        return; // temp auto-removes its temporary directory entry while dst keeps the linked inode.
+        return; // The temporary name is removed while dst keeps the linked inode.
     }
     if (errno == EEXIST)
         throw std::runtime_error("Destination file already exists; pass overwrite: true to replace it");
