@@ -276,6 +276,11 @@ void Controller::toggle() {
     }
     const bool sent = transport.command({playing ? Action::Pause : Action::Play});
     if (sent) pausedLive_ = playing;
+    if (sent && warning.isEmpty() && !playing) {
+        // A video that still cannot play keeps its warning: Play resolves what it checked, not that.
+        promoteVideoWarning();
+        if (!playbackProblem.isEmpty()) warning = playbackProblem;
+    }
     if (!sent) report("Transport command queue is full");
     else if (!warning.isEmpty()) { report(warning); playbackProblem = warning; }
     else if (recovering) report("Playback resumed."); // Replaces the resolved problem in the status bar.
