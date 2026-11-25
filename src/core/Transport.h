@@ -136,6 +136,8 @@ private:
         Frame seekPrevPos = 0;
         State seekPrevState = State::Stopped;
         int seekPrevHeldMarker = -1;
+        State seekSavedPlayPrevState = State::Stopped;
+        int seekSavedPlayPrevHeld = -1;
     };
     PendingPlayStart pendingStart_;
     void apply(Command command, PendingPlayStart& pendingStart) noexcept;

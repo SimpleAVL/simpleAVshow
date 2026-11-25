@@ -32,6 +32,14 @@ void writeError(const QJsonValue& id, int code, const QString& message) {
         {"error", QJsonObject{{"code", code}, {"message", message}}}};
     writeLine(QJsonDocument(payload).toJson(QJsonDocument::Compact));
 }
+bool isValidRequestId(const QJsonValue& id) {
+    if (id.isString()) return true;
+    if (!id.isDouble()) return false;
+    const QVariant var = id.toVariant();
+    if (var.typeId() == QMetaType::LongLong || var.typeId() == QMetaType::ULongLong) return true;
+    const double d = id.toDouble();
+    return std::isfinite(d) && std::floor(d) == d && d >= -9007199254740992.0 && d <= 9007199254740992.0;
+}
 QString requestIdKey(const QJsonValue& id) {
     if (id.isString()) return "s:" + id.toString();
     if (id.isDouble()) {
@@ -39,7 +47,8 @@ QString requestIdKey(const QJsonValue& id) {
         if (var.typeId() == QMetaType::LongLong) return "i:" + QString::number(var.toLongLong());
         if (var.typeId() == QMetaType::ULongLong) return "u:" + QString::number(var.toULongLong());
         const double d = id.toDouble();
-        if (std::isfinite(d) && std::floor(d) == d) return "i:" + QString::number(static_cast<qint64>(d));
+        if (std::isfinite(d) && std::floor(d) == d && d >= -9007199254740992.0 && d <= 9007199254740992.0)
+            return "i:" + QString::number(static_cast<qint64>(d));
     }
     return {};
 }
@@ -377,8 +386,8 @@ int runMcpProxy(int argc, char** argv, const QString& endpointUrl) {
             sendRequest(trimmed, msgObj, QJsonValue(QJsonValue::Undefined), {}, false);
             return;
         }
-        // Per MCP 2025-11-25 JSON-RPC schema, request IDs must be string or number (never null).
-        const bool validRequestId = !hasId || rawId.isString() || rawId.isDouble();
+        // Per MCP 2025-11-25 JSON-RPC schema, request IDs must be string or representable integer (never null).
+        const bool validRequestId = !hasId || isValidRequestId(rawId);
         const QJsonValue methodVal = msgObj.value("method");
         if (msgObj["jsonrpc"].toString() != "2.0" || !methodVal.isString() || methodVal.toString().isEmpty() || !validRequestId) {
             writeError(validRequestId && hasId ? rawId : QJsonValue(QJsonValue::Null), -32600, "Invalid Request");

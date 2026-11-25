@@ -1142,6 +1142,13 @@ void AcpClient::handleAgentRequest(const QJsonValue& id, const QString& method, 
                 .arg(clamp(resolvedTitle, 128)));
             return;
         }
+        if (fullDetail.isEmpty()) {
+            // Never offer Allow for a title-only or opaque permission request that provides no operation details.
+            sendResponse(id, {{"outcome", QJsonObject{{"outcome", "cancelled"}}}});
+            emit stderrReceived(QString("Auto-cancelled permission request “%1” because no operation arguments or content details were provided.\n")
+                .arg(clamp(resolvedTitle, 128)));
+            return;
+        }
         AcpPermissionRequest request;
         request.requestKey = nextPermissionKey_++;
         request.toolCallId = clamp(rawToolCallId, 128);

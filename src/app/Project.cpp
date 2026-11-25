@@ -19,6 +19,7 @@
 #include <limits>
 #include <stdexcept>
 #ifdef Q_OS_WIN
+#include <io.h>
 #include <windows.h>
 #else
 #include <fcntl.h>
@@ -440,6 +441,21 @@ void writeProject(const Project& p, const QString& path, bool allowOverwrite) {
     temp.setAutoRemove(true);
     if (!temp.open()) throw std::runtime_error(temp.errorString().toStdString());
     if (temp.write(bytes) != bytes.size() || !temp.flush()) throw std::runtime_error(temp.errorString().toStdString());
+    // Sync file data to durable storage before atomic rename so a power cut cannot leave an empty manifest.
+    if (const int fd = temp.handle(); fd >= 0) {
+#ifdef Q_OS_WIN
+        if (HANDLE h = reinterpret_cast<HANDLE>(_get_osfhandle(fd)); h != INVALID_HANDLE_VALUE) {
+            if (!FlushFileBuffers(h))
+                throw std::runtime_error("Cannot sync project file to disk (Win32 error " + std::to_string(GetLastError()) + ")");
+        }
+#elif defined(Q_OS_MACOS)
+        if (::fcntl(fd, F_FULLFSYNC) != 0 && ::fsync(fd) != 0)
+            throw std::runtime_error(std::string("Cannot sync project file to disk: ") + std::strerror(errno));
+#else
+        if (::fsync(fd) != 0)
+            throw std::runtime_error(std::string("Cannot sync project file to disk: ") + std::strerror(errno));
+#endif
+    }
     const QString tempPath = temp.fileName();
     temp.close();
     if (hadExistingTarget) {

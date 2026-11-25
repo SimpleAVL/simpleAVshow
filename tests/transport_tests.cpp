@@ -606,6 +606,26 @@ int main() {
             std::fill(fout.begin(), fout.end(), 1.f);
             checkedRender(ft, fout.data(), 16, 2);
             near(fout[0], 0.0, "forceStopAll clears release tails before stream reopen");
+            // Same-batch chat Play followed by chat Seek to an uncached frame, revoked during disk wait,
+            // must roll back BOTH Seek and Play to Stopped at frame 0 without firing arrival MIDI.
+            auto psStorage = std::make_shared<PatternStorage>(frames(48 * 3600));
+            auto psp = show(false); psp->duration = psStorage->length(); psp->clips[0].duration = psp->duration; psp->clips[0].audio = diskAudio(psStorage);
+            psp->markers.push_back({"zero", "Zero", 0, false, MidiTiming::Arrival, {0x90, 60, 100}});
+            Transport pst; pst.configure(psp);
+            psStorage->fail.store(true);
+            const auto psEp = pst.chatAgentEpoch();
+            pst.command({Action::Play, 0, CommandSource::ChatAgent, psEp});
+            pst.command({Action::Seek, farPos, CommandSource::ChatAgent, psEp});
+            checkedRender(pst, dout.data(), 64, 2); // Stalls on disk miss at farPos.
+            pst.invalidateChatAgentCommands();
+            psStorage->fail.store(false);
+            for (int i = 0; i < 100; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                checkedRender(pst, dout.data(), 8, 2);
+            }
+            MidiEvent psEv;
+            expect(pst.state() == State::Stopped && pst.position() == 0 && !pst.takeMidi(psEv),
+                "revoked chat play+seek during disk stall rolls back to Stopped at 0 with no MIDI");
         }}
     };
     for (const auto& [name, test] : tests) {

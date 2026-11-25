@@ -115,6 +115,28 @@ bool sameLocalPath(const QString& a, const QString& b) {
     return QDir::cleanPath(ia.absoluteFilePath()) == QDir::cleanPath(ib.absoluteFilePath());
 }
 
+bool isValidJsonRpcId(const QJsonValue& v) {
+    if (v.isString()) return true;
+    if (!v.isDouble()) return false;
+    const QVariant var = v.toVariant();
+    if (var.typeId() == QMetaType::LongLong || var.typeId() == QMetaType::ULongLong) return true;
+    const double d = v.toDouble();
+    return std::isfinite(d) && std::floor(d) == d && d >= -9007199254740992.0 && d <= 9007199254740992.0;
+}
+
+QString jsonRpcIdKey(const QJsonValue& v) {
+    if (v.isString()) return "s:" + v.toString();
+    if (v.isDouble()) {
+        const QVariant var = v.toVariant();
+        if (var.typeId() == QMetaType::LongLong) return "i:" + QString::number(var.toLongLong());
+        if (var.typeId() == QMetaType::ULongLong) return "u:" + QString::number(var.toULongLong());
+        const double d = v.toDouble();
+        if (std::isfinite(d) && std::floor(d) == d && d >= -9007199254740992.0 && d <= 9007199254740992.0)
+            return "i:" + QString::number(static_cast<qint64>(d));
+    }
+    return {};
+}
+
 struct DocChapter {
     const char* topic;
     const char* resource;
@@ -2062,32 +2084,13 @@ void McpServer::dispatch(const QJsonObject& request, const QString& bearerToken,
                          std::shared_ptr<std::atomic<bool>> cancelled,
                          std::function<void()> abortConnection,
                          std::function<void(QJsonObject, QByteArray)> finish) {
-    auto isValidJsonRpcId = [](const QJsonValue& v) -> bool {
-        if (v.isString()) return true;
-        if (!v.isDouble()) return false;
-        const QVariant var = v.toVariant();
-        if (var.typeId() == QMetaType::LongLong || var.typeId() == QMetaType::ULongLong) return true;
-        const double d = v.toDouble();
-        return std::isfinite(d) && std::floor(d) == d;
-    };
-    auto idKeyOf = [](const QJsonValue& v) -> QString {
-        if (v.isString()) return "s:" + v.toString();
-        if (v.isDouble()) {
-            const QVariant var = v.toVariant();
-            if (var.typeId() == QMetaType::LongLong) return "i:" + QString::number(var.toLongLong());
-            if (var.typeId() == QMetaType::ULongLong) return "u:" + QString::number(var.toULongLong());
-            const double d = v.toDouble();
-            if (std::isfinite(d) && std::floor(d) == d) return "i:" + QString::number(static_cast<qint64>(d));
-        }
-        return {};
-    };
     const auto id = request["id"];
     auto error = [&](int code, const QString& message) {
         finish(QJsonObject{{"jsonrpc", "2.0"}, {"id", id.isUndefined() ? QJsonValue(QJsonValue::Null) : id}, {"error", QJsonObject{{"code", code}, {"message", message}}}}, {});
     };
     const bool hasMethod = request.contains("method");
     const bool isClientResponse = request["jsonrpc"] == "2.0" && !hasMethod &&
-        !id.isUndefined() && (id.isString() || id.isDouble() || id.isNull()) &&
+        !id.isUndefined() && (isValidJsonRpcId(id) || id.isNull()) &&
         (request.contains("result") != request.contains("error"));
     if (isClientResponse) {
         // Per MCP Streamable HTTP 2025-11-25, accepted JSON-RPC client responses receive HTTP 202 with empty body.
@@ -2100,7 +2103,7 @@ void McpServer::dispatch(const QJsonObject& request, const QString& bearerToken,
     const auto method = request["method"].toString(); const auto params = request["params"].toObject();
     if (id.isUndefined()) {
         if (method == "notifications/cancelled" && !clientScope.isEmpty()) {
-            const QString idPart = idKeyOf(params.value("requestId"));
+            const QString idPart = jsonRpcIdKey(params.value("requestId"));
             if (!idPart.isEmpty()) {
                 const QString scopedKey = clientScope + "|" + idPart;
                 if (auto it = inflightRequests_.find(scopedKey); it != inflightRequests_.end()) {
@@ -2115,7 +2118,7 @@ void McpServer::dispatch(const QJsonObject& request, const QString& bearerToken,
         finish({}, {});
         return; // Notifications never produce JSON-RPC responses.
     }
-    const QString idPart = idKeyOf(id);
+    const QString idPart = jsonRpcIdKey(id);
     const QString scopedKey = (!clientScope.isEmpty() && !idPart.isEmpty()) ? (clientScope + "|" + idPart) : QString();
     if (!scopedKey.isEmpty() && inflightRequests_.contains(scopedKey)) {
         error(-32600, "Duplicate in-flight request ID");
@@ -2304,8 +2307,7 @@ void McpServer::acceptConnection() {
                 }
             }
             if (!clientScope.isEmpty() && reqObj.contains("method") && !reqId.isUndefined()) {
-                const QString idPart = reqId.isString() ? ("s:" + reqId.toString())
-                    : (reqId.isDouble() && std::floor(reqId.toDouble()) == reqId.toDouble() ? ("n:" + QString::number(reqId.toDouble(), 'f', 0)) : QString());
+                const QString idPart = jsonRpcIdKey(reqId);
                 if (!idPart.isEmpty()) *trackedKey = clientScope + "|" + idPart;
             }
             auto abortConnection = [respond, reqId] {

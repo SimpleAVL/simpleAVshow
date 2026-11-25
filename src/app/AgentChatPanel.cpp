@@ -953,8 +953,6 @@ void AgentChatPanel::addPermissionCard(const AcpPermissionRequest& request) {
         }
     }
 
-    auto* buttons = new QHBoxLayout;
-    buttons->setSpacing(6);
     auto resolve = [this, card, key = request.requestKey, title = request.title](const QString& optionId, const QString& label) {
         acp_.respondPermission(key, optionId);
         permissionLayout_->removeWidget(card);
@@ -962,18 +960,44 @@ void AgentChatPanel::addPermissionCard(const AcpPermissionRequest& request) {
         appendEntry({ChatEntry::Kind::System, {}, {}, {}, QString("Permission for “%1”: %2.").arg(title, label), {}, {}});
         if (permissionLayout_->count() == 0) permissionBox_->hide();
     };
-    for (const auto& opt : request.options) {
-        auto* btn = compactButton(opt.name, buttons);
+    bool stackOptions = request.options.size() > 2;
+    for (const auto& opt : request.options) if (opt.name.size() > 18) stackOptions = true;
+    auto makeOptionButton = [&](const AcpPermissionOption& opt, QLayout* targetLayout) {
+        auto* btn = compactButton(opt.name, targetLayout);
+        btn->setMinimumWidth(0);
+        btn->setSizePolicy(stackOptions ? QSizePolicy::Expanding : QSizePolicy::Preferred, QSizePolicy::Fixed);
+        btn->setToolTip(opt.name);
+        if (stackOptions) {
+            const QString elided = QFontMetrics(btn->font()).elidedText(opt.name, Qt::ElideRight, 260);
+            btn->setText(elided);
+        }
         btn->setProperty("optionId", opt.optionId);
         if (opt.kind.startsWith("allow")) btn->setObjectName("primary");
         else if (opt.kind.startsWith("reject")) btn->setObjectName("danger");
         connect(btn, &QPushButton::clicked, this, [resolve, id = opt.optionId, name = opt.name] { resolve(id, name); });
+    };
+    if (stackOptions) {
+        // Stack many or long option labels vertically with elision so Cancel and chat controls stay on-screen.
+        auto* optionsCol = new QVBoxLayout;
+        optionsCol->setSpacing(4);
+        for (const auto& opt : request.options) makeOptionButton(opt, optionsCol);
+        auto* cancelRow = new QHBoxLayout;
+        auto* cancelBtn = compactButton("Cancel", cancelRow);
+        cancelBtn->setObjectName("permissionCancelButton");
+        connect(cancelBtn, &QPushButton::clicked, this, [resolve] { resolve({}, "Cancelled"); });
+        cancelRow->addStretch();
+        optionsCol->addLayout(cancelRow);
+        layout->addLayout(optionsCol);
+    } else {
+        auto* buttons = new QHBoxLayout;
+        buttons->setSpacing(6);
+        for (const auto& opt : request.options) makeOptionButton(opt, buttons);
+        auto* cancelBtn = compactButton("Cancel", buttons);
+        cancelBtn->setObjectName("permissionCancelButton");
+        connect(cancelBtn, &QPushButton::clicked, this, [resolve] { resolve({}, "Cancelled"); });
+        buttons->addStretch();
+        layout->addLayout(buttons);
     }
-    auto* cancelBtn = compactButton("Cancel", buttons);
-    cancelBtn->setObjectName("permissionCancelButton");
-    connect(cancelBtn, &QPushButton::clicked, this, [resolve] { resolve({}, "Cancelled"); });
-    buttons->addStretch();
-    layout->addLayout(buttons);
 
     permissionLayout_->addWidget(card);
     permissionBox_->show();

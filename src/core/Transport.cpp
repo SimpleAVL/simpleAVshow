@@ -217,21 +217,23 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
         // and its initiating source/epoch when Play preceded Seek in the same batch so a queued
         // Seek cannot bypass the first-sample Play authorization check.
         pendingStart.wasHeld = false;
-        if (pendingStart.active) {
-            pendingStart.prevState = State::Paused;
-            pendingStart.prevHeldMarker = -1;
-        }
         if (command.source != CommandSource::Operator) {
             if (!pendingStart.seekRollbackActive) {
                 pendingStart.seekPrevPos = position_;
                 pendingStart.seekPrevState = state_;
                 pendingStart.seekPrevHeldMarker = heldMarker_;
+                pendingStart.seekSavedPlayPrevState = pendingStart.prevState;
+                pendingStart.seekSavedPlayPrevHeld = pendingStart.prevHeldMarker;
             }
             pendingStart.seekRollbackActive = true;
             pendingStart.seekRollbackSource = command.source;
             pendingStart.seekRollbackEpoch = command.sourceEpoch;
         } else {
             pendingStart.seekRollbackActive = false;
+        }
+        if (pendingStart.active) {
+            pendingStart.prevState = State::Paused;
+            pendingStart.prevHeldMarker = -1;
         }
         // Only tag seekCue when seeking while already Playing: a Seek while Stopped/Paused never
         // fires MIDI on its own, and any subsequent Play establishes its own authorization epoch.
@@ -254,6 +256,10 @@ void Transport::apply(Command command, PendingPlayStart& pendingStart) noexcept 
             position_ = pendingStart.seekPrevPos;
             state_ = pendingStart.seekPrevState;
             heldMarker_ = pendingStart.seekPrevHeldMarker;
+            if (pendingStart.active) {
+                pendingStart.prevState = pendingStart.seekSavedPlayPrevState;
+                pendingStart.prevHeldMarker = pendingStart.seekSavedPlayPrevHeld;
+            }
             locate(position_);
             pendingStart.seekRollbackActive = false;
             pendingStart.seekCueActive = false;
@@ -399,6 +405,25 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             apply(c, pendingStart);
         }
     }
+    // Roll back any revoked agent Seek FIRST (LIFO order relative to a preceding Play in the same
+    // batch) so Seek's pre-seek Playing snapshot can never overwrite a subsequent Play rollback.
+    if (pendingStart.seekRollbackActive) {
+        if (urgentStop_.load(std::memory_order_acquire)) {
+            applyUrgentStop(countQueued);
+            pendingStart = {};
+        } else if (!isSourceValid(pendingStart.seekRollbackSource, pendingStart.seekRollbackEpoch)) {
+            position_ = pendingStart.seekPrevPos;
+            state_ = pendingStart.seekPrevState;
+            heldMarker_ = pendingStart.seekPrevHeldMarker;
+            if (pendingStart.active) {
+                pendingStart.prevState = pendingStart.seekSavedPlayPrevState;
+                pendingStart.prevHeldMarker = pendingStart.seekSavedPlayPrevHeld;
+            }
+            locate(position_);
+            pendingStart.seekRollbackActive = false;
+            pendingStart.seekCueActive = false;
+        }
+    }
     // Verify the initiating Play/resume source right at the first-sample rendering boundary (and on
     // zero-frame renders) so callback preemption before sample 0 cannot start audio or fire
     // arrival/resume cues after Disconnect, New, or Show-mode entry.
@@ -445,19 +470,6 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
             }
         }
     }
-    if (pendingStart.seekRollbackActive) {
-        if (urgentStop_.load(std::memory_order_acquire)) {
-            applyUrgentStop(countQueued);
-            pendingStart = {};
-        } else if (!isSourceValid(pendingStart.seekRollbackSource, pendingStart.seekRollbackEpoch)) {
-            position_ = pendingStart.seekPrevPos;
-            state_ = pendingStart.seekPrevState;
-            heldMarker_ = pendingStart.seekPrevHeldMarker;
-            locate(position_);
-            pendingStart.seekRollbackActive = false;
-            pendingStart.seekCueActive = false;
-        }
-    }
     if (state_ != State::Playing) {
         pendingStart.active = false;
         pendingStart.wasHeld = false;
@@ -476,6 +488,10 @@ void Transport::render(float* output, unsigned count, unsigned channels) noexcep
                 position_ = pendingStart.seekPrevPos;
                 state_ = pendingStart.seekPrevState;
                 heldMarker_ = pendingStart.seekPrevHeldMarker;
+                if (pendingStart.active) {
+                    pendingStart.prevState = pendingStart.seekSavedPlayPrevState;
+                    pendingStart.prevHeldMarker = pendingStart.seekSavedPlayPrevHeld;
+                }
                 locate(position_);
                 pendingStart.seekRollbackActive = false;
                 pendingStart.seekCueActive = false;
